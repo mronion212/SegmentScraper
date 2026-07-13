@@ -1,0 +1,22 @@
+{
+  "name": "segmentscraper",
+  "version": "1.0.0",
+  "description": "Extracts and organizes intro, recap, and outro segments from streaming services.",
+  "main": "index.js",
+  "scripts": {
+    "build": "node build/bundler.js",
+    "dev": "node build/bundler.js && cat SegmentScraper.user.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mronion212/SegmentScraper.git"
+  },
+  "keywords": [],
+  "author": "mronion212",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/mronion212/SegmentScraper/issues"
+  },
+  "homepage": "https://github.com/mronion212/SegmentScraper#readme"
+}

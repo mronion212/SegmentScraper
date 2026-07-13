@@ -1,0 +1,13 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# API keys and secrets
+*.key
+*.secret
+
+# Legacy/temporary files
+NetflixSegmentScraper
+*.user.js.bak
+*.user.js.orig
