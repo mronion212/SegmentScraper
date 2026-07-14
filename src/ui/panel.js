@@ -37,7 +37,7 @@ export function createPanel() {
   const panel = document.createElement('div');
   panel.id = 'nfe-panel';
   panel.style.cssText = `
-    position:fixed; z-index:2147483647; width:308px;
+    position:fixed; z-index:2147483647; width:308px; max-width:calc(100vw - 40px);
     background:${colors.background}; border:1px solid ${colors.border}; border-radius:12px;
     padding:16px; color:${colors.text}; font-family:-apple-system,Arial,sans-serif;
     font-size:13px; box-shadow:0 16px 48px rgba(0,0,0,0.85);
@@ -217,22 +217,12 @@ export function createPanel() {
 }
 
 /**
- * Position the panel relative to the trigger button
+ * Keep the panel inside the lower-right viewport corner.
  */
 export function positionPanel(panel) {
-  const btn = document.getElementById('nfe-btn');
-  if (!btn) { 
-    panel.style.left = '50%'; 
-    panel.style.bottom = '85px'; 
-    panel.style.transform = 'translateX(-50%)'; 
-    return; 
-  }
-  const r = btn.getBoundingClientRect();
-  const W = 308;
-  let left = r.left + r.width / 2 - W / 2;
-  left = Math.max(8, Math.min(left, window.innerWidth - W - 8));
-  panel.style.left = `${left}px`;
-  panel.style.bottom = `${window.innerHeight - r.top + 10}px`;
+  panel.style.right = '20px';
+  panel.style.bottom = '20px';
+  panel.style.left = 'auto';
   panel.style.transform = 'none';
 }
 
