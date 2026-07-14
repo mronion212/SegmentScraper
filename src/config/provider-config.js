@@ -35,6 +35,7 @@ export const PROVIDER_CONFIGS = {
       icon: '🎬',
       title: 'Timestamps Extractor',
     },
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
   disneyplus: {
     name: 'Disney+',
@@ -55,6 +56,7 @@ export const PROVIDER_CONFIGS = {
       icon: '🏰',
       title: 'Timestamps Extractor',
     },
+    captureHint: 'Browse seasons and episodes to capture available timestamps.',
   },
   amazon: {
     name: 'Prime Video',
@@ -75,6 +77,7 @@ export const PROVIDER_CONFIGS = {
       icon: '📺',
       title: 'Timestamps Extractor',
     },
+    captureHint: 'Browse seasons and episodes to capture available timestamps.',
   },
   hbo: {
     name: 'HBO Max',
@@ -95,6 +98,28 @@ export const PROVIDER_CONFIGS = {
       icon: '🎭',
       title: 'Timestamps Extractor',
     },
+    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+  },
+  videoland: {
+    name: 'Videoland',
+    match: 'https://www.videoland.com/*',
+    colors: {
+      primary: '#f15a24',
+      primaryDark: '#c9481a',
+      secondary: '#d84d1d',
+      secondaryDark: '#ad3d17',
+      background: 'rgba(18,18,18,0.98)',
+      panelBg: '#242424',
+      border: '#3a3a3a',
+      text: '#fff',
+      textSecondary: '#999',
+      textMuted: '#666',
+    },
+    branding: {
+      icon: '📺',
+      title: 'Timestamps Extractor',
+    },
+    captureHint: 'Browse seasons and episodes to capture available timestamps.',
   },
 };
 

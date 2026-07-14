@@ -46,7 +46,7 @@ export function createPanel() {
 
   panel.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <span style="font-size:13px;font-weight:700;color:${colors.primary}">${branding.icon} ${branding.title}</span>
+      <span style="font-size:13px;font-weight:700;color:${colors.primary}">${branding.icon} ${config.name} ${branding.title}</span>
       <button id="nfe-close" style="background:none;border:none;color:${colors.textMuted};font-size:18px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s"
         onmouseenter="this.style.color='${colors.text}'" onmouseleave="this.style.color='${colors.textMuted}'">✕</button>
     </div>
@@ -54,8 +54,7 @@ export function createPanel() {
     <div id="nfe-title-display" style="color:${colors.textSecondary};font-size:11px;margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:13px"></div>
 
     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
-      <div style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:5px">IMDB ID</div>
-      <div id="nfe-imdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:7px;line-height:1.4">${state.dbStatusMsg}</div>
+      <div id="nfe-imdb-status" style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">IMDb ID: ${state.imdbId || 'Not set'}</div>
       <div style="display:flex;gap:4px">
         <input id="nfe-imdb-input" type="text" placeholder="ID (e.g. tt123456)..." value="${state.imdbId}"
           style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
@@ -75,20 +74,26 @@ export function createPanel() {
     <div style="display:flex;gap:6px;margin-bottom:8px">
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
         <div id="nfe-cnt-ts"    style="font-size:20px;font-weight:700;color:#fff;line-height:1">0</div>
-        <div style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Timestamps</div>
+        <div id="nfe-cnt-segments-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Segments</div>
       </div>
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
         <div id="nfe-cnt-req"   style="font-size:20px;font-weight:700;color:#fff;line-height:1">0</div>
-        <div style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Responses</div>
+        <div id="nfe-cnt-series-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Series</div>
       </div>
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
         <div id="nfe-cnt-files" style="font-size:20px;font-weight:700;color:${colors.primary};line-height:1">0</div>
-        <div style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Files</div>
+        <div id="nfe-cnt-files-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Files</div>
       </div>
     </div>
 
+    <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
+      <div style="flex:1;height:1px;background:${colors.border}"></div>
+      <span style="font-size:10px;color:${colors.textMuted};font-weight:600;letter-spacing:0.5px">MANUAL / BULK UPLOAD</span>
+      <div style="flex:1;height:1px;background:${colors.border}"></div>
+    </div>
+
     <div style="border-left:2px solid ${colors.primary};padding:6px 9px;margin-bottom:8px;font-size:11px;color:${colors.textMuted};line-height:1.4;background:${colors.panelBg};border-radius:0 7px 7px 0">
-      Browse through seasons to capture all episodes.
+      ${config.captureHint}
     </div>
 
     <button id="nfe-export"
@@ -119,7 +124,7 @@ export function createPanel() {
        </div>
      </div>
 
-     <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};min-height:13px;margin-bottom:6px;line-height:1.4;text-align:center"></div>
+     <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved' : ''}</div>
 
      <button id="nfe-submit"
        style="width:100%;background:${colors.secondary};border:none;border-radius:8px;color:#fff;
@@ -130,7 +135,7 @@ export function createPanel() {
      </button>
 
     <button id="nfe-clear"
-      style="width:100%;background:transparent;border:1px solid #222;border-radius:8px;
+      style="width:100%;margin-top:12px;background:transparent;border:1px solid #222;border-radius:8px;
              color:${colors.textMuted};padding:7px;cursor:pointer;font-size:12px;transition:all 0.15s"
       onmouseenter="this.style.borderColor='#444';this.style.color='#888'"
       onmouseleave="this.style.borderColor='#222';this.style.color='${colors.textMuted}'">
@@ -282,9 +287,11 @@ export function updateCounters() {
   const $ = id => document.getElementById(id);
   const ts = $('nfe-cnt-ts');
   if (ts) ts.textContent = state.allItems.length;
+  const segmentsLabel = $('nfe-cnt-segments-label');
+  if (segmentsLabel) segmentsLabel.textContent = state.allItems.length === 1 ? 'Segment' : 'Segments';
   
   const rq = $('nfe-cnt-req');
-  if (rq) rq.textContent = state.interceptedCount;
+  if (rq) rq.textContent = state.showIds.size;
   
   const fl = $('nfe-cnt-files');
   if (fl) {
@@ -298,6 +305,8 @@ export function updateCounters() {
       fileTotal += Math.max(Math.ceil(count / 100), state.allItems.length ? 1 : 0);
     }
     fl.textContent = fileTotal;
+    const filesLabel = $('nfe-cnt-files-label');
+    if (filesLabel) filesLabel.textContent = fileTotal === 1 ? 'File' : 'Files';
   }
 }
 

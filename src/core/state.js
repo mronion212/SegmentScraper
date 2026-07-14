@@ -34,6 +34,7 @@ export const createState = (providerName) => ({
   showTitle: '',
   showId: null,
   showYear: '',
+  showIds: new Set(),
   interceptedCount: 0,
   panelVisible: false,
   submitInProgress: false,

@@ -59,6 +59,7 @@ const createState = (providerName) => ({
   showTitle: '',
   showId: null,
   showYear: '',
+  showIds: new Set(),
   interceptedCount: 0,
   panelVisible: false,
   submitInProgress: false,
@@ -372,6 +373,35 @@ async function submitSegment(item, apiKey) {
   }
 }
 
+/**
+ * Look up the display title for a known IMDb title ID.
+ */
+async function lookupImdbTitle(imdbId) {
+  const url = `https://v3.sg.media-imdb.com/suggestion/x/${encodeURIComponent(imdbId)}.json`;
+  const gmXhr = getGmXhr();
+
+  try {
+    const responseText = gmXhr
+      ? await new Promise((resolve, reject) => {
+          gmXhr({
+            method: 'GET',
+            url,
+            timeout: 10000,
+            headers: { Accept: 'application/json' },
+            onload: response => resolve(response.responseText),
+            onerror: reject,
+            ontimeout: reject,
+          });
+        })
+      : await fetch(url).then(response => response.text());
+    const result = (JSON.parse(responseText).d || []).find(item => item.id === imdbId);
+    return result ? { success: true, title: result.l, year: result.y } : { success: false };
+  } catch (_) {
+    return { success: false };
+  }
+}
+
+
   // ─── config/provider-config.js ───
 
 /**
@@ -411,6 +441,7 @@ const PROVIDER_CONFIGS = {
       icon: '🎬',
       title: 'Timestamps Extractor',
     },
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
   disneyplus: {
     name: 'Disney+',
@@ -431,6 +462,7 @@ const PROVIDER_CONFIGS = {
       icon: '🏰',
       title: 'Timestamps Extractor',
     },
+    captureHint: 'Browse seasons and episodes to capture available timestamps.',
   },
   amazon: {
     name: 'Prime Video',
@@ -451,6 +483,7 @@ const PROVIDER_CONFIGS = {
       icon: '📺',
       title: 'Timestamps Extractor',
     },
+    captureHint: 'Browse seasons and episodes to capture available timestamps.',
   },
   hbo: {
     name: 'HBO Max',
@@ -471,6 +504,28 @@ const PROVIDER_CONFIGS = {
       icon: '🎭',
       title: 'Timestamps Extractor',
     },
+    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+  },
+  videoland: {
+    name: 'Videoland',
+    match: 'https://www.videoland.com/*',
+    colors: {
+      primary: '#f15a24',
+      primaryDark: '#c9481a',
+      secondary: '#d84d1d',
+      secondaryDark: '#ad3d17',
+      background: 'rgba(18,18,18,0.98)',
+      panelBg: '#242424',
+      border: '#3a3a3a',
+      text: '#fff',
+      textSecondary: '#999',
+      textMuted: '#666',
+    },
+    branding: {
+      icon: '📺',
+      title: 'Timestamps Extractor',
+    },
+    captureHint: 'Browse seasons and episodes to capture available timestamps.',
   },
 };
 
@@ -490,6 +545,7 @@ function getProviderConfig(providerName) {
 function getProviderNames() {
   return Object.keys(PROVIDER_CONFIGS);
 }
+
 
   // ─── normalization/segment-mapper.js ───
 
@@ -641,7 +697,7 @@ function createPanel() {
 
   panel.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <span style="font-size:13px;font-weight:700;color:${colors.primary}">${branding.icon} ${branding.title}</span>
+      <span style="font-size:13px;font-weight:700;color:${colors.primary}">${branding.icon} ${config.name} ${branding.title}</span>
       <button id="nfe-close" style="background:none;border:none;color:${colors.textMuted};font-size:18px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s"
         onmouseenter="this.style.color='${colors.text}'" onmouseleave="this.style.color='${colors.textMuted}'">✕</button>
     </div>
@@ -649,8 +705,7 @@ function createPanel() {
     <div id="nfe-title-display" style="color:${colors.textSecondary};font-size:11px;margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:13px"></div>
 
     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
-      <div style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:5px">IMDB ID</div>
-      <div id="nfe-imdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:7px;line-height:1.4">${state.dbStatusMsg}</div>
+      <div id="nfe-imdb-status" style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">IMDb ID: ${state.imdbId || 'Not set'}</div>
       <div style="display:flex;gap:4px">
         <input id="nfe-imdb-input" type="text" placeholder="ID (e.g. tt123456)..." value="${state.imdbId}"
           style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
@@ -670,20 +725,26 @@ function createPanel() {
     <div style="display:flex;gap:6px;margin-bottom:8px">
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
         <div id="nfe-cnt-ts"    style="font-size:20px;font-weight:700;color:#fff;line-height:1">0</div>
-        <div style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Timestamps</div>
+        <div id="nfe-cnt-segments-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Segments</div>
       </div>
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
         <div id="nfe-cnt-req"   style="font-size:20px;font-weight:700;color:#fff;line-height:1">0</div>
-        <div style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Responses</div>
+        <div id="nfe-cnt-series-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Series</div>
       </div>
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
         <div id="nfe-cnt-files" style="font-size:20px;font-weight:700;color:${colors.primary};line-height:1">0</div>
-        <div style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Files</div>
+        <div id="nfe-cnt-files-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Files</div>
       </div>
     </div>
 
+    <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
+      <div style="flex:1;height:1px;background:${colors.border}"></div>
+      <span style="font-size:10px;color:${colors.textMuted};font-weight:600;letter-spacing:0.5px">MANUAL / BULK UPLOAD</span>
+      <div style="flex:1;height:1px;background:${colors.border}"></div>
+    </div>
+
     <div style="border-left:2px solid ${colors.primary};padding:6px 9px;margin-bottom:8px;font-size:11px;color:${colors.textMuted};line-height:1.4;background:${colors.panelBg};border-radius:0 7px 7px 0">
-      Browse through seasons to capture all episodes.
+      ${config.captureHint}
     </div>
 
     <button id="nfe-export"
@@ -714,7 +775,7 @@ function createPanel() {
        </div>
      </div>
 
-     <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};min-height:13px;margin-bottom:6px;line-height:1.4;text-align:center"></div>
+     <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved' : ''}</div>
 
      <button id="nfe-submit"
        style="width:100%;background:${colors.secondary};border:none;border-radius:8px;color:#fff;
@@ -725,7 +786,7 @@ function createPanel() {
      </button>
 
     <button id="nfe-clear"
-      style="width:100%;background:transparent;border:1px solid #222;border-radius:8px;
+      style="width:100%;margin-top:12px;background:transparent;border:1px solid #222;border-radius:8px;
              color:${colors.textMuted};padding:7px;cursor:pointer;font-size:12px;transition:all 0.15s"
       onmouseenter="this.style.borderColor='#444';this.style.color='#888'"
       onmouseleave="this.style.borderColor='#222';this.style.color='${colors.textMuted}'">
@@ -877,9 +938,11 @@ function updateCounters() {
   const $ = id => document.getElementById(id);
   const ts = $('nfe-cnt-ts');
   if (ts) ts.textContent = state.allItems.length;
+  const segmentsLabel = $('nfe-cnt-segments-label');
+  if (segmentsLabel) segmentsLabel.textContent = state.allItems.length === 1 ? 'Segment' : 'Segments';
   
   const rq = $('nfe-cnt-req');
-  if (rq) rq.textContent = state.interceptedCount;
+  if (rq) rq.textContent = state.showIds.size;
   
   const fl = $('nfe-cnt-files');
   if (fl) {
@@ -893,6 +956,8 @@ function updateCounters() {
       fileTotal += Math.max(Math.ceil(count / 100), state.allItems.length ? 1 : 0);
     }
     fl.textContent = fileTotal;
+    const filesLabel = $('nfe-cnt-files-label');
+    if (filesLabel) filesLabel.textContent = fileTotal === 1 ? 'File' : 'Files';
   }
 }
 
@@ -1131,6 +1196,7 @@ function processMetadata(data, providerName) {
 if (video.title && state.showTitle !== video.title) {
     state.showTitle = video.title;
     state.showId = video.id != null ? String(video.id) : null;
+    if (state.showId) state.showIds.add(state.showId);
     state.showYear = '';
     if (video.seasons && video.seasons[0]) {
       state.showYear = String(video.seasons[0].year || '');
@@ -1276,7 +1342,7 @@ if (video.title && state.showTitle !== video.title) {
 function setDbStatus(msg) {
   state.dbStatusMsg = msg;
   const el = document.getElementById('nfe-imdb-status');
-  if (el) el.textContent = msg;
+  if (el) el.textContent = `IMDb ID: ${state.imdbId || 'Not set'}`;
 }
 
 /**
@@ -1284,7 +1350,9 @@ function setDbStatus(msg) {
  */
 function setIntrodbStatus(msg) {
   const el = document.getElementById('nfe-introdb-status');
-  if (el) el.textContent = msg;
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
 }
 
 /**
@@ -1506,6 +1574,7 @@ function clearData() {
     dbStatusMsg: 'Waiting for Netflix metadata...',
     showTitle: '',
     showYear: '',
+    showIds: new Set(),
     submitResults: { ok: 0, fail: 0 },
     dedupCacheV2: {},
   });
@@ -1526,6 +1595,8 @@ function clearData() {
  */
 const PROVIDER_NAME = 'netflix';
 const config = getProviderConfig(PROVIDER_NAME);
+const BUTTON_IDLE_DELAY_MS = 3000;
+let buttonHideTimer;
 
 // Initialize state with provider name
 Object.assign(state, createState(config.name));
@@ -1541,10 +1612,17 @@ onImdbSet: () => {
     const v = document.getElementById('nfe-imdb-input').value.trim();
     if (!v) return;
     state.imdbId = v;
-    state.allItems.forEach(i => { if (i.imdb_id === 'IMDB_PENDING') i.imdb_id = v; });
+    state.allItems.forEach(item => { item.imdb_id = v; });
     state.dedupCacheV2 = {};
     setDbStatus(`ID saved: ${v}`);
     updateCounters();
+    loadExistingSegments(v);
+    lookupImdbTitle(v).then(result => {
+      if (!result.success) return;
+      state.showTitle = result.title;
+      state.showYear = result.year ? String(result.year) : '';
+      updatePanelTitle();
+    });
   },
 onImdbSearch: () => {
       const manual = document.getElementById('nfe-imdb-input').value.trim();
@@ -1644,20 +1722,33 @@ function setupPanelHandler() {
 }
 
 /**
- * Sync panel visibility with player controls
+ * Sync the panel with Netflix player controls.
  */
 function syncVisibility() {
-  if (!state.panelVisible) return;
   const ctrl =
     document.querySelector('[data-uia="controls-standard"]') ||
     document.querySelector('[class*="PlayerControls"]') ||
     document.querySelector('.watch-video--bottom-controls-container');
   if (!ctrl) return;
   const visible = parseFloat(getComputedStyle(ctrl).opacity) > 0.05;
+  if (!state.panelVisible) return;
   const panel = document.getElementById('nfe-panel');
   if (!panel) return;
   panel.style.opacity = visible ? '1' : '0';
   panel.style.pointerEvents = visible ? 'auto' : 'none';
+}
+
+function setButtonVisibility(visible) {
+  const btn = document.getElementById('nfe-btn');
+  if (!btn) return;
+  btn.style.opacity = visible ? '0.85' : '0';
+  btn.style.pointerEvents = visible ? 'auto' : 'none';
+}
+
+function resetButtonIdleTimer() {
+  clearTimeout(buttonHideTimer);
+  setButtonVisibility(true);
+  buttonHideTimer = setTimeout(() => setButtonVisibility(false), BUTTON_IDLE_DELAY_MS);
 }
 
 /**
@@ -1676,15 +1767,26 @@ function mainLoop() {
       }
     }
     if (inWatch) { 
+      const buttonMissing = !document.getElementById('nfe-btn');
       injectBtn(PROVIDER_NAME, getNextEpBtn); 
+      if (buttonMissing) resetButtonIdleTimer();
       syncVisibility(); 
     }
   }, 1000);
 }
 
+function setupControlVisibilityHandler() {
+  document.addEventListener('mousemove', () => {
+    resetButtonIdleTimer();
+    syncVisibility();
+    setTimeout(syncVisibility, 250);
+  }, true);
+}
+
 // Initialize
 setupInterception();
 setupPanelHandler();
+setupControlVisibilityHandler();
 mainLoop();
 
 // Debug helpers - exposed to unsafeWindow for console access

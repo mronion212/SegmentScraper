@@ -8,10 +8,12 @@ import { processMetadata, setDbStatus, setIntrodbStatus, exportJSON, submitToInt
 import { injectBtn, getNextEpBtn } from '../../ui/button.js';
 import { setProviderName, openPanel, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput } from '../../ui/panel.js';
 import { getProviderConfig } from '../../config/provider-config.js';
-import { searchImdbByTitle, loadExistingSegments } from '../../core/network.js';
+import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments } from '../../core/network.js';
 
 const PROVIDER_NAME = 'netflix';
 const config = getProviderConfig(PROVIDER_NAME);
+const BUTTON_IDLE_DELAY_MS = 3000;
+let buttonHideTimer;
 
 // Initialize state with provider name
 Object.assign(state, createState(config.name));
@@ -27,10 +29,17 @@ onImdbSet: () => {
     const v = document.getElementById('nfe-imdb-input').value.trim();
     if (!v) return;
     state.imdbId = v;
-    state.allItems.forEach(i => { if (i.imdb_id === 'IMDB_PENDING') i.imdb_id = v; });
+    state.allItems.forEach(item => { item.imdb_id = v; });
     state.dedupCacheV2 = {};
     setDbStatus(`ID saved: ${v}`);
     updateCounters();
+    loadExistingSegments(v);
+    lookupImdbTitle(v).then(result => {
+      if (!result.success) return;
+      state.showTitle = result.title;
+      state.showYear = result.year ? String(result.year) : '';
+      updatePanelTitle();
+    });
   },
 onImdbSearch: () => {
       const manual = document.getElementById('nfe-imdb-input').value.trim();
@@ -130,20 +139,33 @@ function setupPanelHandler() {
 }
 
 /**
- * Sync panel visibility with player controls
+ * Sync the panel with Netflix player controls.
  */
 function syncVisibility() {
-  if (!state.panelVisible) return;
   const ctrl =
     document.querySelector('[data-uia="controls-standard"]') ||
     document.querySelector('[class*="PlayerControls"]') ||
     document.querySelector('.watch-video--bottom-controls-container');
   if (!ctrl) return;
   const visible = parseFloat(getComputedStyle(ctrl).opacity) > 0.05;
+  if (!state.panelVisible) return;
   const panel = document.getElementById('nfe-panel');
   if (!panel) return;
   panel.style.opacity = visible ? '1' : '0';
   panel.style.pointerEvents = visible ? 'auto' : 'none';
+}
+
+function setButtonVisibility(visible) {
+  const btn = document.getElementById('nfe-btn');
+  if (!btn) return;
+  btn.style.opacity = visible ? '0.85' : '0';
+  btn.style.pointerEvents = visible ? 'auto' : 'none';
+}
+
+function resetButtonIdleTimer() {
+  clearTimeout(buttonHideTimer);
+  setButtonVisibility(true);
+  buttonHideTimer = setTimeout(() => setButtonVisibility(false), BUTTON_IDLE_DELAY_MS);
 }
 
 /**
@@ -162,15 +184,26 @@ function mainLoop() {
       }
     }
     if (inWatch) { 
+      const buttonMissing = !document.getElementById('nfe-btn');
       injectBtn(PROVIDER_NAME, getNextEpBtn); 
+      if (buttonMissing) resetButtonIdleTimer();
       syncVisibility(); 
     }
   }, 1000);
 }
 
+function setupControlVisibilityHandler() {
+  document.addEventListener('mousemove', () => {
+    resetButtonIdleTimer();
+    syncVisibility();
+    setTimeout(syncVisibility, 250);
+  }, true);
+}
+
 // Initialize
 setupInterception();
 setupPanelHandler();
+setupControlVisibilityHandler();
 mainLoop();
 
 // Debug helpers - exposed to unsafeWindow for console access

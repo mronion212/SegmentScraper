@@ -26,6 +26,7 @@ export function processMetadata(data, providerName) {
 if (video.title && state.showTitle !== video.title) {
     state.showTitle = video.title;
     state.showId = video.id != null ? String(video.id) : null;
+    if (state.showId) state.showIds.add(state.showId);
     state.showYear = '';
     if (video.seasons && video.seasons[0]) {
       state.showYear = String(video.seasons[0].year || '');
@@ -171,7 +172,7 @@ if (video.title && state.showTitle !== video.title) {
 export function setDbStatus(msg) {
   state.dbStatusMsg = msg;
   const el = document.getElementById('nfe-imdb-status');
-  if (el) el.textContent = msg;
+  if (el) el.textContent = `IMDb ID: ${state.imdbId || 'Not set'}`;
 }
 
 /**
@@ -179,7 +180,9 @@ export function setDbStatus(msg) {
  */
 export function setIntrodbStatus(msg) {
   const el = document.getElementById('nfe-introdb-status');
-  if (el) el.textContent = msg;
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
 }
 
 /**
@@ -401,6 +404,7 @@ export function clearData() {
     dbStatusMsg: 'Waiting for Netflix metadata...',
     showTitle: '',
     showYear: '',
+    showIds: new Set(),
     submitResults: { ok: 0, fail: 0 },
     dedupCacheV2: {},
   });

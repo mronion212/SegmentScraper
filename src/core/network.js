@@ -300,3 +300,31 @@ export async function submitSegment(item, apiKey) {
     return { success: false, status: 0 };
   }
 }
+
+/**
+ * Look up the display title for a known IMDb title ID.
+ */
+export async function lookupImdbTitle(imdbId) {
+  const url = `https://v3.sg.media-imdb.com/suggestion/x/${encodeURIComponent(imdbId)}.json`;
+  const gmXhr = getGmXhr();
+
+  try {
+    const responseText = gmXhr
+      ? await new Promise((resolve, reject) => {
+          gmXhr({
+            method: 'GET',
+            url,
+            timeout: 10000,
+            headers: { Accept: 'application/json' },
+            onload: response => resolve(response.responseText),
+            onerror: reject,
+            ontimeout: reject,
+          });
+        })
+      : await fetch(url).then(response => response.text());
+    const result = (JSON.parse(responseText).d || []).find(item => item.id === imdbId);
+    return result ? { success: true, title: result.l, year: result.y } : { success: false };
+  } catch (_) {
+    return { success: false };
+  }
+}
