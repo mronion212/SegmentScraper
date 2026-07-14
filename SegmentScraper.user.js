@@ -6,7 +6,13 @@
 // @author       mronion212
 // @match        https://www.netflix.com/*
 // @match        https://www.disneyplus.com/*
-// @match        https://www.amazon.com/*/detail/*
+// @match        https://www.primevideo.com/*
+// @match        https://www.amazon.*/gp/video/*
+// @match        https://*.primevideo.com/*
+// @match        https://www.videoland.com/*
+// @match        https://videoland.com/*
+// @match        https://v2.videoland.com/*
+// @match        https://*.videoland.com/*
 // @match        https://play.max.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -464,20 +470,20 @@ const PROVIDER_CONFIGS = {
     },
     captureHint: 'Browse seasons and episodes to capture available timestamps.',
   },
-  amazon: {
+  'prime-video': {
     name: 'Prime Video',
-    match: 'https://www.amazon.com/*/detail/*',
+    match: 'https://*.primevideo.com/*',
     colors: {
-      primary: '#ff9900',
-      primaryDark: '#e68a00',
-      secondary: '#0f79af',
-      secondaryDark: '#0c5d86',
-      background: 'rgba(18, 27, 36, 0.98)',
-      panelBg: '#222f3d',
-      border: '#334455',
+      primary: '#00A8E1',
+      primaryDark: '#008fbe',
+      secondary: '#1565c0',
+      secondaryDark: '#0d47a1',
+      background: 'rgba(12,12,12,0.98)',
+      panelBg: '#181818',
+      border: '#2c2c2c',
       text: '#fff',
-      textSecondary: '#999',
-      textMuted: '#666',
+      textSecondary: '#777',
+      textMuted: '#444',
     },
     branding: {
       icon: '📺',
@@ -510,16 +516,16 @@ const PROVIDER_CONFIGS = {
     name: 'Videoland',
     match: 'https://www.videoland.com/*',
     colors: {
-      primary: '#f15a24',
-      primaryDark: '#c9481a',
-      secondary: '#d84d1d',
-      secondaryDark: '#ad3d17',
-      background: 'rgba(18,18,18,0.98)',
-      panelBg: '#242424',
-      border: '#3a3a3a',
+      primary: '#00A8E1',
+      primaryDark: '#008fbe',
+      secondary: '#1565c0',
+      secondaryDark: '#0d47a1',
+      background: 'rgba(12,12,12,0.98)',
+      panelBg: '#181818',
+      border: '#2c2c2c',
       text: '#fff',
-      textSecondary: '#999',
-      textMuted: '#666',
+      textSecondary: '#777',
+      textMuted: '#444',
     },
     branding: {
       icon: '📺',
@@ -1587,7 +1593,10 @@ function clearData() {
 }
 
 
-  // ─── providers/netflix/index.js ───
+  // Provider registration: netflix
+  if (location.hostname === 'www.netflix.com' || location.hostname === 'netflix.com') {
+
+  // â”€â”€â”€ providers/netflix/index.js â”€â”€â”€
 
 /**
  * Netflix provider entry point
@@ -1797,4 +1806,631 @@ win.__netflixTimestamps = {
   state,
 };
 
+  }
+
+  // Provider registration: prime-video
+  if (location.hostname === 'primevideo.com' || location.hostname.endsWith('.primevideo.com') || (/^www\.amazon\./i.test(location.hostname) && location.pathname.startsWith('/gp/video/'))) {
+
+  // â”€â”€â”€ providers/prime-video/extractor.js â”€â”€â”€
+
+/**
+ * Prime Video-specific extraction logic.
+ * Captures GetVodPlaybackResources transition timecodes and resolves the
+ * episode number from the active player DOM.
+ */
+
+
+
+
+const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
+
+function findPrimeVideoAsinInObject(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 5) return null;
+  const keys = ['asin', 'ASIN', 'titleId', 'titleID', 'contentId', 'catalogId'];
+  for (const key of keys) {
+    if (typeof obj[key] === 'string' && /^[A-Z0-9]{9,12}$/i.test(obj[key])) return obj[key];
+  }
+  for (const key in obj) {
+    const value = obj[key];
+    if (value && typeof value === 'object') {
+      const found = findPrimeVideoAsinInObject(value, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function extractPrimeVideoAsin(bodyText, url) {
+  if (url) {
+    const titleIdMatch = url.match(/[?&]titleId=([^&]+)/i);
+    if (titleIdMatch) return decodeURIComponent(titleIdMatch[1]);
+    const asinMatch = url.match(/[?&](?:asin|ASIN)=([A-Z0-9]{9,12})/i);
+    if (asinMatch) return asinMatch[1];
+  }
+  if (!bodyText) return null;
+  try {
+    const found = findPrimeVideoAsinInObject(JSON.parse(bodyText));
+    if (found) return found;
+  } catch (_) {}
+
+  const patterns = [
+    /"asin"\s*:\s*"([A-Z0-9]{9,12})"/i,
+    /"titleId"\s*:\s*"([A-Z0-9]{9,12})"/i,
+    /"titleID"\s*:\s*"([A-Z0-9]{9,12})"/i,
+    /"contentId"\s*:\s*"([A-Z0-9]{9,12})"/i,
+    /asin=([A-Z0-9]{9,12})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = bodyText.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function readPrimeVideoSeasonEpisode() {
+  const player = document.getElementById('dv-web-player');
+  const episodeInfo = document.querySelector('[class*="atvwebplayersdk-episode-info"]');
+  const isPlayerActive = !!player && player.offsetWidth > 0 && player.offsetHeight > 0;
+  let season = null;
+  let episode = null;
+
+  if (episodeInfo) {
+    const text = episodeInfo.textContent.trim();
+    const seasonMatch = text.match(/S(\d+)/i);
+    const episodeMatch = text.match(/(?:Afl\.?|E)\s*(\d+)/i);
+    if (seasonMatch) season = parseInt(seasonMatch[1], 10);
+    if (episodeMatch) episode = parseInt(episodeMatch[1], 10);
+  }
+  return { isPlayerActive, season, episode, title: document.title };
+}
+
+function updatePrimeVideoTitle(rawTitle) {
+  const cleaned = rawTitle.replace(/^Prime Video[:\-]\s*/i, '').trim();
+  const seasonMatch = cleaned.match(/\s*(Seizoen|Season)\s*(\d+)/i);
+  const title = seasonMatch ? cleaned.slice(0, seasonMatch.index).trim() : cleaned;
+
+  if (title && title !== state.showTitle) {
+    state.showTitle = title;
+    state.showId = null;
+    state.showIds.add(title);
+    state.showYear = '';
+    state.dbSearchDone = false;
+    state.imdbId = '';
+    state.dedupCacheV2 = {};
+    updatePanelTitle();
+  }
+
+  if (!state.dbSearchDone && state.showTitle) {
+    state.dbSearchDone = true;
+    searchImdbByTitle(state.showTitle, state.showYear).then(result => {
+      if (result.success) {
+        state.imdbId = result.imdbId;
+        state.allItems.forEach(item => {
+          if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
+        });
+        updateImdbInput();
+        setDbStatus(`Found: ${result.imdbId}`);
+        updateCounters();
+        loadExistingSegments(result.imdbId);
+      } else {
+        setDbStatus(`IMDb lookup failed: ${result.error}`);
+      }
+    }).catch(error => {
+      console.error('[PVE] IMDb search error:', error);
+      setDbStatus('IMDb lookup error');
+    });
+  }
+}
+
+function finalizePrimeVideoEvents(asin, season, episode, data) {
+  const events = data?.transitionTimecodes?.result?.events || [];
+  let newItems = 0;
+
+  for (const event of events) {
+    let segmentType = null;
+    if (event.eventType === 'SKIP_RECAP') segmentType = 'recap';
+    if (event.eventType === 'SKIP_INTRO') segmentType = 'intro';
+    if (!segmentType || typeof event.startTimeMs !== 'number' || typeof event.endTimeMs !== 'number') continue;
+
+    const episodeId = `${asin}_${segmentType}`;
+    if (state.allItems.some(item => item._eid === episodeId)) continue;
+    state.allItems.push({
+      _eid: episodeId,
+      imdb_id: state.imdbId || 'IMDB_PENDING',
+      segment_type: segmentType,
+      season,
+      episode,
+      start_sec: event.startTimeMs / 1000,
+      end_sec: event.endTimeMs / 1000,
+    });
+    newItems++;
+  }
+
+  if (newItems > 0) {
+    state.interceptedCount++;
+    updateCounters();
+    toast(`+${newItems} timestamps captured (S${season}E${episode}) · total: ${state.allItems.length}`);
+  }
+}
+
+function pollPrimeVideoEpisode(asin, attempt) {
+  const snapshot = readPrimeVideoSeasonEpisode();
+  if (snapshot.isPlayerActive && snapshot.season != null && snapshot.episode != null) {
+    state.asinMap.set(asin, { season: snapshot.season, episode: snapshot.episode });
+    state.currentSeason = snapshot.season;
+    state.currentEpisode = snapshot.episode;
+    updatePrimeVideoTitle(snapshot.title);
+    updatePanelTitle();
+    const pending = state.pendingByAsin.get(asin) || [];
+    state.pendingByAsin.delete(asin);
+    pending.forEach(data => finalizePrimeVideoEvents(asin, snapshot.season, snapshot.episode, data));
+    return;
+  }
+  if (attempt >= 40) {
+    console.warn('[PVE] Could not resolve season/episode for ASIN:', asin);
+    state.pendingByAsin.delete(asin);
+    return;
+  }
+  setTimeout(() => pollPrimeVideoEpisode(asin, attempt + 1), 250);
+}
+
+function processPrimeVideoMetadata(data, bodyText, url) {
+  const asin = extractPrimeVideoAsin(bodyText, url);
+  if (!asin) return;
+  if (state.asinMap.has(asin)) {
+    const { season, episode } = state.asinMap.get(asin);
+    finalizePrimeVideoEvents(asin, season, episode, data);
+    return;
+  }
+  if (!state.pendingByAsin.has(asin)) state.pendingByAsin.set(asin, []);
+  state.pendingByAsin.get(asin).push(data);
+  pollPrimeVideoEpisode(asin, 0);
+}
+
+function setupPrimeVideoInterception() {
+  const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+  const OriginalXHR = win.XMLHttpRequest;
+
+  function PrimeVideoInterceptedXHR() {
+    const xhr = new OriginalXHR();
+    let url = '';
+    let bodyText = '';
+    const originalOpen = xhr.open.bind(xhr);
+    const originalSend = xhr.send.bind(xhr);
+    xhr.open = function (method, requestUrl, ...rest) {
+      url = requestUrl;
+      return originalOpen(method, requestUrl, ...rest);
+    };
+    xhr.send = function (body, ...rest) {
+      bodyText = typeof body === 'string' ? body : '';
+      if (url && url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+        xhr.addEventListener('load', () => {
+          try { processPrimeVideoMetadata(JSON.parse(xhr.responseText), bodyText, url); }
+          catch (error) { console.error('[PVE] Failed to process XHR response:', error); }
+        });
+      }
+      return originalSend(body, ...rest);
+    };
+    return xhr;
+  }
+  Object.setPrototypeOf(PrimeVideoInterceptedXHR, OriginalXHR);
+  PrimeVideoInterceptedXHR.prototype = OriginalXHR.prototype;
+  win.XMLHttpRequest = PrimeVideoInterceptedXHR;
+
+  const originalFetch = win.fetch.bind(win);
+  win.fetch = async function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    let bodyText = '';
+    if (url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+      try {
+        if (init && typeof init.body === 'string') bodyText = init.body;
+        else if (input && typeof input === 'object' && input.clone) bodyText = await input.clone().text().catch(() => '');
+      } catch (_) {}
+    }
+    const response = await originalFetch(input, init);
+    if (url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+      try { processPrimeVideoMetadata(await response.clone().json(), bodyText, url); }
+      catch (error) { console.error('[PVE] Failed to process fetch response:', error); }
+    }
+    return response;
+  };
+}
+
+
+  // â”€â”€â”€ providers/prime-video/index.js â”€â”€â”€
+
+/** Prime Video provider entry point. */
+
+
+
+
+
+
+
+const PRIME_VIDEO_PROVIDER_NAME = 'prime-video';
+const primeVideoConfig = getProviderConfig(PRIME_VIDEO_PROVIDER_NAME);
+
+Object.assign(state, createState(primeVideoConfig.name), {
+  currentSeason: 1,
+  currentEpisode: 1,
+  asinMap: new Map(),
+  pendingByAsin: new Map(),
+});
+
+setProviderName(PRIME_VIDEO_PROVIDER_NAME);
+window.nfePanelCallbacks = {
+  onClose: closePanel,
+  onExport: exportJSON,
+  onSubmit: submitToIntroDB,
+  onClear: clearData,
+  onImdbSet: () => {
+    const value = document.getElementById('nfe-imdb-input').value.trim();
+    if (!value) return;
+    state.imdbId = value;
+    state.allItems.forEach(item => { item.imdb_id = value; });
+    state.dedupCacheV2 = {};
+    setDbStatus(`ID saved: ${value}`);
+    updateCounters();
+    loadExistingSegments(value);
+    lookupImdbTitle(value).then(result => {
+      if (!result.success) return;
+      state.showTitle = result.title;
+      state.showYear = result.year ? String(result.year) : '';
+      updatePanelTitle();
+    });
+  },
+  onImdbSearch: () => {
+    const manual = document.getElementById('nfe-imdb-input').value.trim();
+    const query = manual || state.showTitle;
+    if (!query) { toast('No title detected yet.'); return; }
+    state.dbSearchDone = false;
+    state.dedupCacheV2 = {};
+    searchImdbByTitle(query, state.showYear).then(result => {
+      if (result.success) {
+        state.imdbId = result.imdbId;
+        state.allItems.forEach(item => {
+          if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
+        });
+        updateImdbInput();
+        setDbStatus(`Found: ${result.imdbId}`);
+        updateCounters();
+        loadExistingSegments(result.imdbId);
+      } else {
+        setDbStatus(`IMDb lookup failed: ${result.error}`);
+      }
+    }).catch(error => {
+      console.error('[PVE] Manual IMDb search error:', error);
+      setDbStatus('IMDb lookup error');
+    });
+  },
+  onApikeySet: () => {
+    const value = document.getElementById('nfe-apikey-input').value.trim();
+    if (!value) {
+      toast('Please enter an IntroDB API key.');
+      return;
+    }
+    state.introdbApiKey = value;
+    setIntrodbStatus('API key saved');
+    toast('IntroDB API key saved');
+  },
+};
+
+function setupPrimeVideoPanelHandler() {
+  document.addEventListener('click', event => {
+    const panel = document.getElementById('nfe-panel');
+    const button = document.getElementById('nfe-btn');
+    if (panel && state.panelVisible && !panel.contains(event.target) && !button?.contains(event.target)) closePanel();
+  }, true);
+}
+
+function startPrimeVideoMainLoop() {
+  setInterval(() => injectBtn(PRIME_VIDEO_PROVIDER_NAME, getNextEpBtn), 1000);
+}
+
+setupPrimeVideoInterception();
+setupPrimeVideoPanelHandler();
+startPrimeVideoMainLoop();
+
+const primeVideoWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+primeVideoWindow.__primeVideoTimestamps = {
+  getAll: () => state.allItems,
+  getAsinMap: () => state.asinMap,
+  state,
+};
+
+  }
+
+  // Provider registration: videoland
+  if (location.hostname === 'videoland.com' || location.hostname.endsWith('.videoland.com')) {
+
+  // â”€â”€â”€ providers/videoland/extractor.js â”€â”€â”€
+
+/**
+ * Videoland-specific extraction logic.
+ * Captures /layout responses and joins root episode metadata to video chapters.
+ */
+
+
+
+
+const VIDEOLAND_LAYOUT_URL_MATCH = /\/layout(\?|$)/i;
+
+function coerceVideolandNumber(value) {
+  if (typeof value === 'number' && !Number.isNaN(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) return Number(value);
+  return null;
+}
+
+function extractVideolandRootMeta(json) {
+  const video = json?.seo?.video || null;
+  return {
+    entityId: json?.entity?.id != null ? String(json.entity.id) : null,
+    season: coerceVideolandNumber(video?.season),
+    episode: coerceVideolandNumber(video?.episode),
+    duration: coerceVideolandNumber(video?.duration),
+    programId: json?.seo?.parent?.id != null ? String(json.seo.parent.id) : null,
+    programTitle: json?.seo?.parent?.name || null,
+  };
+}
+
+function extractVideolandVideosWithChapters(root) {
+  const found = [];
+  function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (node.itemContent?.video && Array.isArray(node.itemContent.video.chapters)) found.push(node.itemContent);
+    for (const key in node) {
+      if (Object.prototype.hasOwnProperty.call(node, key)) walk(node[key]);
+    }
+  }
+  walk(root);
+  return found;
+}
+
+function mapVideolandChapterType(type) {
+  if (type === 'intro') return 'recap';
+  if (type === 'opening_credits' || type === 'openingcredits') return 'intro';
+  if (type === 'ending_credits' || type === 'endingcredits') return 'outro';
+  return null;
+}
+
+function updateVideolandTitle(title, programId) {
+  if (title && title !== state.showTitle) {
+    state.showTitle = title;
+    state.showId = programId;
+    if (programId) state.showIds.add(programId);
+    state.showYear = '';
+    state.dbSearchDone = false;
+    state.imdbId = '';
+    state.dedupCacheV2 = {};
+    updatePanelTitle();
+  }
+
+  if (!state.dbSearchDone && state.showTitle) {
+    state.dbSearchDone = true;
+    searchImdbByTitle(state.showTitle, state.showYear).then(result => {
+      if (result.success) {
+        state.imdbId = result.imdbId;
+        state.allItems.forEach(item => {
+          if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
+        });
+        updateImdbInput();
+        setDbStatus(`Found: ${result.imdbId}`);
+        updateCounters();
+        loadExistingSegments(result.imdbId);
+      } else {
+        setDbStatus(`IMDb lookup failed: ${result.error}`);
+      }
+    }).catch(error => {
+      console.error('[VLE] IMDb search error:', error);
+      setDbStatus('IMDb lookup error');
+    });
+  }
+}
+
+function processVideolandLayout(json) {
+  let rootMeta;
+  let videoItems;
+  try {
+    rootMeta = extractVideolandRootMeta(json);
+    videoItems = extractVideolandVideosWithChapters(json);
+  } catch (error) {
+    console.error('[VLE] Failed to traverse layout JSON:', error);
+    return;
+  }
+  if (!videoItems.length) return;
+
+  let activeItem = null;
+  if (rootMeta.entityId) {
+    activeItem = videoItems.find(item => String(item.video.id) === rootMeta.entityId);
+  }
+  if (!activeItem) activeItem = videoItems[0];
+
+  const clipId = String(activeItem.video.id);
+  const season = rootMeta.season;
+  const episode = rootMeta.episode;
+  const title = (rootMeta.programTitle || activeItem.title || '').trim();
+  state.clipMap.set(clipId, { season, episode, title, programId: rootMeta.programId });
+
+  if (season != null && episode != null) {
+    state.currentSeason = season;
+    state.currentEpisode = episode;
+    updatePanelTitle();
+  }
+  updateVideolandTitle(title, rootMeta.programId);
+
+  if (season == null || episode == null) return;
+  let newItems = 0;
+  for (const chapter of activeItem.video.chapters || []) {
+    const segmentType = mapVideolandChapterType(chapter.type);
+    const startSec = coerceVideolandNumber(chapter.tcStart);
+    const endSec = coerceVideolandNumber(chapter.tcEnd);
+    if (!segmentType || startSec == null || endSec == null) continue;
+
+    const episodeId = `${clipId}_${segmentType}`;
+    if (state.allItems.some(item => item._eid === episodeId)) continue;
+    state.allItems.push({
+      _eid: episodeId,
+      imdb_id: state.imdbId || 'IMDB_PENDING',
+      segment_type: segmentType,
+      season,
+      episode,
+      start_sec: startSec,
+      end_sec: endSec,
+    });
+    newItems++;
+  }
+
+  if (newItems > 0) {
+    state.interceptedCount++;
+    updateCounters();
+    toast(`+${newItems} timestamps captured (S${season}E${episode}) · total: ${state.allItems.length}`);
+  }
+}
+
+function setupVideolandInterception() {
+  const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+  const originalFetch = win.fetch.bind(win);
+  win.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const responsePromise = originalFetch(input, init);
+    if (VIDEOLAND_LAYOUT_URL_MATCH.test(url)) {
+      responsePromise.then(response => response.clone().json())
+        .then(processVideolandLayout)
+        .catch(error => console.warn('[VLE] Failed to process fetch response:', error));
+    }
+    return responsePromise;
+  };
+
+  const OriginalXHR = win.XMLHttpRequest;
+  function VideolandInterceptedXHR() {
+    const xhr = new OriginalXHR();
+    let url = '';
+    const originalOpen = xhr.open.bind(xhr);
+    const originalSend = xhr.send.bind(xhr);
+    xhr.open = function (method, requestUrl, ...rest) {
+      url = requestUrl;
+      return originalOpen(method, requestUrl, ...rest);
+    };
+    xhr.send = function (...args) {
+      if (url && VIDEOLAND_LAYOUT_URL_MATCH.test(url)) {
+        xhr.addEventListener('load', () => {
+          try { processVideolandLayout(JSON.parse(xhr.responseText)); }
+          catch (error) { console.error('[VLE] Failed to process XHR response:', error); }
+        });
+      }
+      return originalSend(...args);
+    };
+    return xhr;
+  }
+  Object.setPrototypeOf(VideolandInterceptedXHR, OriginalXHR);
+  VideolandInterceptedXHR.prototype = OriginalXHR.prototype;
+  win.XMLHttpRequest = VideolandInterceptedXHR;
+}
+
+
+  // â”€â”€â”€ providers/videoland/index.js â”€â”€â”€
+
+/** Videoland provider entry point. */
+
+
+
+
+
+
+
+const VIDEOLAND_PROVIDER_NAME = 'videoland';
+const videolandConfig = getProviderConfig(VIDEOLAND_PROVIDER_NAME);
+
+Object.assign(state, createState(videolandConfig.name), {
+  currentSeason: 1,
+  currentEpisode: 1,
+  clipMap: new Map(),
+});
+
+setProviderName(VIDEOLAND_PROVIDER_NAME);
+window.nfePanelCallbacks = {
+  onClose: closePanel,
+  onExport: exportJSON,
+  onSubmit: submitToIntroDB,
+  onClear: clearData,
+  onImdbSet: () => {
+    const value = document.getElementById('nfe-imdb-input').value.trim();
+    if (!value) return;
+    state.imdbId = value;
+    state.allItems.forEach(item => { item.imdb_id = value; });
+    state.dedupCacheV2 = {};
+    setDbStatus(`ID saved: ${value}`);
+    updateCounters();
+    loadExistingSegments(value);
+    lookupImdbTitle(value).then(result => {
+      if (!result.success) return;
+      state.showTitle = result.title;
+      state.showYear = result.year ? String(result.year) : '';
+      updatePanelTitle();
+    });
+  },
+  onImdbSearch: () => {
+    const manual = document.getElementById('nfe-imdb-input').value.trim();
+    const query = manual || state.showTitle;
+    if (!query) { toast('No title detected yet.'); return; }
+    state.dbSearchDone = false;
+    state.dedupCacheV2 = {};
+    searchImdbByTitle(query, state.showYear).then(result => {
+      if (result.success) {
+        state.imdbId = result.imdbId;
+        state.allItems.forEach(item => {
+          if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
+        });
+        updateImdbInput();
+        setDbStatus(`Found: ${result.imdbId}`);
+        updateCounters();
+        loadExistingSegments(result.imdbId);
+      } else {
+        setDbStatus(`IMDb lookup failed: ${result.error}`);
+      }
+    }).catch(error => {
+      console.error('[VLE] Manual IMDb search error:', error);
+      setDbStatus('IMDb lookup error');
+    });
+  },
+  onApikeySet: () => {
+    const value = document.getElementById('nfe-apikey-input').value.trim();
+    if (!value) {
+      toast('Please enter an IntroDB API key.');
+      return;
+    }
+    state.introdbApiKey = value;
+    setIntrodbStatus('API key saved');
+    toast('IntroDB API key saved');
+  },
+};
+
+function setupVideolandPanelHandler() {
+  document.addEventListener('click', event => {
+    const panel = document.getElementById('nfe-panel');
+    const button = document.getElementById('nfe-btn');
+    if (panel && state.panelVisible && !panel.contains(event.target) && !button?.contains(event.target)) closePanel();
+  }, true);
+}
+
+function startVideolandMainLoop() {
+  setInterval(() => injectBtn(VIDEOLAND_PROVIDER_NAME, getNextEpBtn), 1000);
+}
+
+setupVideolandInterception();
+setupVideolandPanelHandler();
+startVideolandMainLoop();
+
+const videolandWindow = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+videolandWindow.__videolandTimestamps = {
+  getAll: () => state.allItems,
+  getClipMap: () => state.clipMap,
+  state,
+};
+
+  }
 })();
