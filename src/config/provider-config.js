@@ -44,7 +44,6 @@ export const PROVIDER_CONFIGS = {
     nameColor: '#E50914',
     infoAccent: '#E50914',
     branding: {
-      icon: '🎬',
       title: 'SegmentScraper',
     },
     captureHint: 'All available seasons and episodes are captured automatically.',
@@ -61,7 +60,6 @@ export const PROVIDER_CONFIGS = {
     nameColor: '#0063e5',
     infoAccent: '#0063e5',
     branding: {
-      icon: '🏰',
       title: 'SegmentScraper',
     },
     captureHint: 'All available seasons and episodes are captured automatically.',
@@ -78,10 +76,9 @@ export const PROVIDER_CONFIGS = {
     nameColor: '#00A8E1',
     infoAccent: '#00A8E1',
     branding: {
-      icon: '📺',
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
   },
   hbo: {
     name: 'HBO Max',
@@ -95,7 +92,6 @@ export const PROVIDER_CONFIGS = {
     nameColor: '#8a2be2',
     infoAccent: '#8a2be2',
     branding: {
-      icon: '🎭',
       title: 'SegmentScraper',
     },
     captureHint: 'All available seasons and episodes are captured automatically.',
@@ -104,18 +100,17 @@ export const PROVIDER_CONFIGS = {
     name: 'Videoland',
     match: 'https://www.videoland.com/*',
     colors: {
-      primary: '#00A8E1',
-      primaryDark: '#008fbe',
+      primary: '#e0303d',
+      primaryDark: '#3C0919',
       secondary: '#1565c0',
       secondaryDark: '#0d47a1',
     },
-    nameColor: '#00A8E1',
-    infoAccent: '#00A8E1',
+    nameColor: '#e0303d',
+    infoAccent: '#e0303d',
     branding: {
-      icon: '📺',
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
   },
 };
 

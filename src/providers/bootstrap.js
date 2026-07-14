@@ -222,7 +222,7 @@ export async function submitToIntroDB() {
     if (index >= items.length) {
       state.submitInProgress = false;
       const { ok, fail } = state.submitResults;
-      updateSubmitBtn('📡 Submit to IntroDB');
+      updateSubmitBtn('Submit to IntroDB');
       toast(`IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
       setIntrodbStatus(`${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
       return;

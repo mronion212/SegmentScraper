@@ -456,7 +456,6 @@ const PROVIDER_CONFIGS = {
     nameColor: '#E50914',
     infoAccent: '#E50914',
     branding: {
-      icon: '🎬',
       title: 'SegmentScraper',
     },
     captureHint: 'All available seasons and episodes are captured automatically.',
@@ -473,7 +472,6 @@ const PROVIDER_CONFIGS = {
     nameColor: '#0063e5',
     infoAccent: '#0063e5',
     branding: {
-      icon: '🏰',
       title: 'SegmentScraper',
     },
     captureHint: 'All available seasons and episodes are captured automatically.',
@@ -490,10 +488,9 @@ const PROVIDER_CONFIGS = {
     nameColor: '#00A8E1',
     infoAccent: '#00A8E1',
     branding: {
-      icon: '📺',
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
   },
   hbo: {
     name: 'HBO Max',
@@ -507,7 +504,6 @@ const PROVIDER_CONFIGS = {
     nameColor: '#8a2be2',
     infoAccent: '#8a2be2',
     branding: {
-      icon: '🎭',
       title: 'SegmentScraper',
     },
     captureHint: 'All available seasons and episodes are captured automatically.',
@@ -516,18 +512,17 @@ const PROVIDER_CONFIGS = {
     name: 'Videoland',
     match: 'https://www.videoland.com/*',
     colors: {
-      primary: '#00A8E1',
-      primaryDark: '#008fbe',
+      primary: '#e0303d',
+      primaryDark: '#3C0919',
       secondary: '#1565c0',
       secondaryDark: '#0d47a1',
     },
-    nameColor: '#00A8E1',
-    infoAccent: '#00A8E1',
+    nameColor: '#e0303d',
+    infoAccent: '#e0303d',
     branding: {
-      icon: '📺',
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
   },
 };
 
@@ -712,7 +707,7 @@ function createPanel() {
       #nfe-panel button, #nfe-panel input { min-height:0; }
     </style>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <span style="font-size:13px;font-weight:700;color:${nameColor}">${branding.icon} ${config.name} ${branding.title}</span>
+      <span style="font-size:13px;font-weight:700;color:${nameColor}">${config.name} ${branding.title}</span>
       <button id="nfe-close" style="background:none;border:none;color:${colors.textMuted};font-size:18px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s"
         onmouseenter="this.style.color='${colors.text}'" onmouseleave="this.style.color='${colors.textMuted}'">✕</button>
     </div>
@@ -729,7 +724,7 @@ function createPanel() {
         <button id="nfe-imdb-search" title="Search by title on IMDb"
           style="background:#242424;border:1px solid #303030;border-radius:6px;color:#bbb;
                  padding:6px 8px;cursor:pointer;font-size:12px;transition:background 0.15s"
-          onmouseenter="this.style.background='#2e2e2e'" onmouseleave="this.style.background='#242424'">🔍</button>
+          onmouseenter="this.style.background='#2e2e2e'" onmouseleave="this.style.background='#242424'">Search</button>
         <button id="nfe-imdb-set"
           style="background:${providerColors.primary};border:none;border-radius:6px;color:#fff;
                  padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;transition:background 0.15s"
@@ -767,7 +762,7 @@ function createPanel() {
              padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
              transition:background 0.15s"
       onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">
-      📥 Download JSON(s)
+      Download JSON(s)
     </button>
 
      <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
@@ -797,7 +792,7 @@ function createPanel() {
               padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
               transition:background 0.15s"
        onmouseenter="this.style.background='${providerColors.secondaryDark}'" onmouseleave="this.style.background='${providerColors.secondary}'">
-       📡 Submit to IntroDB
+       Submit to IntroDB
      </button>
 
     <button id="nfe-clear"
@@ -805,7 +800,7 @@ function createPanel() {
              color:${colors.textMuted};padding:7px;cursor:pointer;font-size:12px;transition:all 0.15s"
       onmouseenter="this.style.borderColor='#444';this.style.color='#888'"
       onmouseleave="this.style.borderColor='#222';this.style.color='${colors.textMuted}'">
-      🗑️ Clear data
+      Clear data
     </button>
   `;
 
@@ -983,7 +978,7 @@ function updatePanelTitle() {
   const el = document.getElementById('nfe-title-display');
   if (!el) return;
   el.textContent = state.showTitle 
-    ? `📺 ${state.showTitle}${state.showYear ? ` (${state.showYear})` : ''}` 
+    ? `${state.showTitle}${state.showYear ? ` (${state.showYear})` : ''}`
     : '';
 }
 
@@ -1033,7 +1028,7 @@ function toast(msg) {
 function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   document.getElementById('nfe-export-preview')?.remove();
 
-  const { colors: providerColors } = getProviderConfig(currentProvider);
+  const { colors: providerColors, name: providerName } = getProviderConfig(currentProvider);
   const colors = PANEL_COLORS;
   const overlay = document.createElement('div');
   overlay.id = 'nfe-export-preview';
@@ -1051,7 +1046,7 @@ function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   `;
 
   const heading = document.createElement('h2');
-  heading.textContent = 'Controleer JSON-export';
+  heading.textContent = `Controleer ${providerName} JSON-export`;
   heading.style.cssText = `margin:0 0 6px; color:${colors.accent}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
   summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}.`;
@@ -1414,7 +1409,7 @@ async function submitToIntroDB() {
     if (index >= items.length) {
       state.submitInProgress = false;
       const { ok, fail } = state.submitResults;
-      updateSubmitBtn('📡 Submit to IntroDB');
+      updateSubmitBtn('Submit to IntroDB');
       toast(`IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
       setIntrodbStatus(`${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
       return;
