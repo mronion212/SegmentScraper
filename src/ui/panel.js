@@ -360,3 +360,57 @@ export function toast(msg) {
     setTimeout(() => t.remove(), 350);
   }, 3500);
 }
+
+/**
+ * Show the export data in a modal before files are downloaded.
+ * The preview deliberately uses textContent so captured metadata cannot inject HTML.
+ */
+export function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
+  document.getElementById('nfe-export-preview')?.remove();
+
+  const { colors } = getProviderConfig(currentProvider);
+  const overlay = document.createElement('div');
+  overlay.id = 'nfe-export-preview';
+  overlay.style.cssText = `
+    position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center;
+    justify-content:center; padding:24px; background:rgba(0,0,0,.72);
+  `;
+
+  const dialog = document.createElement('section');
+  dialog.style.cssText = `
+    width:min(760px, 100%); max-height:calc(100vh - 48px); display:flex; flex-direction:column;
+    padding:18px; border:1px solid ${colors.border}; border-radius:12px; background:${colors.background};
+    color:${colors.text}; font:13px -apple-system,Arial,sans-serif; box-shadow:0 16px 48px rgba(0,0,0,.85);
+  `;
+
+  const heading = document.createElement('h2');
+  heading.textContent = 'Controleer JSON-export';
+  heading.style.cssText = `margin:0 0 6px; color:${colors.primary}; font-size:16px;`;
+  const summary = document.createElement('p');
+  summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}.`;
+  summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary};`;
+  const preview = document.createElement('pre');
+  preview.textContent = JSON.stringify({ items }, null, 2);
+  preview.style.cssText = `
+    overflow:auto; flex:1; min-height:180px; margin:0 0 14px; padding:12px; border-radius:8px;
+    background:${colors.panelBg}; color:${colors.text}; font:11px ui-monospace,Consolas,monospace; white-space:pre-wrap;
+  `;
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex; justify-content:flex-end; gap:8px;';
+  const cancel = document.createElement('button');
+  cancel.textContent = 'Annuleren';
+  cancel.style.cssText = 'padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; cursor:pointer;';
+  const confirm = document.createElement('button');
+  confirm.textContent = 'Download JSON';
+  confirm.style.cssText = `padding:8px 12px; border:0; border-radius:6px; background:${colors.primary}; color:#fff; font-weight:700; cursor:pointer;`;
+
+  const close = () => overlay.remove();
+  cancel.addEventListener('click', close);
+  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+  confirm.addEventListener('click', () => { close(); onConfirm(); });
+  actions.append(cancel, confirm);
+  dialog.append(heading, summary, preview, actions);
+  overlay.append(dialog);
+  document.body.append(overlay);
+  confirm.focus();
+}

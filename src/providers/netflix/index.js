@@ -23,21 +23,21 @@ window.nfePanelCallbacks = {
   onExport: exportJSON,
   onSubmit: submitToIntroDB,
   onClear: clearData,
-  onImdbSet: () => {
+onImdbSet: () => {
     const v = document.getElementById('nfe-imdb-input').value.trim();
     if (!v) return;
     state.imdbId = v;
     state.allItems.forEach(i => { if (i.imdb_id === 'IMDB_PENDING') i.imdb_id = v; });
-    state.existingSegments = new Set();
-    state.existingSegmentsLoaded = false;
+    state.dedupCacheV2 = {};
     setDbStatus(`ID saved: ${v}`);
     updateCounters();
   },
-    onImdbSearch: () => {
+onImdbSearch: () => {
       const manual = document.getElementById('nfe-imdb-input').value.trim();
       const q = manual || state.showTitle;
       if (!q) { toast('No title detected yet.'); return; }
       state.dbSearchDone = false;
+      state.dedupCacheV2 = {};
       searchImdbByTitle(q, state.showYear).then(result => {
         console.log('[NFE] Manual IMDb search result:', result);
         if (result.success) {

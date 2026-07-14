@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
 // @namespace    https://github.com/mronion212/SegmentScraper
-// @version      1.0.0
+// @version      1.0.1
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
 // @match        https://www.netflix.com/*
@@ -28,6 +28,29 @@
  * Manages captured timestamps, UI state, and deduplication cache
  */
 
+/**
+ * Create a cache key for an episode
+ * @param {string} imdbId - IMDb ID (e.g., 'tt1234567')
+ * @param {string|number} season - Season number
+ * @param {string|number} episode - Episode number
+ * @returns {string} - Cache key in format 'imdbId|season|episode'
+ */
+function createEpisodeCacheKey(imdbId, season, episode) {
+  return `${String(imdbId)}|${String(season)}|${String(episode)}`;
+}
+
+/**
+ * Create a cache key for a segment (includes segment type)
+ * @param {string} imdbId - IMDb ID
+ * @param {string|number} season - Season number
+ * @param {string|number} episode - Episode number
+ * @param {string} segmentType - Segment type (intro, recap, outro)
+ * @returns {string} - Cache key in format 'imdbId|season|episode|segment_type'
+ */
+function createSegmentCacheKey(imdbId, season, episode, segmentType) {
+  return `${String(imdbId)}|${String(season)}|${String(episode)}|${segmentType}`;
+}
+
 const createState = (providerName) => ({
   allItems: [],
   imdbId: '',
@@ -40,13 +63,12 @@ const createState = (providerName) => ({
   panelVisible: false,
   submitInProgress: false,
   submitResults: { ok: 0, fail: 0 },
-  existingSegments: new Set(),
-  existingSegmentsLoaded: false,
   dedupCacheV2: {},
   introdbApiKey: '',
 });
 
 const state = createState('Streaming Service');
+
 
   // ─── core/network.js ───
 
@@ -182,74 +204,43 @@ async function searchImdbByTitle(title, year, apiKey) {
 /**
  * Load existing segments from IntroDB for deduplication
  * Uses GM_xmlhttpRequest to avoid CORS issues
+ * 
+ * This function collects unique episode keys from the currently captured items
+ * and calls /segments endpoint once per unique episode.
+ * 
+ * @param {string} imdbId - IMDb ID to load segments for
+ * @param {string} apiKey - IntroDB API key (optional)
+ * @returns {Promise<Array>} - Array of { key, segmentType } objects
  */
 async function loadExistingSegments(imdbId, apiKey) {
-  const segmentTypes = ['intro', 'recap', 'outro'];
-  const gmXhr = getGmXhr();
-  
+  console.log('[NFE-DEDUP] loadExistingSegments called for imdbId:', imdbId);
+
+  // Collect unique episode keys from currently captured items for this imdb_id
+  const episodeKeys = [...new Set(
+    state.allItems
+      .filter(i => i.imdb_id === imdbId)
+      .map(i => createEpisodeCacheKey(imdbId, i.season, i.episode))
+  )];
+
+  console.log('[NFE-DEDUP] loadExistingSegments: unique episode keys collected:', episodeKeys);
+
+  // Load each episode's segments via /segments endpoint
   const results = await Promise.all(
-    segmentTypes.map((segType, batchIdx) => {
-      return new Promise((resolve) => {
-        const input = encodeURIComponent(JSON.stringify({
-          [String(batchIdx)]: { imdbId, segmentType: segType }
-        }));
-        const url = `${INTRODB_BASE}/trpc/stats.coverageWithStats?batch=1&input=${input}`;
-        
-        if (gmXhr) {
-          gmXhr({
-            method: 'GET',
-            url: url,
-            headers: { 'Accept': 'application/json' },
-            onload: (response) => {
-              try {
-                if (response.status === 200) {
-                  const json = JSON.parse(response.responseText);
-                  const resultData = json?.[0]?.result?.data;
-                  const segments = [];
-                  if (resultData && Array.isArray(resultData.seasons)) {
-                    for (const season of resultData.seasons) {
-                      for (const ep of (season.episodes || [])) {
-                        if (ep.has_segment) {
-                          segments.push(`${season.season}_${ep.episode}_${segType}`);
-                        }
-                      }
-                    }
-                  }
-                  resolve(segments);
-                } else {
-                  resolve([]);
-                }
-              } catch (_) {
-                resolve([]);
-              }
-            },
-            onerror: () => resolve([])
-          });
-        } else {
-          // Fallback to fetch (will likely fail due to CORS)
-          fetch(url)
-            .then(response => response.json())
-            .then(json => {
-              const resultData = json?.[0]?.result?.data;
-              const segments = [];
-              if (resultData && Array.isArray(resultData.seasons)) {
-                for (const season of resultData.seasons) {
-                  for (const ep of (season.episodes || [])) {
-                    if (ep.has_segment) {
-                      segments.push(`${season.season}_${ep.episode}_${segType}`);
-                    }
-                  }
-                }
-              }
-              resolve(segments);
-            })
-            .catch(() => resolve([]));
-        }
-      });
-    })
+    episodeKeys.map(key => loadExistingSegmentsForEpisode(key, apiKey))
   );
-  
-  return results.flat();
+
+  // Return all segment types found
+  const allSegments = [];
+  for (let i = 0; i < episodeKeys.length; i++) {
+    const key = episodeKeys[i];
+    const set = results[i];
+    for (const segType of set) {
+      allSegments.push({ key, segmentType: segType });
+    }
+  }
+
+  console.log('[NFE-DEDUP] loadExistingSegments: total existing segments found:', allSegments.length);
+  return allSegments;
 }
 
 /**
@@ -965,6 +956,61 @@ function toast(msg) {
   }, 3500);
 }
 
+/**
+ * Show the export data in a modal before files are downloaded.
+ * The preview deliberately uses textContent so captured metadata cannot inject HTML.
+ */
+function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
+  document.getElementById('nfe-export-preview')?.remove();
+
+  const { colors } = getProviderConfig(currentProvider);
+  const overlay = document.createElement('div');
+  overlay.id = 'nfe-export-preview';
+  overlay.style.cssText = `
+    position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center;
+    justify-content:center; padding:24px; background:rgba(0,0,0,.72);
+  `;
+
+  const dialog = document.createElement('section');
+  dialog.style.cssText = `
+    width:min(760px, 100%); max-height:calc(100vh - 48px); display:flex; flex-direction:column;
+    padding:18px; border:1px solid ${colors.border}; border-radius:12px; background:${colors.background};
+    color:${colors.text}; font:13px -apple-system,Arial,sans-serif; box-shadow:0 16px 48px rgba(0,0,0,.85);
+  `;
+
+  const heading = document.createElement('h2');
+  heading.textContent = 'Controleer JSON-export';
+  heading.style.cssText = `margin:0 0 6px; color:${colors.primary}; font-size:16px;`;
+  const summary = document.createElement('p');
+  summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}.`;
+  summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary};`;
+  const preview = document.createElement('pre');
+  preview.textContent = JSON.stringify({ items }, null, 2);
+  preview.style.cssText = `
+    overflow:auto; flex:1; min-height:180px; margin:0 0 14px; padding:12px; border-radius:8px;
+    background:${colors.panelBg}; color:${colors.text}; font:11px ui-monospace,Consolas,monospace; white-space:pre-wrap;
+  `;
+  const actions = document.createElement('div');
+  actions.style.cssText = 'display:flex; justify-content:flex-end; gap:8px;';
+  const cancel = document.createElement('button');
+  cancel.textContent = 'Annuleren';
+  cancel.style.cssText = 'padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; cursor:pointer;';
+  const confirm = document.createElement('button');
+  confirm.textContent = 'Download JSON';
+  confirm.style.cssText = `padding:8px 12px; border:0; border-radius:6px; background:${colors.primary}; color:#fff; font-weight:700; cursor:pointer;`;
+
+  const close = () => overlay.remove();
+  cancel.addEventListener('click', close);
+  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
+  confirm.addEventListener('click', () => { close(); onConfirm(); });
+  actions.append(cancel, confirm);
+  dialog.append(heading, summary, preview, actions);
+  overlay.append(dialog);
+  document.body.append(overlay);
+  confirm.focus();
+}
+
+
   // ─── ui/button.js ───
 
 /**
@@ -1092,7 +1138,7 @@ function processMetadata(data, providerName) {
   const video = data.video;
   if (!video) return;
 
-  if (video.title && state.showTitle !== video.title) {
+if (video.title && state.showTitle !== video.title) {
     state.showTitle = video.title;
     state.showId = video.id != null ? String(video.id) : null;
     state.showYear = '';
@@ -1101,8 +1147,7 @@ function processMetadata(data, providerName) {
     }
     state.dbSearchDone = false;
     state.imdbId = '';
-    state.existingSegments = new Set();
-    state.existingSegmentsLoaded = false;
+    state.dedupCacheV2 = {};
     updatePanelTitle();
     console.log(`[NFE] Show ID (stable, series-level): ${state.showId}`);
   }
@@ -1283,12 +1328,7 @@ async function exportJSON() {
   }
 
   const beforeCount = items.length;
-  items = items.filter(item => {
-    const key = `${item.imdb_id}|${item.season}|${item.episode}`;
-    const cache = state.dedupCacheV2 && state.dedupCacheV2[key];
-    if (!cache) return true;
-    return !cache.has(item.segment_type);
-  });
+  items = items.filter(item => !isAlreadyInIntroDB(item));
   
   const dupCount = beforeCount - items.length;
   if (dupCount > 0) toast(`${dupCount} duplicate(s) already in IntroDB removed from export.`);
@@ -1340,13 +1380,18 @@ async function exportJSON() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     setTimeout(() => downloadNext(idx + 1), 400);
   }
-  downloadNext(0);
+  showExportPreview({
+    items,
+    fileCount: files.length,
+    duplicateCount: dupCount,
+    onConfirm: () => downloadNext(0),
+  });
 }
 
 /**
  * Submit all timestamps to IntroDB
  */
-function submitToIntroDB() {
+async function submitToIntroDB() {
   if (!state.allItems.length) { 
     toast('No timestamps to submit.'); 
     return; 
@@ -1369,6 +1414,19 @@ function submitToIntroDB() {
   const pendingItems = allMapped.filter(i => i.imdb_id === 'IMDB_PENDING');
   if (pendingItems.length > 0) {
     toast(`${pendingItems.length} timestamp(s) have no IMDb ID yet (IMDB_PENDING) and will be skipped.`);
+  }
+
+  // Pre-load cache for all episodes before filtering
+  const episodeKeys = [...new Set(
+    allMapped
+      .filter(i => i.imdb_id && i.imdb_id !== 'IMDB_PENDING')
+      .map(i => createEpisodeCacheKey(i.imdb_id, i.season, i.episode))
+  )];
+  
+  const notLoaded = episodeKeys.filter(k => !(state.dedupCacheV2 && state.dedupCacheV2[k]));
+  if (notLoaded.length > 0) {
+    toast(`Checking IntroDB for existing segments (${notLoaded.length} episode(s))...`);
+    await Promise.all(notLoaded.map(k => loadExistingSegmentsForEpisode(k)));
   }
 
   const items = allMapped.filter(item => item.imdb_id !== 'IMDB_PENDING' && !isAlreadyInIntroDB(item));
@@ -1405,7 +1463,12 @@ function submitToIntroDB() {
       sent++;
       if (result.success) {
         state.submitResults.ok++;
-        state.existingSegments.add(`${item.season}_${item.episode}_${item.segment_type}`);
+        // Update cache for consistency (using shared helper)
+        const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
+        if (!state.dedupCacheV2[key]) {
+          state.dedupCacheV2[key] = new Set();
+        }
+        state.dedupCacheV2[key].add(item.segment_type);
       } else {
         state.submitResults.fail++;
         console.warn('[NFE] IntroDB rejected:', result.status, item);
@@ -1424,10 +1487,12 @@ function submitToIntroDB() {
 }
 
 /**
- * Check if a segment already exists in IntroDB
+ * Check the per-episode cache for an existing segment.
+ * A missing cache entry is treated as not found; callers load the cache first.
  */
 function isAlreadyInIntroDB(item) {
-  return state.existingSegments.has(`${item.season}_${item.episode}_${item.segment_type}`);
+  const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
+  return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
 }
 
 /**
@@ -1452,8 +1517,7 @@ function clearData() {
     showTitle: '',
     showYear: '',
     submitResults: { ok: 0, fail: 0 },
-    existingSegments: new Set(),
-    existingSegmentsLoaded: false,
+    dedupCacheV2: {},
   });
   updateCounters();
   updatePanelTitle();
@@ -1483,21 +1547,21 @@ window.nfePanelCallbacks = {
   onExport: exportJSON,
   onSubmit: submitToIntroDB,
   onClear: clearData,
-  onImdbSet: () => {
+onImdbSet: () => {
     const v = document.getElementById('nfe-imdb-input').value.trim();
     if (!v) return;
     state.imdbId = v;
     state.allItems.forEach(i => { if (i.imdb_id === 'IMDB_PENDING') i.imdb_id = v; });
-    state.existingSegments = new Set();
-    state.existingSegmentsLoaded = false;
+    state.dedupCacheV2 = {};
     setDbStatus(`ID saved: ${v}`);
     updateCounters();
   },
-    onImdbSearch: () => {
+onImdbSearch: () => {
       const manual = document.getElementById('nfe-imdb-input').value.trim();
       const q = manual || state.showTitle;
       if (!q) { toast('No title detected yet.'); return; }
       state.dbSearchDone = false;
+      state.dedupCacheV2 = {};
       searchImdbByTitle(q, state.showYear).then(result => {
         console.log('[NFE] Manual IMDb search result:', result);
         if (result.success) {
@@ -1640,4 +1704,5 @@ win.__netflixTimestamps = {
   getShowId: () => state.showId,
   state,
 };
+
 })();

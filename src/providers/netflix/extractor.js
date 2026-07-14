@@ -3,10 +3,10 @@
  * Handles detection, fetching, parsing, and normalization of Netflix segment data
  */
 
-import { state } from '../../core/state.js';
+import { state, createEpisodeCacheKey } from '../../core/state.js';
 import { createNormalizedSegment } from '../../normalization/segment-mapper.js';
 import { searchImdbByTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../../core/network.js';
-import { toast, updateCounters, updatePanelTitle, openPanel, closePanel, updateImdbInput } from '../../ui/panel.js';
+import { showExportPreview, toast, updateCounters, updateImdbInput, updatePanelTitle } from '../../ui/panel.js';
 
 // Manual overrides for shows where IMDb's title-suggestion search returns
 // the wrong entry. Keyed by Netflix's stable series-level video.id.
@@ -23,7 +23,7 @@ export function processMetadata(data, providerName) {
   const video = data.video;
   if (!video) return;
 
-  if (video.title && state.showTitle !== video.title) {
+if (video.title && state.showTitle !== video.title) {
     state.showTitle = video.title;
     state.showId = video.id != null ? String(video.id) : null;
     state.showYear = '';
@@ -32,8 +32,7 @@ export function processMetadata(data, providerName) {
     }
     state.dbSearchDone = false;
     state.imdbId = '';
-    state.existingSegments = new Set();
-    state.existingSegmentsLoaded = false;
+    state.dedupCacheV2 = {};
     updatePanelTitle();
     console.log(`[NFE] Show ID (stable, series-level): ${state.showId}`);
   }
@@ -214,12 +213,7 @@ export async function exportJSON() {
   }
 
   const beforeCount = items.length;
-  items = items.filter(item => {
-    const key = `${item.imdb_id}|${item.season}|${item.episode}`;
-    const cache = state.dedupCacheV2 && state.dedupCacheV2[key];
-    if (!cache) return true;
-    return !cache.has(item.segment_type);
-  });
+  items = items.filter(item => !isAlreadyInIntroDB(item));
   
   const dupCount = beforeCount - items.length;
   if (dupCount > 0) toast(`${dupCount} duplicate(s) already in IntroDB removed from export.`);
@@ -271,13 +265,18 @@ export async function exportJSON() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     setTimeout(() => downloadNext(idx + 1), 400);
   }
-  downloadNext(0);
+  showExportPreview({
+    items,
+    fileCount: files.length,
+    duplicateCount: dupCount,
+    onConfirm: () => downloadNext(0),
+  });
 }
 
 /**
  * Submit all timestamps to IntroDB
  */
-export function submitToIntroDB() {
+export async function submitToIntroDB() {
   if (!state.allItems.length) { 
     toast('No timestamps to submit.'); 
     return; 
@@ -300,6 +299,19 @@ export function submitToIntroDB() {
   const pendingItems = allMapped.filter(i => i.imdb_id === 'IMDB_PENDING');
   if (pendingItems.length > 0) {
     toast(`${pendingItems.length} timestamp(s) have no IMDb ID yet (IMDB_PENDING) and will be skipped.`);
+  }
+
+  // Pre-load cache for all episodes before filtering
+  const episodeKeys = [...new Set(
+    allMapped
+      .filter(i => i.imdb_id && i.imdb_id !== 'IMDB_PENDING')
+      .map(i => createEpisodeCacheKey(i.imdb_id, i.season, i.episode))
+  )];
+  
+  const notLoaded = episodeKeys.filter(k => !(state.dedupCacheV2 && state.dedupCacheV2[k]));
+  if (notLoaded.length > 0) {
+    toast(`Checking IntroDB for existing segments (${notLoaded.length} episode(s))...`);
+    await Promise.all(notLoaded.map(k => loadExistingSegmentsForEpisode(k)));
   }
 
   const items = allMapped.filter(item => item.imdb_id !== 'IMDB_PENDING' && !isAlreadyInIntroDB(item));
@@ -336,7 +348,12 @@ export function submitToIntroDB() {
       sent++;
       if (result.success) {
         state.submitResults.ok++;
-        state.existingSegments.add(`${item.season}_${item.episode}_${item.segment_type}`);
+        // Update cache for consistency (using shared helper)
+        const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
+        if (!state.dedupCacheV2[key]) {
+          state.dedupCacheV2[key] = new Set();
+        }
+        state.dedupCacheV2[key].add(item.segment_type);
       } else {
         state.submitResults.fail++;
         console.warn('[NFE] IntroDB rejected:', result.status, item);
@@ -355,10 +372,12 @@ export function submitToIntroDB() {
 }
 
 /**
- * Check if a segment already exists in IntroDB
+ * Check the per-episode cache for an existing segment.
+ * A missing cache entry is treated as not found; callers load the cache first.
  */
 export function isAlreadyInIntroDB(item) {
-  return state.existingSegments.has(`${item.season}_${item.episode}_${item.segment_type}`);
+  const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
+  return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
 }
 
 /**
@@ -383,8 +402,7 @@ export function clearData() {
     showTitle: '',
     showYear: '',
     submitResults: { ok: 0, fail: 0 },
-    existingSegments: new Set(),
-    existingSegmentsLoaded: false,
+    dedupCacheV2: {},
   });
   updateCounters();
   updatePanelTitle();

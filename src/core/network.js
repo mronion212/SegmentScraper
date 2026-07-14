@@ -3,7 +3,7 @@
  * Handles API requests, IMDb lookups, and IntroDB integration
  */
 
-import { state } from './state.js';
+import { state, createEpisodeCacheKey } from './state.js';
 
 const INTRODB_BASE = 'https://api.introdb.app';
 
@@ -133,74 +133,43 @@ export async function searchImdbByTitle(title, year, apiKey) {
 /**
  * Load existing segments from IntroDB for deduplication
  * Uses GM_xmlhttpRequest to avoid CORS issues
+ * 
+ * This function collects unique episode keys from the currently captured items
+ * and calls /segments endpoint once per unique episode.
+ * 
+ * @param {string} imdbId - IMDb ID to load segments for
+ * @param {string} apiKey - IntroDB API key (optional)
+ * @returns {Promise<Array>} - Array of { key, segmentType } objects
  */
 export async function loadExistingSegments(imdbId, apiKey) {
-  const segmentTypes = ['intro', 'recap', 'outro'];
-  const gmXhr = getGmXhr();
-  
+  console.log('[NFE-DEDUP] loadExistingSegments called for imdbId:', imdbId);
+
+  // Collect unique episode keys from currently captured items for this imdb_id
+  const episodeKeys = [...new Set(
+    state.allItems
+      .filter(i => i.imdb_id === imdbId)
+      .map(i => createEpisodeCacheKey(imdbId, i.season, i.episode))
+  )];
+
+  console.log('[NFE-DEDUP] loadExistingSegments: unique episode keys collected:', episodeKeys);
+
+  // Load each episode's segments via /segments endpoint
   const results = await Promise.all(
-    segmentTypes.map((segType, batchIdx) => {
-      return new Promise((resolve) => {
-        const input = encodeURIComponent(JSON.stringify({
-          [String(batchIdx)]: { imdbId, segmentType: segType }
-        }));
-        const url = `${INTRODB_BASE}/trpc/stats.coverageWithStats?batch=1&input=${input}`;
-        
-        if (gmXhr) {
-          gmXhr({
-            method: 'GET',
-            url: url,
-            headers: { 'Accept': 'application/json' },
-            onload: (response) => {
-              try {
-                if (response.status === 200) {
-                  const json = JSON.parse(response.responseText);
-                  const resultData = json?.[0]?.result?.data;
-                  const segments = [];
-                  if (resultData && Array.isArray(resultData.seasons)) {
-                    for (const season of resultData.seasons) {
-                      for (const ep of (season.episodes || [])) {
-                        if (ep.has_segment) {
-                          segments.push(`${season.season}_${ep.episode}_${segType}`);
-                        }
-                      }
-                    }
-                  }
-                  resolve(segments);
-                } else {
-                  resolve([]);
-                }
-              } catch (_) {
-                resolve([]);
-              }
-            },
-            onerror: () => resolve([])
-          });
-        } else {
-          // Fallback to fetch (will likely fail due to CORS)
-          fetch(url)
-            .then(response => response.json())
-            .then(json => {
-              const resultData = json?.[0]?.result?.data;
-              const segments = [];
-              if (resultData && Array.isArray(resultData.seasons)) {
-                for (const season of resultData.seasons) {
-                  for (const ep of (season.episodes || [])) {
-                    if (ep.has_segment) {
-                      segments.push(`${season.season}_${ep.episode}_${segType}`);
-                    }
-                  }
-                }
-              }
-              resolve(segments);
-            })
-            .catch(() => resolve([]));
-        }
-      });
-    })
+    episodeKeys.map(key => loadExistingSegmentsForEpisode(key, apiKey))
   );
-  
-  return results.flat();
+
+  // Return all segment types found
+  const allSegments = [];
+  for (let i = 0; i < episodeKeys.length; i++) {
+    const key = episodeKeys[i];
+    const set = results[i];
+    for (const segType of set) {
+      allSegments.push({ key, segmentType: segType });
+    }
+  }
+
+  console.log('[NFE-DEDUP] loadExistingSegments: total existing segments found:', allSegments.length);
+  return allSegments;
 }
 
 /**
