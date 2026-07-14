@@ -4,7 +4,7 @@
  */
 
 import { state } from '../core/state.js';
-import { getProviderConfig } from '../config/provider-config.js';
+import { getProviderConfig, PANEL_COLORS } from '../config/provider-config.js';
 
 // Default provider name
 let currentProvider = 'netflix';
@@ -27,7 +27,8 @@ export function createPanel() {
     console.error('[NFE] No config found for provider:', currentProvider);
     return;
   }
-  const { colors, branding } = config;
+  const { colors: providerColors, branding, infoAccent, nameColor } = config;
+  const colors = PANEL_COLORS;
   
   if (document.getElementById('nfe-panel')) {
     console.log('[NFE] Panel already exists');
@@ -40,13 +41,25 @@ export function createPanel() {
     position:fixed; z-index:2147483647; width:308px; max-width:calc(100vw - 40px);
     background:${colors.background}; border:1px solid ${colors.border}; border-radius:12px;
     padding:16px; color:${colors.text}; font-family:-apple-system,Arial,sans-serif;
-    font-size:13px; box-shadow:0 16px 48px rgba(0,0,0,0.85);
+    font-size:13px; line-height:normal; box-sizing:border-box; box-shadow:0 16px 48px rgba(0,0,0,0.85);
     transition:opacity 0.18s; user-select:none; display:none; opacity:0;
   `;
 
   panel.innerHTML = `
+    <style>
+      #nfe-panel, #nfe-panel * {
+        box-sizing:border-box; font-family:-apple-system,Arial,sans-serif;
+        font-style:normal; text-shadow:none;
+      }
+      #nfe-panel button, #nfe-panel input {
+        min-width:0; margin:0; font-family:-apple-system,Arial,sans-serif;
+        font-style:normal; line-height:normal; letter-spacing:normal; text-transform:none;
+        appearance:none; -webkit-appearance:none;
+      }
+      #nfe-panel button, #nfe-panel input { min-height:0; }
+    </style>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <span style="font-size:13px;font-weight:700;color:${colors.primary}">${branding.icon} ${config.name} ${branding.title}</span>
+      <span style="font-size:13px;font-weight:700;color:${nameColor}">${branding.icon} ${config.name} ${branding.title}</span>
       <button id="nfe-close" style="background:none;border:none;color:${colors.textMuted};font-size:18px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s"
         onmouseenter="this.style.color='${colors.text}'" onmouseleave="this.style.color='${colors.textMuted}'">✕</button>
     </div>
@@ -59,15 +72,15 @@ export function createPanel() {
         <input id="nfe-imdb-input" type="text" placeholder="ID (e.g. tt123456)..." value="${state.imdbId}"
           style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
                  padding:6px 8px;font-size:12px;outline:none;transition:border-color 0.15s"
-          onfocus="this.style.borderColor='${colors.primary}'" onblur="this.style.borderColor='#303030'"/>
+          onfocus="this.style.borderColor='${colors.accent}'" onblur="this.style.borderColor='#303030'"/>
         <button id="nfe-imdb-search" title="Search by title on IMDb"
           style="background:#242424;border:1px solid #303030;border-radius:6px;color:#bbb;
                  padding:6px 8px;cursor:pointer;font-size:12px;transition:background 0.15s"
           onmouseenter="this.style.background='#2e2e2e'" onmouseleave="this.style.background='#242424'">🔍</button>
         <button id="nfe-imdb-set"
-          style="background:${colors.primary};border:none;border-radius:6px;color:#fff;
+          style="background:${providerColors.primary};border:none;border-radius:6px;color:#fff;
                  padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;transition:background 0.15s"
-          onmouseenter="this.style.background='${colors.primaryDark}'" onmouseleave="this.style.background='${colors.primary}'">OK</button>
+          onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">OK</button>
       </div>
     </div>
 
@@ -81,7 +94,7 @@ export function createPanel() {
         <div id="nfe-cnt-series-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Series</div>
       </div>
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
-        <div id="nfe-cnt-files" style="font-size:20px;font-weight:700;color:${colors.primary};line-height:1">0</div>
+        <div id="nfe-cnt-files" style="font-size:20px;font-weight:700;color:#fff;line-height:1">0</div>
         <div id="nfe-cnt-files-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Files</div>
       </div>
     </div>
@@ -92,15 +105,15 @@ export function createPanel() {
       <div style="flex:1;height:1px;background:${colors.border}"></div>
     </div>
 
-    <div style="border-left:2px solid ${colors.primary};padding:6px 9px;margin-bottom:8px;font-size:11px;color:${colors.textMuted};line-height:1.4;background:${colors.panelBg};border-radius:0 7px 7px 0">
+    <div style="border-left:2px solid ${infoAccent};padding:6px 9px;margin-bottom:8px;font-size:11px;color:${colors.textMuted};line-height:1.4;background:${colors.panelBg};border-radius:0 7px 7px 0">
       ${config.captureHint}
     </div>
 
     <button id="nfe-export"
-      style="width:100%;background:${colors.primary};border:none;border-radius:8px;color:#fff;
+      style="width:100%;background:${providerColors.primary};border:none;border-radius:8px;color:#fff;
              padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
              transition:background 0.15s"
-      onmouseenter="this.style.background='${colors.primaryDark}'" onmouseleave="this.style.background='${colors.primary}'">
+      onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">
       📥 Download JSON(s)
     </button>
 
@@ -116,21 +129,21 @@ export function createPanel() {
          <input id="nfe-apikey-input" type="password" placeholder="Enter your IntroDB API key..." value="${state.introdbApiKey}"
            style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
                   padding:6px 8px;font-size:12px;outline:none;transition:border-color 0.15s"
-           onfocus="this.style.borderColor='${colors.primary}'" onblur="this.style.borderColor='#303030'"/>
+           onfocus="this.style.borderColor='${colors.accent}'" onblur="this.style.borderColor='#303030'"/>
          <button id="nfe-apikey-set"
-           style="background:${colors.primary};border:none;border-radius:6px;color:#fff;
+           style="background:${providerColors.primary};border:none;border-radius:6px;color:#fff;
                   padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;transition:background 0.15s"
-           onmouseenter="this.style.background='${colors.primaryDark}'" onmouseleave="this.style.background='${colors.primary}'">Save</button>
+           onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">Save</button>
        </div>
      </div>
 
      <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved' : ''}</div>
 
      <button id="nfe-submit"
-       style="width:100%;background:${colors.secondary};border:none;border-radius:8px;color:#fff;
+       style="width:100%;background:${providerColors.secondary};border:none;border-radius:8px;color:#fff;
               padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
               transition:background 0.15s"
-       onmouseenter="this.style.background='${colors.secondaryDark}'" onmouseleave="this.style.background='${colors.secondary}'">
+       onmouseenter="this.style.background='${providerColors.secondaryDark}'" onmouseleave="this.style.background='${providerColors.secondary}'">
        📡 Submit to IntroDB
      </button>
 
@@ -367,41 +380,44 @@ export function toast(msg) {
 export function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   document.getElementById('nfe-export-preview')?.remove();
 
-  const { colors } = getProviderConfig(currentProvider);
+  const { colors: providerColors } = getProviderConfig(currentProvider);
+  const colors = PANEL_COLORS;
   const overlay = document.createElement('div');
   overlay.id = 'nfe-export-preview';
   overlay.style.cssText = `
     position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center;
-    justify-content:center; padding:24px; background:rgba(0,0,0,.72);
+    justify-content:center; padding:24px; background:rgba(0,0,0,.72); box-sizing:border-box;
   `;
 
   const dialog = document.createElement('section');
   dialog.style.cssText = `
     width:min(760px, 100%); max-height:calc(100vh - 48px); display:flex; flex-direction:column;
     padding:18px; border:1px solid ${colors.border}; border-radius:12px; background:${colors.background};
-    color:${colors.text}; font:13px -apple-system,Arial,sans-serif; box-shadow:0 16px 48px rgba(0,0,0,.85);
+    color:${colors.text}; font:13px/normal -apple-system,Arial,sans-serif; box-sizing:border-box;
+    box-shadow:0 16px 48px rgba(0,0,0,.85);
   `;
 
   const heading = document.createElement('h2');
   heading.textContent = 'Controleer JSON-export';
-  heading.style.cssText = `margin:0 0 6px; color:${colors.primary}; font-size:16px;`;
+  heading.style.cssText = `margin:0 0 6px; color:${colors.accent}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
   summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}.`;
-  summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary};`;
+  summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
   const preview = document.createElement('pre');
   preview.textContent = JSON.stringify({ items }, null, 2);
   preview.style.cssText = `
     overflow:auto; flex:1; min-height:180px; margin:0 0 14px; padding:12px; border-radius:8px;
-    background:${colors.panelBg}; color:${colors.text}; font:11px ui-monospace,Consolas,monospace; white-space:pre-wrap;
+    background:${colors.panelBg}; color:${colors.text}; box-sizing:border-box;
+    font:11px/normal ui-monospace,Consolas,monospace; white-space:pre-wrap;
   `;
   const actions = document.createElement('div');
   actions.style.cssText = 'display:flex; justify-content:flex-end; gap:8px;';
   const cancel = document.createElement('button');
   cancel.textContent = 'Annuleren';
-  cancel.style.cssText = 'padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; cursor:pointer;';
+  cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
   const confirm = document.createElement('button');
   confirm.textContent = 'Download JSON';
-  confirm.style.cssText = `padding:8px 12px; border:0; border-radius:6px; background:${colors.primary}; color:#fff; font-weight:700; cursor:pointer;`;
+  confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
 
   const close = () => overlay.remove();
   cancel.addEventListener('click', close);

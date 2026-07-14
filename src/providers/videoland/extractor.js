@@ -4,11 +4,15 @@
  */
 
 import { state } from '../../core/state.js';
-import { searchImdbByTitle, loadExistingSegments } from '../../core/network.js';
-import { setDbStatus } from '../netflix/extractor.js';
-import { toast, updateCounters, updateImdbInput, updatePanelTitle } from '../../ui/panel.js';
+import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 
 const VIDEOLAND_LAYOUT_URL_MATCH = /\/layout(\?|$)/i;
+
+function ensureVideolandState() {
+  if (!(state.clipMap instanceof Map)) state.clipMap = new Map();
+  if (state.currentSeason == null) state.currentSeason = 1;
+  if (state.currentEpisode == null) state.currentEpisode = 1;
+}
 
 function coerceVideolandNumber(value) {
   if (typeof value === 'number' && !Number.isNaN(value)) return value;
@@ -53,40 +57,11 @@ function mapVideolandChapterType(type) {
 }
 
 function updateVideolandTitle(title, programId) {
-  if (title && title !== state.showTitle) {
-    state.showTitle = title;
-    state.showId = programId;
-    if (programId) state.showIds.add(programId);
-    state.showYear = '';
-    state.dbSearchDone = false;
-    state.imdbId = '';
-    state.dedupCacheV2 = {};
-    updatePanelTitle();
-  }
-
-  if (!state.dbSearchDone && state.showTitle) {
-    state.dbSearchDone = true;
-    searchImdbByTitle(state.showTitle, state.showYear).then(result => {
-      if (result.success) {
-        state.imdbId = result.imdbId;
-        state.allItems.forEach(item => {
-          if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
-        });
-        updateImdbInput();
-        setDbStatus(`Found: ${result.imdbId}`);
-        updateCounters();
-        loadExistingSegments(result.imdbId);
-      } else {
-        setDbStatus(`IMDb lookup failed: ${result.error}`);
-      }
-    }).catch(error => {
-      console.error('[VLE] IMDb search error:', error);
-      setDbStatus('IMDb lookup error');
-    });
-  }
+  handleDetectedShow({ title, showId: programId });
 }
 
 export function processVideolandLayout(json) {
+  ensureVideolandState();
   let rootMeta;
   let videoItems;
   try {
@@ -113,12 +88,11 @@ export function processVideolandLayout(json) {
   if (season != null && episode != null) {
     state.currentSeason = season;
     state.currentEpisode = episode;
-    updatePanelTitle();
   }
   updateVideolandTitle(title, rootMeta.programId);
 
   if (season == null || episode == null) return;
-  let newItems = 0;
+  const extractedItems = [];
   for (const chapter of activeItem.video.chapters || []) {
     const segmentType = mapVideolandChapterType(chapter.type);
     const startSec = coerceVideolandNumber(chapter.tcStart);
@@ -126,8 +100,8 @@ export function processVideolandLayout(json) {
     if (!segmentType || startSec == null || endSec == null) continue;
 
     const episodeId = `${clipId}_${segmentType}`;
-    if (state.allItems.some(item => item._eid === episodeId)) continue;
-    state.allItems.push({
+    if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+    extractedItems.push({
       _eid: episodeId,
       imdb_id: state.imdbId || 'IMDB_PENDING',
       segment_type: segmentType,
@@ -136,17 +110,12 @@ export function processVideolandLayout(json) {
       start_sec: startSec,
       end_sec: endSec,
     });
-    newItems++;
   }
-
-  if (newItems > 0) {
-    state.interceptedCount++;
-    updateCounters();
-    toast(`+${newItems} timestamps captured (S${season}E${episode}) · total: ${state.allItems.length}`);
-  }
+  recordExtractedSegments(extractedItems);
 }
 
 export function setupVideolandInterception() {
+  ensureVideolandState();
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
   const originalFetch = win.fetch.bind(win);
   win.fetch = function (input, init) {

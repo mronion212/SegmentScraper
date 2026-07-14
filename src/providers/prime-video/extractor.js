@@ -5,11 +5,16 @@
  */
 
 import { state } from '../../core/state.js';
-import { searchImdbByTitle, loadExistingSegments } from '../../core/network.js';
-import { setDbStatus } from '../netflix/extractor.js';
-import { toast, updateCounters, updateImdbInput, updatePanelTitle } from '../../ui/panel.js';
+import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 
 const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
+
+function ensurePrimeVideoState() {
+  if (!(state.asinMap instanceof Map)) state.asinMap = new Map();
+  if (!(state.pendingByAsin instanceof Map)) state.pendingByAsin = new Map();
+  if (state.currentSeason == null) state.currentSeason = 1;
+  if (state.currentEpisode == null) state.currentEpisode = 1;
+}
 
 function findPrimeVideoAsinInObject(obj, depth = 0) {
   if (!obj || typeof obj !== 'object' || depth > 5) return null;
@@ -75,43 +80,12 @@ function updatePrimeVideoTitle(rawTitle) {
   const cleaned = rawTitle.replace(/^Prime Video[:\-]\s*/i, '').trim();
   const seasonMatch = cleaned.match(/\s*(Seizoen|Season)\s*(\d+)/i);
   const title = seasonMatch ? cleaned.slice(0, seasonMatch.index).trim() : cleaned;
-
-  if (title && title !== state.showTitle) {
-    state.showTitle = title;
-    state.showId = null;
-    state.showIds.add(title);
-    state.showYear = '';
-    state.dbSearchDone = false;
-    state.imdbId = '';
-    state.dedupCacheV2 = {};
-    updatePanelTitle();
-  }
-
-  if (!state.dbSearchDone && state.showTitle) {
-    state.dbSearchDone = true;
-    searchImdbByTitle(state.showTitle, state.showYear).then(result => {
-      if (result.success) {
-        state.imdbId = result.imdbId;
-        state.allItems.forEach(item => {
-          if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
-        });
-        updateImdbInput();
-        setDbStatus(`Found: ${result.imdbId}`);
-        updateCounters();
-        loadExistingSegments(result.imdbId);
-      } else {
-        setDbStatus(`IMDb lookup failed: ${result.error}`);
-      }
-    }).catch(error => {
-      console.error('[PVE] IMDb search error:', error);
-      setDbStatus('IMDb lookup error');
-    });
-  }
+  handleDetectedShow({ title, showId: title });
 }
 
 function finalizePrimeVideoEvents(asin, season, episode, data) {
   const events = data?.transitionTimecodes?.result?.events || [];
-  let newItems = 0;
+  const extractedItems = [];
 
   for (const event of events) {
     let segmentType = null;
@@ -120,8 +94,8 @@ function finalizePrimeVideoEvents(asin, season, episode, data) {
     if (!segmentType || typeof event.startTimeMs !== 'number' || typeof event.endTimeMs !== 'number') continue;
 
     const episodeId = `${asin}_${segmentType}`;
-    if (state.allItems.some(item => item._eid === episodeId)) continue;
-    state.allItems.push({
+    if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+    extractedItems.push({
       _eid: episodeId,
       imdb_id: state.imdbId || 'IMDB_PENDING',
       segment_type: segmentType,
@@ -130,14 +104,8 @@ function finalizePrimeVideoEvents(asin, season, episode, data) {
       start_sec: event.startTimeMs / 1000,
       end_sec: event.endTimeMs / 1000,
     });
-    newItems++;
   }
-
-  if (newItems > 0) {
-    state.interceptedCount++;
-    updateCounters();
-    toast(`+${newItems} timestamps captured (S${season}E${episode}) · total: ${state.allItems.length}`);
-  }
+  recordExtractedSegments(extractedItems);
 }
 
 function pollPrimeVideoEpisode(asin, attempt) {
@@ -147,7 +115,6 @@ function pollPrimeVideoEpisode(asin, attempt) {
     state.currentSeason = snapshot.season;
     state.currentEpisode = snapshot.episode;
     updatePrimeVideoTitle(snapshot.title);
-    updatePanelTitle();
     const pending = state.pendingByAsin.get(asin) || [];
     state.pendingByAsin.delete(asin);
     pending.forEach(data => finalizePrimeVideoEvents(asin, snapshot.season, snapshot.episode, data));
@@ -162,6 +129,7 @@ function pollPrimeVideoEpisode(asin, attempt) {
 }
 
 export function processPrimeVideoMetadata(data, bodyText, url) {
+  ensurePrimeVideoState();
   const asin = extractPrimeVideoAsin(bodyText, url);
   if (!asin) return;
   if (state.asinMap.has(asin)) {
@@ -175,6 +143,7 @@ export function processPrimeVideoMetadata(data, bodyText, url) {
 }
 
 export function setupPrimeVideoInterception() {
+  ensurePrimeVideoState();
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
   const OriginalXHR = win.XMLHttpRequest;
 

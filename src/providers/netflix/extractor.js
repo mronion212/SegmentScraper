@@ -1,417 +1,112 @@
-/**
- * Netflix-specific segment extraction module
- * Handles detection, fetching, parsing, and normalization of Netflix segment data
- */
+/** Netflix-specific metadata interception and segment extraction. */
 
-import { state, createEpisodeCacheKey } from '../../core/state.js';
+import { state } from '../../core/state.js';
 import { createNormalizedSegment } from '../../normalization/segment-mapper.js';
-import { searchImdbByTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../../core/network.js';
-import { showExportPreview, toast, updateCounters, updateImdbInput, updatePanelTitle } from '../../ui/panel.js';
+import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 
-// Manual overrides for shows where IMDb's title-suggestion search returns
-// the wrong entry. Keyed by Netflix's stable series-level video.id.
 export const NETFLIX_TITLE_OVERRIDES = {
-  '81748089': 'tt2431250', // Het kleine huis op de prairie -> correct IMDb entry
+  '81748089': 'tt2431250',
 };
 
-/**
- * Process Netflix metadata and extract segments
- * @param {Object} data - The metadata response from Netflix API
- * @param {string} providerName - The provider name
- */
-export function processMetadata(data, providerName) {
+export function processNetflixMetadata(data) {
   const video = data.video;
   if (!video) return;
 
-if (video.title && state.showTitle !== video.title) {
-    state.showTitle = video.title;
-    state.showId = video.id != null ? String(video.id) : null;
-    if (state.showId) state.showIds.add(state.showId);
-    state.showYear = '';
-    if (video.seasons && video.seasons[0]) {
-      state.showYear = String(video.seasons[0].year || '');
-    }
-    state.dbSearchDone = false;
-    state.imdbId = '';
-    state.dedupCacheV2 = {};
-    updatePanelTitle();
-    console.log(`[NFE] Show ID (stable, series-level): ${state.showId}`);
-  }
+  const showId = video.id != null ? String(video.id) : null;
+  const year = video.seasons?.[0]?.year || '';
+  handleDetectedShow({
+    title: video.title,
+    showId,
+    year,
+    imdbOverride: showId ? NETFLIX_TITLE_OVERRIDES[showId] : null,
+  });
 
-  if (!state.dbSearchDone && state.showTitle) {
-    state.dbSearchDone = true;
-    const override = state.showId && NETFLIX_TITLE_OVERRIDES[state.showId];
-    console.log('[NFE] IMDb lookup triggered for showTitle:', state.showTitle, 'showYear:', state.showYear, 'override:', override);
-    if (override) {
-      state.imdbId = override;
-      state.allItems.forEach(i => { 
-        if (i.imdb_id === 'IMDB_PENDING') i.imdb_id = override; 
-      });
-      updateImdbInput();
-      setDbStatus(`Manual override applied · ID: ${override}`);
-      updateCounters();
-      loadExistingSegments(override);
-     } else {
-       searchImdbByTitle(state.showTitle, state.showYear).then(result => {
-         console.log('[NFE] IMDb search result:', result);
-         if (result.success) {
-           state.imdbId = result.imdbId;
-           state.allItems.forEach(i => { 
-             if (i.imdb_id === 'IMDB_PENDING') i.imdb_id = result.imdbId; 
-           });
-           updateImdbInput();
-           setDbStatus(`Found: ${result.imdbId}`);
-           updateCounters();
-           loadExistingSegments(result.imdbId);
-         } else {
-           setDbStatus(`IMDb lookup failed: ${result.error}`);
-         }
-       }).catch(err => {
-         console.error('[NFE] IMDb search error:', err);
-         setDbStatus('IMDb lookup error');
-       });
-     }
-   }
+  const extractedItems = [];
+  for (const season of video.seasons || []) {
+    for (const episode of season.episodes || []) {
+      const episodeId = episode.episodeId || episode.id;
+      if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
 
-  let newItems = 0;
-  for (const season of (video.seasons || [])) {
-    const sNum = season.seq;
-    for (const ep of (season.episodes || [])) {
-      const eid = ep.episodeId || ep.id;
-      if (state.allItems.some(i => i._eid === eid)) continue;
-
-      const eNum = ep.seq;
-      const tid = state.imdbId || 'IMDB_PENDING';
-      const mk = ep.skipMarkers || {};
-
-      // Extract segments using normalization layer
-      const recap = mk.recap;
-      if (recap && recap.end > 0) {
-        const item = createNormalizedSegment({
+      const common = {
+        providerName: 'netflix',
+        episodeId,
+        season: season.seq,
+        episode: episode.seq,
+        imdbId: state.imdbId || 'IMDB_PENDING',
+      };
+      const markers = episode.skipMarkers || {};
+      const segments = [
+        markers.recap?.end > 0 && {
           providerSegmentType: 'recap',
-          providerName,
-          episodeId: eid,
-          season: sNum,
-          episode: eNum,
-          startSec: recap.start / 1000,
-          endSec: recap.end / 1000,
-          imdbId: tid
-        });
-        if (item) {
-          state.allItems.push(item);
-          newItems++;
-        }
-      }
-
-      const credit = mk.credit;
-      if (credit && credit.end > 0) {
-        const item = createNormalizedSegment({
+          startSec: markers.recap.start / 1000,
+          endSec: markers.recap.end / 1000,
+        },
+        markers.credit?.end > 0 && {
           providerSegmentType: 'credit',
-          providerName,
-          episodeId: eid,
-          season: sNum,
-          episode: eNum,
-          startSec: credit.start / 1000,
-          endSec: credit.end / 1000,
-          imdbId: tid
-        });
-        if (item) {
-          state.allItems.push(item);
-          newItems++;
-        }
-      }
-
-      const intro = mk.intro;
-      if (intro && intro.end > 0) {
-        const item = createNormalizedSegment({
+          startSec: markers.credit.start / 1000,
+          endSec: markers.credit.end / 1000,
+        },
+        markers.intro?.end > 0 && {
           providerSegmentType: 'intro',
-          providerName,
-          episodeId: eid,
-          season: sNum,
-          episode: eNum,
-          startSec: intro.start / 1000,
-          endSec: intro.end / 1000,
-          imdbId: tid
-        });
-        if (item) {
-          state.allItems.push(item);
-          newItems++;
-        }
-      }
-
-      // Outro from creditsOffset and runtime
-      if (ep.creditsOffset && ep.runtime) {
-        const item = createNormalizedSegment({
+          startSec: markers.intro.start / 1000,
+          endSec: markers.intro.end / 1000,
+        },
+        episode.creditsOffset && episode.runtime && {
           providerSegmentType: 'creditsOffset',
-          providerName,
-          episodeId: eid,
-          season: sNum,
-          episode: eNum,
-          startSec: parseFloat(ep.creditsOffset),
-          endSec: parseFloat(ep.runtime),
-          imdbId: tid
+          startSec: parseFloat(episode.creditsOffset),
+          endSec: parseFloat(episode.runtime),
+        },
+      ].filter(Boolean);
+
+      for (const segment of segments) {
+        const item = createNormalizedSegment({ ...common, ...segment });
+        if (item) extractedItems.push(item);
+      }
+    }
+  }
+  recordExtractedSegments(extractedItems);
+}
+
+export function setupNetflixInterception() {
+  const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+  const OriginalXHR = win.XMLHttpRequest;
+
+  function NetflixInterceptedXHR() {
+    const xhr = new OriginalXHR();
+    let url = '';
+    const originalOpen = xhr.open.bind(xhr);
+    const originalSend = xhr.send.bind(xhr);
+    xhr.open = function (method, requestUrl, ...rest) {
+      url = requestUrl;
+      return originalOpen(method, requestUrl, ...rest);
+    };
+    xhr.send = function (...args) {
+      if (url && url.includes('memberapi') && url.includes('metadata')) {
+        xhr.addEventListener('load', () => {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (data?.video) processNetflixMetadata(data);
+          } catch (_) {}
         });
-        if (item) {
-          state.allItems.push(item);
-          newItems++;
-        }
       }
+      return originalSend(...args);
+    };
+    return xhr;
+  }
+  Object.setPrototypeOf(NetflixInterceptedXHR, OriginalXHR);
+  NetflixInterceptedXHR.prototype = OriginalXHR.prototype;
+  win.XMLHttpRequest = NetflixInterceptedXHR;
+
+  const originalFetch = win.fetch.bind(win);
+  win.fetch = async function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const response = await originalFetch(input, init);
+    if (url.includes('memberapi') && url.includes('metadata')) {
+      try {
+        const data = await response.clone().json();
+        if (data?.video) processNetflixMetadata(data);
+      } catch (_) {}
     }
-  }
-
-  if (newItems > 0) {
-    state.interceptedCount++;
-    updateCounters();
-    toast(`+${newItems} timestamps captured · total: ${state.allItems.length}`);
-  }
-}
-
-/**
- * Set the IMDb status message
- */
-export function setDbStatus(msg) {
-  state.dbStatusMsg = msg;
-  const el = document.getElementById('nfe-imdb-status');
-  if (el) el.textContent = `IMDb ID: ${state.imdbId || 'Not set'}`;
-}
-
-/**
- * Set the IntroDB status message
- */
-export function setIntrodbStatus(msg) {
-  const el = document.getElementById('nfe-introdb-status');
-  if (!el) return;
-  el.textContent = msg;
-  el.style.display = msg ? 'block' : 'none';
-}
-
-/**
- * Export captured timestamps to JSON files
- */
-export async function exportJSON() {
-  if (!state.allItems.length) { 
-    toast('No timestamps yet.'); 
-    return; 
-  }
-
-  // Group by each item's OWN imdb_id
-  let items = state.allItems.map(({ _eid, ...rest }) => rest);
-  const pendingCount = items.filter(i => i.imdb_id === 'IMDB_PENDING').length;
-  if (pendingCount > 0) {
-    const proceed = confirm(`${pendingCount} timestamp(s) still have no IMDb ID assigned (IMDB_PENDING).\nThese will be exported as-is. Continue?`);
-    if (!proceed) return;
-  }
-
-  // Local dedup against IntroDB
-  const episodeKeys = [...new Set(
-    items
-      .filter(i => i.imdb_id && i.imdb_id !== 'IMDB_PENDING')
-      .map(i => `${i.imdb_id}|${i.season}|${i.episode}`)
-  )];
-  
-  const notLoaded = episodeKeys.filter(k => !(state.dedupCacheV2 && state.dedupCacheV2[k]));
-  if (notLoaded.length > 0) {
-    toast(`Checking IntroDB for existing segments (${notLoaded.length} episode(s))...`);
-    await Promise.all(notLoaded.map(k => loadExistingSegmentsForEpisode(k)));
-  }
-
-  const beforeCount = items.length;
-  items = items.filter(item => !isAlreadyInIntroDB(item));
-  
-  const dupCount = beforeCount - items.length;
-  if (dupCount > 0) toast(`${dupCount} duplicate(s) already in IntroDB removed from export.`);
-
-  if (!items.length) { 
-    toast('Nothing left to export after removing duplicates.'); 
-    return; 
-  }
-
-  // Group by IMDb ID for file output
-  const groups = new Map();
-  for (const item of items) {
-    const key = item.imdb_id || 'no_id';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
-  }
-
-  // Build files and download with delay
-  const files = [];
-  const N = 100;
-  for (const [tid, groupItems] of groups) {
-    const total = Math.ceil(groupItems.length / N);
-    for (let i = 0; i < total; i++) {
-      files.push({
-        tid,
-        part: total > 1 ? `_part${i + 1}of${total}` : '',
-        data: groupItems.slice(i * N, (i + 1) * N),
-      });
-    }
-  }
-
-  let downloaded = 0;
-  function downloadNext(idx) {
-    if (idx >= files.length) {
-      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${items.length} entries`);
-      return;
-    }
-    const f = files[idx];
-    const blob = new Blob([JSON.stringify({ items: f.data }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement('a'), {
-      href: url,
-      download: `timestamps_${f.tid}${f.part}.json`,
-    });
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    downloaded++;
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setTimeout(() => downloadNext(idx + 1), 400);
-  }
-  showExportPreview({
-    items,
-    fileCount: files.length,
-    duplicateCount: dupCount,
-    onConfirm: () => downloadNext(0),
-  });
-}
-
-/**
- * Submit all timestamps to IntroDB
- */
-export async function submitToIntroDB() {
-  if (!state.allItems.length) { 
-    toast('No timestamps to submit.'); 
-    return; 
-  }
-
-  const apiKey = state.introdbApiKey;
-  if (!apiKey) {
-    toast('Please enter your IntroDB API key in the panel above.');
-    setIntrodbStatus('No API key configured');
-    return;
-  }
-
-  if (state.submitInProgress) { 
-    toast('Submission in progress, please wait...'); 
-    return; 
-  }
-
-  // Each item keeps its OWN imdb_id
-  const allMapped = state.allItems.map(({ _eid, ...rest }) => rest);
-  const pendingItems = allMapped.filter(i => i.imdb_id === 'IMDB_PENDING');
-  if (pendingItems.length > 0) {
-    toast(`${pendingItems.length} timestamp(s) have no IMDb ID yet (IMDB_PENDING) and will be skipped.`);
-  }
-
-  // Pre-load cache for all episodes before filtering
-  const episodeKeys = [...new Set(
-    allMapped
-      .filter(i => i.imdb_id && i.imdb_id !== 'IMDB_PENDING')
-      .map(i => createEpisodeCacheKey(i.imdb_id, i.season, i.episode))
-  )];
-  
-  const notLoaded = episodeKeys.filter(k => !(state.dedupCacheV2 && state.dedupCacheV2[k]));
-  if (notLoaded.length > 0) {
-    toast(`Checking IntroDB for existing segments (${notLoaded.length} episode(s))...`);
-    await Promise.all(notLoaded.map(k => loadExistingSegmentsForEpisode(k)));
-  }
-
-  const items = allMapped.filter(item => item.imdb_id !== 'IMDB_PENDING' && !isAlreadyInIntroDB(item));
-  const skipped = allMapped.length - items.length;
-
-  if (!items.length) {
-    toast('All timestamps already exist in IntroDB.');
-    setIntrodbStatus('Nothing new to submit (all duplicates)');
-    return;
-  }
-
-  const skipMsg = skipped > 0 ? ` (${skipped} already existed, skipped)` : '';
-  const idList = [...new Set(items.map(i => i.imdb_id))].join(', ');
-  if (!confirm(`Submit ${items.length} timestamp${items.length !== 1 ? 's' : ''} to IntroDB?${skipMsg}\nID(s): ${idList}`)) return;
-
-  state.submitInProgress = true;
-  state.submitResults = { ok: 0, fail: 0 };
-  updateSubmitBtn('Submitting 0/' + items.length + '...');
-
-  let sent = 0;
-
-  function sendNext(idx) {
-    if (idx >= items.length) {
-      state.submitInProgress = false;
-      const { ok, fail } = state.submitResults;
-      updateSubmitBtn('📡 Submit to IntroDB');
-      toast(`IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
-      setIntrodbStatus(`${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
-      return;
-    }
-
-    const item = items[idx];
-    submitSegment(item, apiKey).then(result => {
-      sent++;
-      if (result.success) {
-        state.submitResults.ok++;
-        // Update cache for consistency (using shared helper)
-        const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-        if (!state.dedupCacheV2[key]) {
-          state.dedupCacheV2[key] = new Set();
-        }
-        state.dedupCacheV2[key].add(item.segment_type);
-      } else {
-        state.submitResults.fail++;
-        console.warn('[NFE] IntroDB rejected:', result.status, item);
-      }
-      updateSubmitBtn(`Submitting ${sent}/${items.length}...`);
-      setTimeout(() => sendNext(idx + 1), 150);
-    }).catch(() => {
-      sent++;
-      state.submitResults.fail++;
-      updateSubmitBtn(`Submitting ${sent}/${items.length}...`);
-      setTimeout(() => sendNext(idx + 1), 150);
-    });
-  }
-
-  sendNext(0);
-}
-
-/**
- * Check the per-episode cache for an existing segment.
- * A missing cache entry is treated as not found; callers load the cache first.
- */
-export function isAlreadyInIntroDB(item) {
-  const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-  return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
-}
-
-/**
- * Update the submit button label
- */
-export function updateSubmitBtn(label) {
-  const btn = document.getElementById('nfe-submit');
-  if (btn) btn.textContent = label;
-}
-
-/**
- * Clear all captured data
- */
-export function clearData() {
-  if (!confirm('Delete all captured timestamps?')) return;
-  Object.assign(state, {
-    allItems: [],
-    imdbId: '',
-    interceptedCount: 0,
-    dbSearchDone: false,
-    dbStatusMsg: 'Waiting for Netflix metadata...',
-    showTitle: '',
-    showYear: '',
-    showIds: new Set(),
-    submitResults: { ok: 0, fail: 0 },
-    dedupCacheV2: {},
-  });
-  updateCounters();
-  updatePanelTitle();
-  setDbStatus('Waiting for Netflix metadata...');
-  setIntrodbStatus('');
-  updateImdbInput();
-  toast('Data cleared');
+    return response;
+  };
 }

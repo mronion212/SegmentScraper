@@ -96,14 +96,14 @@ function bundle() {
     'normalization/segment-mapper.js',
     'ui/panel.js',
     'ui/button.js',
-    'providers/netflix/extractor.js',
+    'providers/bootstrap.js',
   ];
 
   const providerBundles = [
     {
       name: 'netflix',
       condition: "location.hostname === 'www.netflix.com' || location.hostname === 'netflix.com'",
-      files: ['providers/netflix/index.js'],
+      files: ['providers/netflix/extractor.js', 'providers/netflix/index.js'],
     },
     {
       name: 'prime-video',
