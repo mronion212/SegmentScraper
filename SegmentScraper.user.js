@@ -6,7 +6,13 @@
 // @author       mronion212
 // @match        https://www.netflix.com/*
 // @match        https://www.disneyplus.com/*
-// @match        https://www.amazon.com/*/detail/*
+// @match        https://www.primevideo.com/*
+// @match        https://www.amazon.*/gp/video/*
+// @match        https://*.primevideo.com/*
+// @match        https://www.videoland.com/*
+// @match        https://videoland.com/*
+// @match        https://v2.videoland.com/*
+// @match        https://*.videoland.com/*
 // @match        https://play.max.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -406,7 +412,7 @@ async function lookupImdbTitle(imdbId) {
 
 /**
  * Provider configuration layer
- * Defines UI themes, branding, and service-specific settings
+ * Defines shared Netflix panel styling and provider-specific settings
  */
 
 /**
@@ -418,8 +424,24 @@ const BASE_CONFIG = {
 };
 
 /**
+ * Netflix is the visual source of truth for every provider panel.
+ * Provider configuration may only override button colors, provider-name color,
+ * header/info-box text, and the info-box accent.
+ */
+const PANEL_COLORS = {
+  background: 'rgba(12,12,12,0.98)',
+  panelBg: '#181818',
+  border: '#2c2c2c',
+  text: '#fff',
+  textSecondary: '#777',
+  textMuted: '#444',
+  accent: '#E50914',
+};
+
+/**
  * Provider-specific configurations
- * Each provider can customize colors, branding, and behavior
+ * Each provider can customize button colors, provider-name color, header branding,
+ * and info-box copy/accent.
  */
 const PROVIDER_CONFIGS = {
   netflix: {
@@ -430,16 +452,12 @@ const PROVIDER_CONFIGS = {
       primaryDark: '#b30812',
       secondary: '#1565c0',
       secondaryDark: '#0d47a1',
-      background: 'rgba(12,12,12,0.98)',
-      panelBg: '#181818',
-      border: '#2c2c2c',
-      text: '#fff',
-      textSecondary: '#777',
-      textMuted: '#444',
     },
+    nameColor: '#E50914',
+    infoAccent: '#E50914',
     branding: {
       icon: '🎬',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
     captureHint: 'All available seasons and episodes are captured automatically.',
   },
@@ -451,39 +469,31 @@ const PROVIDER_CONFIGS = {
       primaryDark: '#004bb3',
       secondary: '#0c734f',
       secondaryDark: '#095a3d',
-      background: 'rgba(15, 23, 33, 0.98)',
-      panelBg: '#1a2634',
-      border: '#2a3a4a',
-      text: '#fff',
-      textSecondary: '#888',
-      textMuted: '#555',
     },
+    nameColor: '#0063e5',
+    infoAccent: '#0063e5',
     branding: {
       icon: '🏰',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
-    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
-  amazon: {
+  'prime-video': {
     name: 'Prime Video',
-    match: 'https://www.amazon.com/*/detail/*',
+    match: 'https://*.primevideo.com/*',
     colors: {
-      primary: '#ff9900',
-      primaryDark: '#e68a00',
-      secondary: '#0f79af',
-      secondaryDark: '#0c5d86',
-      background: 'rgba(18, 27, 36, 0.98)',
-      panelBg: '#222f3d',
-      border: '#334455',
-      text: '#fff',
-      textSecondary: '#999',
-      textMuted: '#666',
+      primary: '#00A8E1',
+      primaryDark: '#008fbe',
+      secondary: '#1565c0',
+      secondaryDark: '#0d47a1',
     },
+    nameColor: '#00A8E1',
+    infoAccent: '#00A8E1',
     branding: {
       icon: '📺',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
-    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
   hbo: {
     name: 'HBO Max',
@@ -493,39 +503,31 @@ const PROVIDER_CONFIGS = {
       primaryDark: '#6a1b9e',
       secondary: '#1565c0',
       secondaryDark: '#0d47a1',
-      background: 'rgba(18, 18, 18, 0.98)',
-      panelBg: '#222222',
-      border: '#333333',
-      text: '#fff',
-      textSecondary: '#888',
-      textMuted: '#555',
     },
+    nameColor: '#8a2be2',
+    infoAccent: '#8a2be2',
     branding: {
       icon: '🎭',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
-    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
   videoland: {
     name: 'Videoland',
     match: 'https://www.videoland.com/*',
     colors: {
-      primary: '#f15a24',
-      primaryDark: '#c9481a',
-      secondary: '#d84d1d',
-      secondaryDark: '#ad3d17',
-      background: 'rgba(18,18,18,0.98)',
-      panelBg: '#242424',
-      border: '#3a3a3a',
-      text: '#fff',
-      textSecondary: '#999',
-      textMuted: '#666',
+      primary: '#00A8E1',
+      primaryDark: '#008fbe',
+      secondary: '#1565c0',
+      secondaryDark: '#0d47a1',
     },
+    nameColor: '#00A8E1',
+    infoAccent: '#00A8E1',
     branding: {
       icon: '📺',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
-    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
 };
 
@@ -678,7 +680,8 @@ function createPanel() {
     console.error('[NFE] No config found for provider:', currentProvider);
     return;
   }
-  const { colors, branding } = config;
+  const { colors: providerColors, branding, infoAccent, nameColor } = config;
+  const colors = PANEL_COLORS;
   
   if (document.getElementById('nfe-panel')) {
     console.log('[NFE] Panel already exists');
@@ -691,13 +694,25 @@ function createPanel() {
     position:fixed; z-index:2147483647; width:308px; max-width:calc(100vw - 40px);
     background:${colors.background}; border:1px solid ${colors.border}; border-radius:12px;
     padding:16px; color:${colors.text}; font-family:-apple-system,Arial,sans-serif;
-    font-size:13px; box-shadow:0 16px 48px rgba(0,0,0,0.85);
+    font-size:13px; line-height:normal; box-sizing:border-box; box-shadow:0 16px 48px rgba(0,0,0,0.85);
     transition:opacity 0.18s; user-select:none; display:none; opacity:0;
   `;
 
   panel.innerHTML = `
+    <style>
+      #nfe-panel, #nfe-panel * {
+        box-sizing:border-box; font-family:-apple-system,Arial,sans-serif;
+        font-style:normal; text-shadow:none;
+      }
+      #nfe-panel button, #nfe-panel input {
+        min-width:0; margin:0; font-family:-apple-system,Arial,sans-serif;
+        font-style:normal; line-height:normal; letter-spacing:normal; text-transform:none;
+        appearance:none; -webkit-appearance:none;
+      }
+      #nfe-panel button, #nfe-panel input { min-height:0; }
+    </style>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <span style="font-size:13px;font-weight:700;color:${colors.primary}">${branding.icon} ${config.name} ${branding.title}</span>
+      <span style="font-size:13px;font-weight:700;color:${nameColor}">${branding.icon} ${config.name} ${branding.title}</span>
       <button id="nfe-close" style="background:none;border:none;color:${colors.textMuted};font-size:18px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s"
         onmouseenter="this.style.color='${colors.text}'" onmouseleave="this.style.color='${colors.textMuted}'">✕</button>
     </div>
@@ -710,15 +725,15 @@ function createPanel() {
         <input id="nfe-imdb-input" type="text" placeholder="ID (e.g. tt123456)..." value="${state.imdbId}"
           style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
                  padding:6px 8px;font-size:12px;outline:none;transition:border-color 0.15s"
-          onfocus="this.style.borderColor='${colors.primary}'" onblur="this.style.borderColor='#303030'"/>
+          onfocus="this.style.borderColor='${colors.accent}'" onblur="this.style.borderColor='#303030'"/>
         <button id="nfe-imdb-search" title="Search by title on IMDb"
           style="background:#242424;border:1px solid #303030;border-radius:6px;color:#bbb;
                  padding:6px 8px;cursor:pointer;font-size:12px;transition:background 0.15s"
           onmouseenter="this.style.background='#2e2e2e'" onmouseleave="this.style.background='#242424'">🔍</button>
         <button id="nfe-imdb-set"
-          style="background:${colors.primary};border:none;border-radius:6px;color:#fff;
+          style="background:${providerColors.primary};border:none;border-radius:6px;color:#fff;
                  padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;transition:background 0.15s"
-          onmouseenter="this.style.background='${colors.primaryDark}'" onmouseleave="this.style.background='${colors.primary}'">OK</button>
+          onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">OK</button>
       </div>
     </div>
 
@@ -732,7 +747,7 @@ function createPanel() {
         <div id="nfe-cnt-series-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Series</div>
       </div>
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
-        <div id="nfe-cnt-files" style="font-size:20px;font-weight:700;color:${colors.primary};line-height:1">0</div>
+        <div id="nfe-cnt-files" style="font-size:20px;font-weight:700;color:#fff;line-height:1">0</div>
         <div id="nfe-cnt-files-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Files</div>
       </div>
     </div>
@@ -743,15 +758,15 @@ function createPanel() {
       <div style="flex:1;height:1px;background:${colors.border}"></div>
     </div>
 
-    <div style="border-left:2px solid ${colors.primary};padding:6px 9px;margin-bottom:8px;font-size:11px;color:${colors.textMuted};line-height:1.4;background:${colors.panelBg};border-radius:0 7px 7px 0">
+    <div style="border-left:2px solid ${infoAccent};padding:6px 9px;margin-bottom:8px;font-size:11px;color:${colors.textMuted};line-height:1.4;background:${colors.panelBg};border-radius:0 7px 7px 0">
       ${config.captureHint}
     </div>
 
     <button id="nfe-export"
-      style="width:100%;background:${colors.primary};border:none;border-radius:8px;color:#fff;
+      style="width:100%;background:${providerColors.primary};border:none;border-radius:8px;color:#fff;
              padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
              transition:background 0.15s"
-      onmouseenter="this.style.background='${colors.primaryDark}'" onmouseleave="this.style.background='${colors.primary}'">
+      onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">
       📥 Download JSON(s)
     </button>
 
@@ -767,21 +782,21 @@ function createPanel() {
          <input id="nfe-apikey-input" type="password" placeholder="Enter your IntroDB API key..." value="${state.introdbApiKey}"
            style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
                   padding:6px 8px;font-size:12px;outline:none;transition:border-color 0.15s"
-           onfocus="this.style.borderColor='${colors.primary}'" onblur="this.style.borderColor='#303030'"/>
+           onfocus="this.style.borderColor='${colors.accent}'" onblur="this.style.borderColor='#303030'"/>
          <button id="nfe-apikey-set"
-           style="background:${colors.primary};border:none;border-radius:6px;color:#fff;
+           style="background:${providerColors.primary};border:none;border-radius:6px;color:#fff;
                   padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;transition:background 0.15s"
-           onmouseenter="this.style.background='${colors.primaryDark}'" onmouseleave="this.style.background='${colors.primary}'">Save</button>
+           onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">Save</button>
        </div>
      </div>
 
      <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved' : ''}</div>
 
      <button id="nfe-submit"
-       style="width:100%;background:${colors.secondary};border:none;border-radius:8px;color:#fff;
+       style="width:100%;background:${providerColors.secondary};border:none;border-radius:8px;color:#fff;
               padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
               transition:background 0.15s"
-       onmouseenter="this.style.background='${colors.secondaryDark}'" onmouseleave="this.style.background='${colors.secondary}'">
+       onmouseenter="this.style.background='${providerColors.secondaryDark}'" onmouseleave="this.style.background='${providerColors.secondary}'">
        📡 Submit to IntroDB
      </button>
 
@@ -1018,41 +1033,44 @@ function toast(msg) {
 function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   document.getElementById('nfe-export-preview')?.remove();
 
-  const { colors } = getProviderConfig(currentProvider);
+  const { colors: providerColors } = getProviderConfig(currentProvider);
+  const colors = PANEL_COLORS;
   const overlay = document.createElement('div');
   overlay.id = 'nfe-export-preview';
   overlay.style.cssText = `
     position:fixed; inset:0; z-index:2147483647; display:flex; align-items:center;
-    justify-content:center; padding:24px; background:rgba(0,0,0,.72);
+    justify-content:center; padding:24px; background:rgba(0,0,0,.72); box-sizing:border-box;
   `;
 
   const dialog = document.createElement('section');
   dialog.style.cssText = `
     width:min(760px, 100%); max-height:calc(100vh - 48px); display:flex; flex-direction:column;
     padding:18px; border:1px solid ${colors.border}; border-radius:12px; background:${colors.background};
-    color:${colors.text}; font:13px -apple-system,Arial,sans-serif; box-shadow:0 16px 48px rgba(0,0,0,.85);
+    color:${colors.text}; font:13px/normal -apple-system,Arial,sans-serif; box-sizing:border-box;
+    box-shadow:0 16px 48px rgba(0,0,0,.85);
   `;
 
   const heading = document.createElement('h2');
   heading.textContent = 'Controleer JSON-export';
-  heading.style.cssText = `margin:0 0 6px; color:${colors.primary}; font-size:16px;`;
+  heading.style.cssText = `margin:0 0 6px; color:${colors.accent}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
   summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}.`;
-  summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary};`;
+  summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
   const preview = document.createElement('pre');
   preview.textContent = JSON.stringify({ items }, null, 2);
   preview.style.cssText = `
     overflow:auto; flex:1; min-height:180px; margin:0 0 14px; padding:12px; border-radius:8px;
-    background:${colors.panelBg}; color:${colors.text}; font:11px ui-monospace,Consolas,monospace; white-space:pre-wrap;
+    background:${colors.panelBg}; color:${colors.text}; box-sizing:border-box;
+    font:11px/normal ui-monospace,Consolas,monospace; white-space:pre-wrap;
   `;
   const actions = document.createElement('div');
   actions.style.cssText = 'display:flex; justify-content:flex-end; gap:8px;';
   const cancel = document.createElement('button');
   cancel.textContent = 'Annuleren';
-  cancel.style.cssText = 'padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; cursor:pointer;';
+  cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
   const confirm = document.createElement('button');
   confirm.textContent = 'Download JSON';
-  confirm.style.cssText = `padding:8px 12px; border:0; border-radius:6px; background:${colors.primary}; color:#fff; font-weight:700; cursor:pointer;`;
+  confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
 
   const close = () => overlay.remove();
   cancel.addEventListener('click', close);
@@ -1172,182 +1190,27 @@ function injectBtn(providerName, getNextBtn) {
   console.log('[NFE] Button click handler attached');
 }
 
-  // ─── providers/netflix/extractor.js ───
+  // ─── providers/bootstrap.js ───
 
 /**
- * Netflix-specific segment extraction module
- * Handles detection, fetching, parsing, and normalization of Netflix segment data
+ * Shared provider bootstrap and control flow.
+ * The Netflix UI/controls are the single source of truth for every provider.
  */
-// Manual overrides for shows where IMDb's title-suggestion search returns
-// the wrong entry. Keyed by Netflix's stable series-level video.id.
-const NETFLIX_TITLE_OVERRIDES = {
-  '81748089': 'tt2431250', // Het kleine huis op de prairie -> correct IMDb entry
-};
 
-/**
- * Process Netflix metadata and extract segments
- * @param {Object} data - The metadata response from Netflix API
- * @param {string} providerName - The provider name
- */
-function processMetadata(data, providerName) {
-  const video = data.video;
-  if (!video) return;
 
-if (video.title && state.showTitle !== video.title) {
-    state.showTitle = video.title;
-    state.showId = video.id != null ? String(video.id) : null;
-    if (state.showId) state.showIds.add(state.showId);
-    state.showYear = '';
-    if (video.seasons && video.seasons[0]) {
-      state.showYear = String(video.seasons[0].year || '');
-    }
-    state.dbSearchDone = false;
-    state.imdbId = '';
-    state.dedupCacheV2 = {};
-    updatePanelTitle();
-    console.log(`[NFE] Show ID (stable, series-level): ${state.showId}`);
-  }
 
-  if (!state.dbSearchDone && state.showTitle) {
-    state.dbSearchDone = true;
-    const override = state.showId && NETFLIX_TITLE_OVERRIDES[state.showId];
-    console.log('[NFE] IMDb lookup triggered for showTitle:', state.showTitle, 'showYear:', state.showYear, 'override:', override);
-    if (override) {
-      state.imdbId = override;
-      state.allItems.forEach(i => { 
-        if (i.imdb_id === 'IMDB_PENDING') i.imdb_id = override; 
-      });
-      updateImdbInput();
-      setDbStatus(`Manual override applied · ID: ${override}`);
-      updateCounters();
-      loadExistingSegments(override);
-     } else {
-       searchImdbByTitle(state.showTitle, state.showYear).then(result => {
-         console.log('[NFE] IMDb search result:', result);
-         if (result.success) {
-           state.imdbId = result.imdbId;
-           state.allItems.forEach(i => { 
-             if (i.imdb_id === 'IMDB_PENDING') i.imdb_id = result.imdbId; 
-           });
-           updateImdbInput();
-           setDbStatus(`Found: ${result.imdbId}`);
-           updateCounters();
-           loadExistingSegments(result.imdbId);
-         } else {
-           setDbStatus(`IMDb lookup failed: ${result.error}`);
-         }
-       }).catch(err => {
-         console.error('[NFE] IMDb search error:', err);
-         setDbStatus('IMDb lookup error');
-       });
-     }
-   }
 
-  let newItems = 0;
-  for (const season of (video.seasons || [])) {
-    const sNum = season.seq;
-    for (const ep of (season.episodes || [])) {
-      const eid = ep.episodeId || ep.id;
-      if (state.allItems.some(i => i._eid === eid)) continue;
 
-      const eNum = ep.seq;
-      const tid = state.imdbId || 'IMDB_PENDING';
-      const mk = ep.skipMarkers || {};
+const BUTTON_IDLE_DELAY_MS = 3000;
+let activeProviderConfig = getProviderConfig('netflix');
+let buttonHideTimer;
 
-      // Extract segments using normalization layer
-      const recap = mk.recap;
-      if (recap && recap.end > 0) {
-        const item = createNormalizedSegment({
-          providerSegmentType: 'recap',
-          providerName,
-          episodeId: eid,
-          season: sNum,
-          episode: eNum,
-          startSec: recap.start / 1000,
-          endSec: recap.end / 1000,
-          imdbId: tid
-        });
-        if (item) {
-          state.allItems.push(item);
-          newItems++;
-        }
-      }
-
-      const credit = mk.credit;
-      if (credit && credit.end > 0) {
-        const item = createNormalizedSegment({
-          providerSegmentType: 'credit',
-          providerName,
-          episodeId: eid,
-          season: sNum,
-          episode: eNum,
-          startSec: credit.start / 1000,
-          endSec: credit.end / 1000,
-          imdbId: tid
-        });
-        if (item) {
-          state.allItems.push(item);
-          newItems++;
-        }
-      }
-
-      const intro = mk.intro;
-      if (intro && intro.end > 0) {
-        const item = createNormalizedSegment({
-          providerSegmentType: 'intro',
-          providerName,
-          episodeId: eid,
-          season: sNum,
-          episode: eNum,
-          startSec: intro.start / 1000,
-          endSec: intro.end / 1000,
-          imdbId: tid
-        });
-        if (item) {
-          state.allItems.push(item);
-          newItems++;
-        }
-      }
-
-      // Outro from creditsOffset and runtime
-      if (ep.creditsOffset && ep.runtime) {
-        const item = createNormalizedSegment({
-          providerSegmentType: 'creditsOffset',
-          providerName,
-          episodeId: eid,
-          season: sNum,
-          episode: eNum,
-          startSec: parseFloat(ep.creditsOffset),
-          endSec: parseFloat(ep.runtime),
-          imdbId: tid
-        });
-        if (item) {
-          state.allItems.push(item);
-          newItems++;
-        }
-      }
-    }
-  }
-
-  if (newItems > 0) {
-    state.interceptedCount++;
-    updateCounters();
-    toast(`+${newItems} timestamps captured · total: ${state.allItems.length}`);
-  }
-}
-
-/**
- * Set the IMDb status message
- */
 function setDbStatus(msg) {
   state.dbStatusMsg = msg;
   const el = document.getElementById('nfe-imdb-status');
   if (el) el.textContent = `IMDb ID: ${state.imdbId || 'Not set'}`;
 }
 
-/**
- * Set the IntroDB status message
- */
 function setIntrodbStatus(msg) {
   const el = document.getElementById('nfe-introdb-status');
   if (!el) return;
@@ -1355,48 +1218,97 @@ function setIntrodbStatus(msg) {
   el.style.display = msg ? 'block' : 'none';
 }
 
-/**
- * Export captured timestamps to JSON files
- */
+/** Apply the shared IMDb flow after an extractor discovers a show. */
+function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null }) {
+  if (title && title !== state.showTitle) {
+    state.showTitle = title;
+    state.showId = showId != null ? String(showId) : null;
+    if (state.showId) state.showIds.add(state.showId);
+    state.showYear = year ? String(year) : '';
+    state.dbSearchDone = false;
+    state.imdbId = '';
+    state.dedupCacheV2 = {};
+    updatePanelTitle();
+  }
+
+  if (state.dbSearchDone || !state.showTitle) return;
+  state.dbSearchDone = true;
+
+  if (imdbOverride) {
+    state.imdbId = imdbOverride;
+    state.allItems.forEach(item => {
+      if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = imdbOverride;
+    });
+    updateImdbInput();
+    setDbStatus(`Manual override applied · ID: ${imdbOverride}`);
+    updateCounters();
+    loadExistingSegments(imdbOverride);
+    return;
+  }
+
+  searchImdbByTitle(state.showTitle, state.showYear).then(result => {
+    if (result.success) {
+      state.imdbId = result.imdbId;
+      state.allItems.forEach(item => {
+        if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
+      });
+      updateImdbInput();
+      setDbStatus(`Found: ${result.imdbId}`);
+      updateCounters();
+      loadExistingSegments(result.imdbId);
+    } else {
+      setDbStatus(`IMDb lookup failed: ${result.error}`);
+    }
+  }).catch(error => {
+    console.error('[NFE] IMDb search error:', error);
+    setDbStatus('IMDb lookup error');
+  });
+}
+
+/** Store extractor output and update the shared counters/toast identically. */
+function recordExtractedSegments(items) {
+  if (!items.length) return;
+  state.allItems.push(...items);
+  state.interceptedCount++;
+  updateCounters();
+  toast(`+${items.length} timestamps captured · total: ${state.allItems.length}`);
+}
+
+function isAlreadyInIntroDB(item) {
+  const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
+  return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
+}
+
 async function exportJSON() {
-  if (!state.allItems.length) { 
-    toast('No timestamps yet.'); 
-    return; 
+  if (!state.allItems.length) {
+    toast('No timestamps yet.');
+    return;
   }
 
-  // Group by each item's OWN imdb_id
   let items = state.allItems.map(({ _eid, ...rest }) => rest);
-  const pendingCount = items.filter(i => i.imdb_id === 'IMDB_PENDING').length;
-  if (pendingCount > 0) {
-    const proceed = confirm(`${pendingCount} timestamp(s) still have no IMDb ID assigned (IMDB_PENDING).\nThese will be exported as-is. Continue?`);
-    if (!proceed) return;
-  }
+  const pendingCount = items.filter(item => item.imdb_id === 'IMDB_PENDING').length;
+  if (pendingCount > 0 && !confirm(`${pendingCount} timestamp(s) still have no IMDb ID assigned (IMDB_PENDING).\nThese will be exported as-is. Continue?`)) return;
 
-  // Local dedup against IntroDB
   const episodeKeys = [...new Set(
     items
-      .filter(i => i.imdb_id && i.imdb_id !== 'IMDB_PENDING')
-      .map(i => `${i.imdb_id}|${i.season}|${i.episode}`)
+      .filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')
+      .map(item => `${item.imdb_id}|${item.season}|${item.episode}`)
   )];
-  
-  const notLoaded = episodeKeys.filter(k => !(state.dedupCacheV2 && state.dedupCacheV2[k]));
+  const notLoaded = episodeKeys.filter(key => !(state.dedupCacheV2 && state.dedupCacheV2[key]));
   if (notLoaded.length > 0) {
     toast(`Checking IntroDB for existing segments (${notLoaded.length} episode(s))...`);
-    await Promise.all(notLoaded.map(k => loadExistingSegmentsForEpisode(k)));
+    await Promise.all(notLoaded.map(key => loadExistingSegmentsForEpisode(key)));
   }
 
   const beforeCount = items.length;
   items = items.filter(item => !isAlreadyInIntroDB(item));
-  
-  const dupCount = beforeCount - items.length;
-  if (dupCount > 0) toast(`${dupCount} duplicate(s) already in IntroDB removed from export.`);
-
-  if (!items.length) { 
-    toast('Nothing left to export after removing duplicates.'); 
-    return; 
+  const duplicateCount = beforeCount - items.length;
+  if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
+  if (!items.length) {
+    toast('Nothing left to export after removing duplicates.');
+    return;
   }
 
-  // Group by IMDb ID for file output
   const groups = new Map();
   for (const item of items) {
     const key = item.imdb_id || 'no_id';
@@ -1404,110 +1316,102 @@ async function exportJSON() {
     groups.get(key).push(item);
   }
 
-  // Build files and download with delay
   const files = [];
-  const N = 100;
-  for (const [tid, groupItems] of groups) {
-    const total = Math.ceil(groupItems.length / N);
-    for (let i = 0; i < total; i++) {
+  const maxItemsPerFile = 100;
+  for (const [imdbId, groupItems] of groups) {
+    const total = Math.ceil(groupItems.length / maxItemsPerFile);
+    for (let index = 0; index < total; index++) {
       files.push({
-        tid,
-        part: total > 1 ? `_part${i + 1}of${total}` : '',
-        data: groupItems.slice(i * N, (i + 1) * N),
+        imdbId,
+        part: total > 1 ? `_part${index + 1}of${total}` : '',
+        data: groupItems.slice(index * maxItemsPerFile, (index + 1) * maxItemsPerFile),
       });
     }
   }
 
   let downloaded = 0;
-  function downloadNext(idx) {
-    if (idx >= files.length) {
+  function downloadNext(index) {
+    if (index >= files.length) {
       toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${items.length} entries`);
       return;
     }
-    const f = files[idx];
-    const blob = new Blob([JSON.stringify({ items: f.data }, null, 2)], { type: 'application/json' });
+    const file = files[index];
+    const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement('a'), {
+    const anchor = Object.assign(document.createElement('a'), {
       href: url,
-      download: `timestamps_${f.tid}${f.part}.json`,
+      download: `timestamps_${file.imdbId}${file.part}.json`,
     });
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
     downloaded++;
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setTimeout(() => downloadNext(idx + 1), 400);
+    setTimeout(() => downloadNext(index + 1), 400);
   }
+
   showExportPreview({
     items,
     fileCount: files.length,
-    duplicateCount: dupCount,
+    duplicateCount,
     onConfirm: () => downloadNext(0),
   });
 }
 
-/**
- * Submit all timestamps to IntroDB
- */
-async function submitToIntroDB() {
-  if (!state.allItems.length) { 
-    toast('No timestamps to submit.'); 
-    return; 
-  }
+function updateSubmitBtn(label) {
+  const button = document.getElementById('nfe-submit');
+  if (button) button.textContent = label;
+}
 
-  const apiKey = state.introdbApiKey;
-  if (!apiKey) {
+async function submitToIntroDB() {
+  if (!state.allItems.length) {
+    toast('No timestamps to submit.');
+    return;
+  }
+  if (!state.introdbApiKey) {
     toast('Please enter your IntroDB API key in the panel above.');
     setIntrodbStatus('No API key configured');
     return;
   }
-
-  if (state.submitInProgress) { 
-    toast('Submission in progress, please wait...'); 
-    return; 
+  if (state.submitInProgress) {
+    toast('Submission in progress, please wait...');
+    return;
   }
 
-  // Each item keeps its OWN imdb_id
   const allMapped = state.allItems.map(({ _eid, ...rest }) => rest);
-  const pendingItems = allMapped.filter(i => i.imdb_id === 'IMDB_PENDING');
-  if (pendingItems.length > 0) {
-    toast(`${pendingItems.length} timestamp(s) have no IMDb ID yet (IMDB_PENDING) and will be skipped.`);
-  }
+  const pendingItems = allMapped.filter(item => item.imdb_id === 'IMDB_PENDING');
+  if (pendingItems.length > 0) toast(`${pendingItems.length} timestamp(s) have no IMDb ID yet (IMDB_PENDING) and will be skipped.`);
 
-  // Pre-load cache for all episodes before filtering
   const episodeKeys = [...new Set(
     allMapped
-      .filter(i => i.imdb_id && i.imdb_id !== 'IMDB_PENDING')
-      .map(i => createEpisodeCacheKey(i.imdb_id, i.season, i.episode))
+      .filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')
+      .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
   )];
-  
-  const notLoaded = episodeKeys.filter(k => !(state.dedupCacheV2 && state.dedupCacheV2[k]));
+  const notLoaded = episodeKeys.filter(key => !(state.dedupCacheV2 && state.dedupCacheV2[key]));
   if (notLoaded.length > 0) {
     toast(`Checking IntroDB for existing segments (${notLoaded.length} episode(s))...`);
-    await Promise.all(notLoaded.map(k => loadExistingSegmentsForEpisode(k)));
+    await Promise.all(notLoaded.map(key => loadExistingSegmentsForEpisode(key)));
   }
 
   const items = allMapped.filter(item => item.imdb_id !== 'IMDB_PENDING' && !isAlreadyInIntroDB(item));
   const skipped = allMapped.length - items.length;
-
   if (!items.length) {
     toast('All timestamps already exist in IntroDB.');
     setIntrodbStatus('Nothing new to submit (all duplicates)');
     return;
   }
 
-  const skipMsg = skipped > 0 ? ` (${skipped} already existed, skipped)` : '';
-  const idList = [...new Set(items.map(i => i.imdb_id))].join(', ');
-  if (!confirm(`Submit ${items.length} timestamp${items.length !== 1 ? 's' : ''} to IntroDB?${skipMsg}\nID(s): ${idList}`)) return;
+  const skipMessage = skipped > 0 ? ` (${skipped} already existed, skipped)` : '';
+  const ids = [...new Set(items.map(item => item.imdb_id))].join(', ');
+  if (!confirm(`Submit ${items.length} timestamp${items.length !== 1 ? 's' : ''} to IntroDB?${skipMessage}\nID(s): ${ids}`)) return;
 
   state.submitInProgress = true;
   state.submitResults = { ok: 0, fail: 0 };
-  updateSubmitBtn('Submitting 0/' + items.length + '...');
-
+  updateSubmitBtn(`Submitting 0/${items.length}...`);
   let sent = 0;
 
-  function sendNext(idx) {
-    if (idx >= items.length) {
+  function sendNext(index) {
+    if (index >= items.length) {
       state.submitInProgress = false;
       const { ok, fail } = state.submitResults;
       updateSubmitBtn('📡 Submit to IntroDB');
@@ -1516,126 +1420,77 @@ async function submitToIntroDB() {
       return;
     }
 
-    const item = items[idx];
-    submitSegment(item, apiKey).then(result => {
+    const item = items[index];
+    submitSegment(item, state.introdbApiKey).then(result => {
       sent++;
       if (result.success) {
         state.submitResults.ok++;
-        // Update cache for consistency (using shared helper)
         const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-        if (!state.dedupCacheV2[key]) {
-          state.dedupCacheV2[key] = new Set();
-        }
+        if (!state.dedupCacheV2[key]) state.dedupCacheV2[key] = new Set();
         state.dedupCacheV2[key].add(item.segment_type);
       } else {
         state.submitResults.fail++;
         console.warn('[NFE] IntroDB rejected:', result.status, item);
       }
       updateSubmitBtn(`Submitting ${sent}/${items.length}...`);
-      setTimeout(() => sendNext(idx + 1), 150);
+      setTimeout(() => sendNext(index + 1), 150);
     }).catch(() => {
       sent++;
       state.submitResults.fail++;
       updateSubmitBtn(`Submitting ${sent}/${items.length}...`);
-      setTimeout(() => sendNext(idx + 1), 150);
+      setTimeout(() => sendNext(index + 1), 150);
     });
   }
 
   sendNext(0);
 }
 
-/**
- * Check the per-episode cache for an existing segment.
- * A missing cache entry is treated as not found; callers load the cache first.
- */
-function isAlreadyInIntroDB(item) {
-  const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-  return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
-}
-
-/**
- * Update the submit button label
- */
-function updateSubmitBtn(label) {
-  const btn = document.getElementById('nfe-submit');
-  if (btn) btn.textContent = label;
-}
-
-/**
- * Clear all captured data
- */
 function clearData() {
   if (!confirm('Delete all captured timestamps?')) return;
-  Object.assign(state, {
-    allItems: [],
-    imdbId: '',
-    interceptedCount: 0,
-    dbSearchDone: false,
-    dbStatusMsg: 'Waiting for Netflix metadata...',
-    showTitle: '',
-    showYear: '',
-    showIds: new Set(),
-    submitResults: { ok: 0, fail: 0 },
-    dedupCacheV2: {},
-  });
+  const introdbApiKey = state.introdbApiKey;
+  for (const key of Object.keys(state)) delete state[key];
+  Object.assign(state, createState(activeProviderConfig.name), { introdbApiKey });
   updateCounters();
   updatePanelTitle();
-  setDbStatus('Waiting for Netflix metadata...');
+  setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
   setIntrodbStatus('');
   updateImdbInput();
   toast('Data cleared');
 }
 
-
-  // ─── providers/netflix/index.js ───
-
-/**
- * Netflix provider entry point
- * Sets up network interception and initializes the Netflix-specific extraction
- */
-const PROVIDER_NAME = 'netflix';
-const config = getProviderConfig(PROVIDER_NAME);
-const BUTTON_IDLE_DELAY_MS = 3000;
-let buttonHideTimer;
-
-// Initialize state with provider name
-Object.assign(state, createState(config.name));
-
-// Set up panel callbacks and provider name on window object
-setProviderName(PROVIDER_NAME);
-window.nfePanelCallbacks = {
-  onClose: closePanel,
-  onExport: exportJSON,
-  onSubmit: submitToIntroDB,
-  onClear: clearData,
-onImdbSet: () => {
-    const v = document.getElementById('nfe-imdb-input').value.trim();
-    if (!v) return;
-    state.imdbId = v;
-    state.allItems.forEach(item => { item.imdb_id = v; });
-    state.dedupCacheV2 = {};
-    setDbStatus(`ID saved: ${v}`);
-    updateCounters();
-    loadExistingSegments(v);
-    lookupImdbTitle(v).then(result => {
-      if (!result.success) return;
-      state.showTitle = result.title;
-      state.showYear = result.year ? String(result.year) : '';
-      updatePanelTitle();
-    });
-  },
-onImdbSearch: () => {
+function configurePanelCallbacks() {
+  window.nfePanelCallbacks = {
+    onClose: closePanel,
+    onExport: exportJSON,
+    onSubmit: submitToIntroDB,
+    onClear: clearData,
+    onImdbSet: () => {
+      const value = document.getElementById('nfe-imdb-input').value.trim();
+      if (!value) return;
+      state.imdbId = value;
+      state.allItems.forEach(item => { item.imdb_id = value; });
+      state.dedupCacheV2 = {};
+      setDbStatus(`ID saved: ${value}`);
+      updateCounters();
+      loadExistingSegments(value);
+      lookupImdbTitle(value).then(result => {
+        if (!result.success) return;
+        state.showTitle = result.title;
+        state.showYear = result.year ? String(result.year) : '';
+        updatePanelTitle();
+      });
+    },
+    onImdbSearch: () => {
       const manual = document.getElementById('nfe-imdb-input').value.trim();
-      const q = manual || state.showTitle;
-      if (!q) { toast('No title detected yet.'); return; }
+      const query = manual || state.showTitle;
+      if (!query) { toast('No title detected yet.'); return; }
       state.dbSearchDone = false;
       state.dedupCacheV2 = {};
-      searchImdbByTitle(q, state.showYear).then(result => {
-        console.log('[NFE] Manual IMDb search result:', result);
+      searchImdbByTitle(query, state.showYear).then(result => {
         if (result.success) {
           state.imdbId = result.imdbId;
-          state.allItems.forEach(i => { 
-            if (i.imdb_id === 'IMDB_PENDING') i.imdb_id = result.imdbId; 
+          state.allItems.forEach(item => {
+            if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
           });
           updateImdbInput();
           setDbStatus(`Found: ${result.imdbId}`);
@@ -1644,135 +1499,56 @@ onImdbSearch: () => {
         } else {
           setDbStatus(`IMDb lookup failed: ${result.error}`);
         }
-      }).catch(err => {
-        console.error('[NFE] Manual IMDb search error:', err);
+      }).catch(error => {
+        console.error('[NFE] Manual IMDb search error:', error);
         setDbStatus('IMDb lookup error');
       });
     },
-  onApikeySet: () => {
-    const v = document.getElementById('nfe-apikey-input').value.trim();
-    if (!v) {
-      toast('Please enter an IntroDB API key.');
-      return;
-    }
-    state.introdbApiKey = v;
-    setIntrodbStatus('API key saved');
-    toast('IntroDB API key saved');
-  },
-};
-
-/**
- * Set up XHR and fetch interception for Netflix metadata
- */
-function setupInterception() {
-  const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-
-  const OriginalXHR = win.XMLHttpRequest;
-  function InterceptedXHR() {
-    const xhr = new OriginalXHR();
-    let _url = '';
-    const origOpen = xhr.open.bind(xhr);
-    xhr.open = function (method, url, ...rest) { 
-      _url = url; 
-      return origOpen(method, url, ...rest); 
-    };
-    const origSend = xhr.send.bind(xhr);
-    xhr.send = function (...args) {
-      if (_url && _url.includes('memberapi') && _url.includes('metadata')) {
-        xhr.addEventListener('load', () => {
-          try { 
-            const d = JSON.parse(xhr.responseText); 
-            if (d && d.video) processMetadata(d, PROVIDER_NAME); 
-          } catch (_) {}
-        });
+    onApikeySet: () => {
+      const value = document.getElementById('nfe-apikey-input').value.trim();
+      if (!value) {
+        toast('Please enter an IntroDB API key.');
+        return;
       }
-      return origSend(...args);
-    };
-    return xhr;
-  }
-  Object.setPrototypeOf(InterceptedXHR, OriginalXHR);
-  InterceptedXHR.prototype = OriginalXHR.prototype;
-  win.XMLHttpRequest = InterceptedXHR;
-
-  const origFetch = win.fetch.bind(win);
-  win.fetch = async function (input, init) {
-    const url = (typeof input === 'string') ? input : (input && input.url) || '';
-    const resp = await origFetch(input, init);
-    if (url.includes('memberapi') && url.includes('metadata')) {
-      try { 
-        const d = await resp.clone().json(); 
-        if (d && d.video) processMetadata(d, PROVIDER_NAME); 
-      } catch (_) {}
-    }
-    return resp;
+      state.introdbApiKey = value;
+      setIntrodbStatus('API key saved');
+      toast('IntroDB API key saved');
+    },
   };
 }
 
-/**
- * Set up panel click-outside handler
- */
 function setupPanelHandler() {
-  document.addEventListener('click', e => {
+  document.addEventListener('click', event => {
     const panel = document.getElementById('nfe-panel');
-    const btn = document.getElementById('nfe-btn');
-    if (panel && state.panelVisible && !panel.contains(e.target) && !btn?.contains(e.target)) {
-      closePanel();
-    }
+    const button = document.getElementById('nfe-btn');
+    if (panel && state.panelVisible && !panel.contains(event.target) && !button?.contains(event.target)) closePanel();
   }, true);
 }
 
-/**
- * Sync the panel with Netflix player controls.
- */
 function syncVisibility() {
-  const ctrl =
+  const controls =
     document.querySelector('[data-uia="controls-standard"]') ||
     document.querySelector('[class*="PlayerControls"]') ||
     document.querySelector('.watch-video--bottom-controls-container');
-  if (!ctrl) return;
-  const visible = parseFloat(getComputedStyle(ctrl).opacity) > 0.05;
-  if (!state.panelVisible) return;
+  if (!controls || !state.panelVisible) return;
   const panel = document.getElementById('nfe-panel');
   if (!panel) return;
+  const visible = parseFloat(getComputedStyle(controls).opacity) > 0.05;
   panel.style.opacity = visible ? '1' : '0';
   panel.style.pointerEvents = visible ? 'auto' : 'none';
 }
 
 function setButtonVisibility(visible) {
-  const btn = document.getElementById('nfe-btn');
-  if (!btn) return;
-  btn.style.opacity = visible ? '0.85' : '0';
-  btn.style.pointerEvents = visible ? 'auto' : 'none';
+  const button = document.getElementById('nfe-btn');
+  if (!button) return;
+  button.style.opacity = visible ? '0.85' : '0';
+  button.style.pointerEvents = visible ? 'auto' : 'none';
 }
 
 function resetButtonIdleTimer() {
   clearTimeout(buttonHideTimer);
   setButtonVisibility(true);
   buttonHideTimer = setTimeout(() => setButtonVisibility(false), BUTTON_IDLE_DELAY_MS);
-}
-
-/**
- * Main loop - inject button and sync on watch pages
- */
-function mainLoop() {
-  let lastPath = location.pathname;
-  setInterval(() => {
-    const inWatch = location.pathname.startsWith('/watch');
-    if (location.pathname !== lastPath) {
-      lastPath = location.pathname;
-      document.getElementById('nfe-btn')?.remove();
-      if (!inWatch) { 
-        document.getElementById('nfe-panel')?.remove(); 
-        state.panelVisible = false; 
-      }
-    }
-    if (inWatch) { 
-      const buttonMissing = !document.getElementById('nfe-btn');
-      injectBtn(PROVIDER_NAME, getNextEpBtn); 
-      if (buttonMissing) resetButtonIdleTimer();
-      syncVisibility(); 
-    }
-  }, 1000);
 }
 
 function setupControlVisibilityHandler() {
@@ -1783,18 +1559,553 @@ function setupControlVisibilityHandler() {
   }, true);
 }
 
-// Initialize
-setupInterception();
-setupPanelHandler();
-setupControlVisibilityHandler();
-mainLoop();
+function bootstrapProvider({
+  providerName,
+  setupInterception,
+  isPlayerPage = () => true,
+}) {
+  activeProviderConfig = getProviderConfig(providerName);
+  Object.assign(state, createState(activeProviderConfig.name));
+  setProviderName(providerName);
+  configurePanelCallbacks();
+  setupInterception();
+  setupPanelHandler();
+  setupControlVisibilityHandler();
 
-// Debug helpers - exposed to unsafeWindow for console access
-const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-win.__netflixTimestamps = {
-  getAll: () => state.allItems,
-  getShowId: () => state.showId,
-  state,
+  let lastPath = location.pathname;
+  setInterval(() => {
+    const inPlayer = isPlayerPage();
+    if (location.pathname !== lastPath) {
+      lastPath = location.pathname;
+      document.getElementById('nfe-btn')?.remove();
+      if (!inPlayer) {
+        document.getElementById('nfe-panel')?.remove();
+        state.panelVisible = false;
+      }
+    }
+    if (inPlayer) {
+      const buttonMissing = !document.getElementById('nfe-btn');
+      injectBtn(providerName, getNextEpBtn);
+      if (buttonMissing) resetButtonIdleTimer();
+      syncVisibility();
+    }
+  }, 1000);
+
+  const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+  win.__segmentScraper = { getAll: () => state.allItems, state };
+}
+
+
+  // Provider registration: netflix
+  if (location.hostname === 'www.netflix.com' || location.hostname === 'netflix.com') {
+
+  // â”€â”€â”€ providers/netflix/extractor.js â”€â”€â”€
+
+/** Netflix-specific metadata interception and segment extraction. */
+
+
+
+const NETFLIX_TITLE_OVERRIDES = {
+  '81748089': 'tt2431250',
 };
 
+function processNetflixMetadata(data) {
+  const video = data.video;
+  if (!video) return;
+
+  const showId = video.id != null ? String(video.id) : null;
+  const year = video.seasons?.[0]?.year || '';
+  handleDetectedShow({
+    title: video.title,
+    showId,
+    year,
+    imdbOverride: showId ? NETFLIX_TITLE_OVERRIDES[showId] : null,
+  });
+
+  const extractedItems = [];
+  for (const season of video.seasons || []) {
+    for (const episode of season.episodes || []) {
+      const episodeId = episode.episodeId || episode.id;
+      if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+
+      const common = {
+        providerName: 'netflix',
+        episodeId,
+        season: season.seq,
+        episode: episode.seq,
+        imdbId: state.imdbId || 'IMDB_PENDING',
+      };
+      const markers = episode.skipMarkers || {};
+      const segments = [
+        markers.recap?.end > 0 && {
+          providerSegmentType: 'recap',
+          startSec: markers.recap.start / 1000,
+          endSec: markers.recap.end / 1000,
+        },
+        markers.credit?.end > 0 && {
+          providerSegmentType: 'credit',
+          startSec: markers.credit.start / 1000,
+          endSec: markers.credit.end / 1000,
+        },
+        markers.intro?.end > 0 && {
+          providerSegmentType: 'intro',
+          startSec: markers.intro.start / 1000,
+          endSec: markers.intro.end / 1000,
+        },
+        episode.creditsOffset && episode.runtime && {
+          providerSegmentType: 'creditsOffset',
+          startSec: parseFloat(episode.creditsOffset),
+          endSec: parseFloat(episode.runtime),
+        },
+      ].filter(Boolean);
+
+      for (const segment of segments) {
+        const item = createNormalizedSegment({ ...common, ...segment });
+        if (item) extractedItems.push(item);
+      }
+    }
+  }
+  recordExtractedSegments(extractedItems);
+}
+
+function setupNetflixInterception() {
+  const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+  const OriginalXHR = win.XMLHttpRequest;
+
+  function NetflixInterceptedXHR() {
+    const xhr = new OriginalXHR();
+    let url = '';
+    const originalOpen = xhr.open.bind(xhr);
+    const originalSend = xhr.send.bind(xhr);
+    xhr.open = function (method, requestUrl, ...rest) {
+      url = requestUrl;
+      return originalOpen(method, requestUrl, ...rest);
+    };
+    xhr.send = function (...args) {
+      if (url && url.includes('memberapi') && url.includes('metadata')) {
+        xhr.addEventListener('load', () => {
+          try {
+            const data = JSON.parse(xhr.responseText);
+            if (data?.video) processNetflixMetadata(data);
+          } catch (_) {}
+        });
+      }
+      return originalSend(...args);
+    };
+    return xhr;
+  }
+  Object.setPrototypeOf(NetflixInterceptedXHR, OriginalXHR);
+  NetflixInterceptedXHR.prototype = OriginalXHR.prototype;
+  win.XMLHttpRequest = NetflixInterceptedXHR;
+
+  const originalFetch = win.fetch.bind(win);
+  win.fetch = async function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const response = await originalFetch(input, init);
+    if (url.includes('memberapi') && url.includes('metadata')) {
+      try {
+        const data = await response.clone().json();
+        if (data?.video) processNetflixMetadata(data);
+      } catch (_) {}
+    }
+    return response;
+  };
+}
+
+
+  // â”€â”€â”€ providers/netflix/index.js â”€â”€â”€
+
+/** Netflix provider registration. */
+
+
+bootstrapProvider({
+  providerName: 'netflix',
+  setupInterception: setupNetflixInterception,
+  isPlayerPage: () => location.pathname.startsWith('/watch'),
+});
+
+  }
+
+  // Provider registration: prime-video
+  if (location.hostname === 'primevideo.com' || location.hostname.endsWith('.primevideo.com') || (/^www\.amazon\./i.test(location.hostname) && location.pathname.startsWith('/gp/video/'))) {
+
+  // â”€â”€â”€ providers/prime-video/extractor.js â”€â”€â”€
+
+/**
+ * Prime Video-specific extraction logic.
+ * Captures GetVodPlaybackResources transition timecodes and resolves the
+ * episode number from the active player DOM.
+ */
+
+
+const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
+
+function ensurePrimeVideoState() {
+  if (!(state.asinMap instanceof Map)) state.asinMap = new Map();
+  if (!(state.pendingByAsin instanceof Map)) state.pendingByAsin = new Map();
+  if (state.currentSeason == null) state.currentSeason = 1;
+  if (state.currentEpisode == null) state.currentEpisode = 1;
+}
+
+function findPrimeVideoAsinInObject(obj, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 5) return null;
+  const keys = ['asin', 'ASIN', 'titleId', 'titleID', 'contentId', 'catalogId'];
+  for (const key of keys) {
+    if (typeof obj[key] === 'string' && /^[A-Z0-9]{9,12}$/i.test(obj[key])) return obj[key];
+  }
+  for (const key in obj) {
+    const value = obj[key];
+    if (value && typeof value === 'object') {
+      const found = findPrimeVideoAsinInObject(value, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function extractPrimeVideoAsin(bodyText, url) {
+  if (url) {
+    const titleIdMatch = url.match(/[?&]titleId=([^&]+)/i);
+    if (titleIdMatch) return decodeURIComponent(titleIdMatch[1]);
+    const asinMatch = url.match(/[?&](?:asin|ASIN)=([A-Z0-9]{9,12})/i);
+    if (asinMatch) return asinMatch[1];
+  }
+  if (!bodyText) return null;
+  try {
+    const found = findPrimeVideoAsinInObject(JSON.parse(bodyText));
+    if (found) return found;
+  } catch (_) {}
+
+  const patterns = [
+    /"asin"\s*:\s*"([A-Z0-9]{9,12})"/i,
+    /"titleId"\s*:\s*"([A-Z0-9]{9,12})"/i,
+    /"titleID"\s*:\s*"([A-Z0-9]{9,12})"/i,
+    /"contentId"\s*:\s*"([A-Z0-9]{9,12})"/i,
+    /asin=([A-Z0-9]{9,12})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = bodyText.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function readPrimeVideoSeasonEpisode() {
+  const player = document.getElementById('dv-web-player');
+  const episodeInfo = document.querySelector('[class*="atvwebplayersdk-episode-info"]');
+  const isPlayerActive = !!player && player.offsetWidth > 0 && player.offsetHeight > 0;
+  let season = null;
+  let episode = null;
+
+  if (episodeInfo) {
+    const text = episodeInfo.textContent.trim();
+    const seasonMatch = text.match(/S(\d+)/i);
+    const episodeMatch = text.match(/(?:Afl\.?|E)\s*(\d+)/i);
+    if (seasonMatch) season = parseInt(seasonMatch[1], 10);
+    if (episodeMatch) episode = parseInt(episodeMatch[1], 10);
+  }
+  return { isPlayerActive, season, episode, title: document.title };
+}
+
+function updatePrimeVideoTitle(rawTitle) {
+  const cleaned = rawTitle.replace(/^Prime Video[:\-]\s*/i, '').trim();
+  const seasonMatch = cleaned.match(/\s*(Seizoen|Season)\s*(\d+)/i);
+  const title = seasonMatch ? cleaned.slice(0, seasonMatch.index).trim() : cleaned;
+  handleDetectedShow({ title, showId: title });
+}
+
+function finalizePrimeVideoEvents(asin, season, episode, data) {
+  const events = data?.transitionTimecodes?.result?.events || [];
+  const extractedItems = [];
+
+  for (const event of events) {
+    let segmentType = null;
+    if (event.eventType === 'SKIP_RECAP') segmentType = 'recap';
+    if (event.eventType === 'SKIP_INTRO') segmentType = 'intro';
+    if (!segmentType || typeof event.startTimeMs !== 'number' || typeof event.endTimeMs !== 'number') continue;
+
+    const episodeId = `${asin}_${segmentType}`;
+    if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+    extractedItems.push({
+      _eid: episodeId,
+      imdb_id: state.imdbId || 'IMDB_PENDING',
+      segment_type: segmentType,
+      season,
+      episode,
+      start_sec: event.startTimeMs / 1000,
+      end_sec: event.endTimeMs / 1000,
+    });
+  }
+  recordExtractedSegments(extractedItems);
+}
+
+function pollPrimeVideoEpisode(asin, attempt) {
+  const snapshot = readPrimeVideoSeasonEpisode();
+  if (snapshot.isPlayerActive && snapshot.season != null && snapshot.episode != null) {
+    state.asinMap.set(asin, { season: snapshot.season, episode: snapshot.episode });
+    state.currentSeason = snapshot.season;
+    state.currentEpisode = snapshot.episode;
+    updatePrimeVideoTitle(snapshot.title);
+    const pending = state.pendingByAsin.get(asin) || [];
+    state.pendingByAsin.delete(asin);
+    pending.forEach(data => finalizePrimeVideoEvents(asin, snapshot.season, snapshot.episode, data));
+    return;
+  }
+  if (attempt >= 40) {
+    console.warn('[PVE] Could not resolve season/episode for ASIN:', asin);
+    state.pendingByAsin.delete(asin);
+    return;
+  }
+  setTimeout(() => pollPrimeVideoEpisode(asin, attempt + 1), 250);
+}
+
+function processPrimeVideoMetadata(data, bodyText, url) {
+  ensurePrimeVideoState();
+  const asin = extractPrimeVideoAsin(bodyText, url);
+  if (!asin) return;
+  if (state.asinMap.has(asin)) {
+    const { season, episode } = state.asinMap.get(asin);
+    finalizePrimeVideoEvents(asin, season, episode, data);
+    return;
+  }
+  if (!state.pendingByAsin.has(asin)) state.pendingByAsin.set(asin, []);
+  state.pendingByAsin.get(asin).push(data);
+  pollPrimeVideoEpisode(asin, 0);
+}
+
+function setupPrimeVideoInterception() {
+  ensurePrimeVideoState();
+  const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+  const OriginalXHR = win.XMLHttpRequest;
+
+  function PrimeVideoInterceptedXHR() {
+    const xhr = new OriginalXHR();
+    let url = '';
+    let bodyText = '';
+    const originalOpen = xhr.open.bind(xhr);
+    const originalSend = xhr.send.bind(xhr);
+    xhr.open = function (method, requestUrl, ...rest) {
+      url = requestUrl;
+      return originalOpen(method, requestUrl, ...rest);
+    };
+    xhr.send = function (body, ...rest) {
+      bodyText = typeof body === 'string' ? body : '';
+      if (url && url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+        xhr.addEventListener('load', () => {
+          try { processPrimeVideoMetadata(JSON.parse(xhr.responseText), bodyText, url); }
+          catch (error) { console.error('[PVE] Failed to process XHR response:', error); }
+        });
+      }
+      return originalSend(body, ...rest);
+    };
+    return xhr;
+  }
+  Object.setPrototypeOf(PrimeVideoInterceptedXHR, OriginalXHR);
+  PrimeVideoInterceptedXHR.prototype = OriginalXHR.prototype;
+  win.XMLHttpRequest = PrimeVideoInterceptedXHR;
+
+  const originalFetch = win.fetch.bind(win);
+  win.fetch = async function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    let bodyText = '';
+    if (url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+      try {
+        if (init && typeof init.body === 'string') bodyText = init.body;
+        else if (input && typeof input === 'object' && input.clone) bodyText = await input.clone().text().catch(() => '');
+      } catch (_) {}
+    }
+    const response = await originalFetch(input, init);
+    if (url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+      try { processPrimeVideoMetadata(await response.clone().json(), bodyText, url); }
+      catch (error) { console.error('[PVE] Failed to process fetch response:', error); }
+    }
+    return response;
+  };
+}
+
+
+  // â”€â”€â”€ providers/prime-video/index.js â”€â”€â”€
+
+/** Prime Video provider registration. */
+
+
+bootstrapProvider({
+  providerName: 'prime-video',
+  setupInterception: setupPrimeVideoInterception,
+});
+
+  }
+
+  // Provider registration: videoland
+  if (location.hostname === 'videoland.com' || location.hostname.endsWith('.videoland.com')) {
+
+  // â”€â”€â”€ providers/videoland/extractor.js â”€â”€â”€
+
+/**
+ * Videoland-specific extraction logic.
+ * Captures /layout responses and joins root episode metadata to video chapters.
+ */
+
+
+const VIDEOLAND_LAYOUT_URL_MATCH = /\/layout(\?|$)/i;
+
+function ensureVideolandState() {
+  if (!(state.clipMap instanceof Map)) state.clipMap = new Map();
+  if (state.currentSeason == null) state.currentSeason = 1;
+  if (state.currentEpisode == null) state.currentEpisode = 1;
+}
+
+function coerceVideolandNumber(value) {
+  if (typeof value === 'number' && !Number.isNaN(value)) return value;
+  if (typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Number(value))) return Number(value);
+  return null;
+}
+
+function extractVideolandRootMeta(json) {
+  const video = json?.seo?.video || null;
+  return {
+    entityId: json?.entity?.id != null ? String(json.entity.id) : null,
+    season: coerceVideolandNumber(video?.season),
+    episode: coerceVideolandNumber(video?.episode),
+    duration: coerceVideolandNumber(video?.duration),
+    programId: json?.seo?.parent?.id != null ? String(json.seo.parent.id) : null,
+    programTitle: json?.seo?.parent?.name || null,
+  };
+}
+
+function extractVideolandVideosWithChapters(root) {
+  const found = [];
+  function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (node.itemContent?.video && Array.isArray(node.itemContent.video.chapters)) found.push(node.itemContent);
+    for (const key in node) {
+      if (Object.prototype.hasOwnProperty.call(node, key)) walk(node[key]);
+    }
+  }
+  walk(root);
+  return found;
+}
+
+function mapVideolandChapterType(type) {
+  if (type === 'intro') return 'recap';
+  if (type === 'opening_credits' || type === 'openingcredits') return 'intro';
+  if (type === 'ending_credits' || type === 'endingcredits') return 'outro';
+  return null;
+}
+
+function updateVideolandTitle(title, programId) {
+  handleDetectedShow({ title, showId: programId });
+}
+
+function processVideolandLayout(json) {
+  ensureVideolandState();
+  let rootMeta;
+  let videoItems;
+  try {
+    rootMeta = extractVideolandRootMeta(json);
+    videoItems = extractVideolandVideosWithChapters(json);
+  } catch (error) {
+    console.error('[VLE] Failed to traverse layout JSON:', error);
+    return;
+  }
+  if (!videoItems.length) return;
+
+  let activeItem = null;
+  if (rootMeta.entityId) {
+    activeItem = videoItems.find(item => String(item.video.id) === rootMeta.entityId);
+  }
+  if (!activeItem) activeItem = videoItems[0];
+
+  const clipId = String(activeItem.video.id);
+  const season = rootMeta.season;
+  const episode = rootMeta.episode;
+  const title = (rootMeta.programTitle || activeItem.title || '').trim();
+  state.clipMap.set(clipId, { season, episode, title, programId: rootMeta.programId });
+
+  if (season != null && episode != null) {
+    state.currentSeason = season;
+    state.currentEpisode = episode;
+  }
+  updateVideolandTitle(title, rootMeta.programId);
+
+  if (season == null || episode == null) return;
+  const extractedItems = [];
+  for (const chapter of activeItem.video.chapters || []) {
+    const segmentType = mapVideolandChapterType(chapter.type);
+    const startSec = coerceVideolandNumber(chapter.tcStart);
+    const endSec = coerceVideolandNumber(chapter.tcEnd);
+    if (!segmentType || startSec == null || endSec == null) continue;
+
+    const episodeId = `${clipId}_${segmentType}`;
+    if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+    extractedItems.push({
+      _eid: episodeId,
+      imdb_id: state.imdbId || 'IMDB_PENDING',
+      segment_type: segmentType,
+      season,
+      episode,
+      start_sec: startSec,
+      end_sec: endSec,
+    });
+  }
+  recordExtractedSegments(extractedItems);
+}
+
+function setupVideolandInterception() {
+  ensureVideolandState();
+  const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
+  const originalFetch = win.fetch.bind(win);
+  win.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const responsePromise = originalFetch(input, init);
+    if (VIDEOLAND_LAYOUT_URL_MATCH.test(url)) {
+      responsePromise.then(response => response.clone().json())
+        .then(processVideolandLayout)
+        .catch(error => console.warn('[VLE] Failed to process fetch response:', error));
+    }
+    return responsePromise;
+  };
+
+  const OriginalXHR = win.XMLHttpRequest;
+  function VideolandInterceptedXHR() {
+    const xhr = new OriginalXHR();
+    let url = '';
+    const originalOpen = xhr.open.bind(xhr);
+    const originalSend = xhr.send.bind(xhr);
+    xhr.open = function (method, requestUrl, ...rest) {
+      url = requestUrl;
+      return originalOpen(method, requestUrl, ...rest);
+    };
+    xhr.send = function (...args) {
+      if (url && VIDEOLAND_LAYOUT_URL_MATCH.test(url)) {
+        xhr.addEventListener('load', () => {
+          try { processVideolandLayout(JSON.parse(xhr.responseText)); }
+          catch (error) { console.error('[VLE] Failed to process XHR response:', error); }
+        });
+      }
+      return originalSend(...args);
+    };
+    return xhr;
+  }
+  Object.setPrototypeOf(VideolandInterceptedXHR, OriginalXHR);
+  VideolandInterceptedXHR.prototype = OriginalXHR.prototype;
+  win.XMLHttpRequest = VideolandInterceptedXHR;
+}
+
+
+  // â”€â”€â”€ providers/videoland/index.js â”€â”€â”€
+
+/** Videoland provider registration. */
+
+
+bootstrapProvider({
+  providerName: 'videoland',
+  setupInterception: setupVideolandInterception,
+});
+
+  }
 })();

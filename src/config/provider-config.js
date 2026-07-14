@@ -1,6 +1,6 @@
 /**
  * Provider configuration layer
- * Defines UI themes, branding, and service-specific settings
+ * Defines shared Netflix panel styling and provider-specific settings
  */
 
 /**
@@ -12,8 +12,24 @@ export const BASE_CONFIG = {
 };
 
 /**
+ * Netflix is the visual source of truth for every provider panel.
+ * Provider configuration may only override button colors, provider-name color,
+ * header/info-box text, and the info-box accent.
+ */
+export const PANEL_COLORS = {
+  background: 'rgba(12,12,12,0.98)',
+  panelBg: '#181818',
+  border: '#2c2c2c',
+  text: '#fff',
+  textSecondary: '#777',
+  textMuted: '#444',
+  accent: '#E50914',
+};
+
+/**
  * Provider-specific configurations
- * Each provider can customize colors, branding, and behavior
+ * Each provider can customize button colors, provider-name color, header branding,
+ * and info-box copy/accent.
  */
 export const PROVIDER_CONFIGS = {
   netflix: {
@@ -24,16 +40,12 @@ export const PROVIDER_CONFIGS = {
       primaryDark: '#b30812',
       secondary: '#1565c0',
       secondaryDark: '#0d47a1',
-      background: 'rgba(12,12,12,0.98)',
-      panelBg: '#181818',
-      border: '#2c2c2c',
-      text: '#fff',
-      textSecondary: '#777',
-      textMuted: '#444',
     },
+    nameColor: '#E50914',
+    infoAccent: '#E50914',
     branding: {
       icon: '🎬',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
     captureHint: 'All available seasons and episodes are captured automatically.',
   },
@@ -45,39 +57,31 @@ export const PROVIDER_CONFIGS = {
       primaryDark: '#004bb3',
       secondary: '#0c734f',
       secondaryDark: '#095a3d',
-      background: 'rgba(15, 23, 33, 0.98)',
-      panelBg: '#1a2634',
-      border: '#2a3a4a',
-      text: '#fff',
-      textSecondary: '#888',
-      textMuted: '#555',
     },
+    nameColor: '#0063e5',
+    infoAccent: '#0063e5',
     branding: {
       icon: '🏰',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
-    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
-  amazon: {
+  'prime-video': {
     name: 'Prime Video',
-    match: 'https://www.amazon.com/*/detail/*',
+    match: 'https://*.primevideo.com/*',
     colors: {
-      primary: '#ff9900',
-      primaryDark: '#e68a00',
-      secondary: '#0f79af',
-      secondaryDark: '#0c5d86',
-      background: 'rgba(18, 27, 36, 0.98)',
-      panelBg: '#222f3d',
-      border: '#334455',
-      text: '#fff',
-      textSecondary: '#999',
-      textMuted: '#666',
+      primary: '#00A8E1',
+      primaryDark: '#008fbe',
+      secondary: '#1565c0',
+      secondaryDark: '#0d47a1',
     },
+    nameColor: '#00A8E1',
+    infoAccent: '#00A8E1',
     branding: {
       icon: '📺',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
-    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
   hbo: {
     name: 'HBO Max',
@@ -87,39 +91,31 @@ export const PROVIDER_CONFIGS = {
       primaryDark: '#6a1b9e',
       secondary: '#1565c0',
       secondaryDark: '#0d47a1',
-      background: 'rgba(18, 18, 18, 0.98)',
-      panelBg: '#222222',
-      border: '#333333',
-      text: '#fff',
-      textSecondary: '#888',
-      textMuted: '#555',
     },
+    nameColor: '#8a2be2',
+    infoAccent: '#8a2be2',
     branding: {
       icon: '🎭',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
-    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
   videoland: {
     name: 'Videoland',
     match: 'https://www.videoland.com/*',
     colors: {
-      primary: '#f15a24',
-      primaryDark: '#c9481a',
-      secondary: '#d84d1d',
-      secondaryDark: '#ad3d17',
-      background: 'rgba(18,18,18,0.98)',
-      panelBg: '#242424',
-      border: '#3a3a3a',
-      text: '#fff',
-      textSecondary: '#999',
-      textMuted: '#666',
+      primary: '#00A8E1',
+      primaryDark: '#008fbe',
+      secondary: '#1565c0',
+      secondaryDark: '#0d47a1',
     },
+    nameColor: '#00A8E1',
+    infoAccent: '#00A8E1',
     branding: {
       icon: '📺',
-      title: 'Timestamps Extractor',
+      title: 'SegmentScraper',
     },
-    captureHint: 'Browse seasons and episodes to capture available timestamps.',
+    captureHint: 'All available seasons and episodes are captured automatically.',
   },
 };
 

@@ -16,7 +16,13 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @author       mronion212
 // @match        https://www.netflix.com/*
 // @match        https://www.disneyplus.com/*
-// @match        https://www.amazon.com/*/detail/*
+// @match        https://www.primevideo.com/*
+// @match        https://www.amazon.*/gp/video/*
+// @match        https://*.primevideo.com/*
+// @match        https://www.videoland.com/*
+// @match        https://videoland.com/*
+// @match        https://v2.videoland.com/*
+// @match        https://*.videoland.com/*
 // @match        https://play.max.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -83,21 +89,38 @@ function bundle() {
   const outputFile = path.join(__dirname, '..', 'SegmentScraper.user.js');
   
   // Define file order for proper dependency resolution
-  const fileOrder = [
+  const commonFileOrder = [
     'core/state.js',
     'core/network.js',
     'config/provider-config.js',
     'normalization/segment-mapper.js',
     'ui/panel.js',
     'ui/button.js',
-    'providers/netflix/extractor.js',
-    'providers/netflix/index.js',
+    'providers/bootstrap.js',
+  ];
+
+  const providerBundles = [
+    {
+      name: 'netflix',
+      condition: "location.hostname === 'www.netflix.com' || location.hostname === 'netflix.com'",
+      files: ['providers/netflix/extractor.js', 'providers/netflix/index.js'],
+    },
+    {
+      name: 'prime-video',
+      condition: "location.hostname === 'primevideo.com' || location.hostname.endsWith('.primevideo.com') || (/^www\\.amazon\\./i.test(location.hostname) && location.pathname.startsWith('/gp/video/'))",
+      files: ['providers/prime-video/extractor.js', 'providers/prime-video/index.js'],
+    },
+    {
+      name: 'videoland',
+      condition: "location.hostname === 'videoland.com' || location.hostname.endsWith('.videoland.com')",
+      files: ['providers/videoland/extractor.js', 'providers/videoland/index.js'],
+    },
   ];
   
   // Transform and concatenate all files
   let bundledCode = USERSCRIPT_HEADER;
   
-  for (const relativePath of fileOrder) {
+  for (const relativePath of commonFileOrder) {
     const file = path.join(srcDir, relativePath);
     if (fs.existsSync(file)) {
       console.log(`Bundling: ${relativePath}`);
@@ -108,6 +131,20 @@ function bundle() {
       bundledCode += transformed;
       bundledCode += '\n';
     }
+  }
+
+  for (const provider of providerBundles) {
+    bundledCode += `\n  // Provider registration: ${provider.name}\n`;
+    bundledCode += `  if (${provider.condition}) {\n`;
+    for (const relativePath of provider.files) {
+      const file = path.join(srcDir, relativePath);
+      if (!fs.existsSync(file)) continue;
+      console.log(`Bundling: ${relativePath}`);
+      bundledCode += `\n  // â”€â”€â”€ ${relativePath} â”€â”€â”€\n\n`;
+      bundledCode += transformCode(readFile(file));
+      bundledCode += '\n';
+    }
+    bundledCode += '  }\n';
   }
   
   // Close the IIFE
