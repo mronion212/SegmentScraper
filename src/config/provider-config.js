@@ -112,6 +112,22 @@ export const PROVIDER_CONFIGS = {
     },
     captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
   },
+  skyshowtime: {
+    name: 'SkyShowtime',
+    match: 'https://www.skyshowtime.com/*',
+    colors: {
+      primary: '#0072CE',
+      primaryDark: '#005A9C',
+      secondary: '#1565c0',
+      secondaryDark: '#0d47a1',
+    },
+    nameColor: '#0072CE',
+    infoAccent: '#0072CE',
+    branding: {
+      title: 'SegmentScraper',
+    },
+    captureHint: 'SkyShowtime extraction is being prepared. Playback metadata will be added once its API responses are mapped.',
+  },
 };
 
 /**

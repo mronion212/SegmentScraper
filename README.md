@@ -7,8 +7,10 @@ SegmentScraper extracts intro, recap, and outro timestamps from supported stream
 - Netflix
 - Prime Video
 - Videoland
+- SkyShowtime (prepared; extraction mapping pending)
 
 Disney+ and HBO Max are present in the provider configuration but do not yet have extraction modules.
+SkyShowtime is registered in the userscript and displays the shared panel during playback; its network metadata still needs to be mapped before timestamps can be captured.
 
 ## Features
 
@@ -53,6 +55,9 @@ SegmentScraper/
 |       `-- videoland/
 |           |-- index.js
 |           `-- extractor.js
+|       `-- skyshowtime/
+|           |-- index.js
+|           `-- extractor.js             # Provider scaffold; extraction mapping pending
 |-- build/
 |   `-- bundler.js                # Userscript bundler
 |-- SegmentScraper.user.js        # Generated Tampermonkey userscript

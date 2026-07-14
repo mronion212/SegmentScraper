@@ -24,6 +24,8 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @match        https://v2.videoland.com/*
 // @match        https://*.videoland.com/*
 // @match        https://play.max.com/*
+// @match        https://www.skyshowtime.com/*
+// @match        https://skyshowtime.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      v3.sg.media-imdb.com
@@ -114,6 +116,11 @@ function bundle() {
       name: 'videoland',
       condition: "location.hostname === 'videoland.com' || location.hostname.endsWith('.videoland.com')",
       files: ['providers/videoland/extractor.js', 'providers/videoland/index.js'],
+    },
+    {
+      name: 'skyshowtime',
+      condition: "location.hostname === 'skyshowtime.com' || location.hostname.endsWith('.skyshowtime.com')",
+      files: ['providers/skyshowtime/extractor.js', 'providers/skyshowtime/index.js'],
     },
   ];
   

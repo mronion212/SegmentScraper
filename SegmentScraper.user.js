@@ -14,6 +14,8 @@
 // @match        https://v2.videoland.com/*
 // @match        https://*.videoland.com/*
 // @match        https://play.max.com/*
+// @match        https://www.skyshowtime.com/*
+// @match        https://skyshowtime.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      v3.sg.media-imdb.com
@@ -523,6 +525,22 @@ const PROVIDER_CONFIGS = {
       title: 'SegmentScraper',
     },
     captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
+  },
+  skyshowtime: {
+    name: 'SkyShowtime',
+    match: 'https://www.skyshowtime.com/*',
+    colors: {
+      primary: '#0072CE',
+      primaryDark: '#005A9C',
+      secondary: '#1565c0',
+      secondaryDark: '#0d47a1',
+    },
+    nameColor: '#0072CE',
+    infoAccent: '#0072CE',
+    branding: {
+      title: 'SegmentScraper',
+    },
+    captureHint: 'SkyShowtime extraction is being prepared. Playback metadata will be added once its API responses are mapped.',
   },
 };
 
@@ -2100,6 +2118,41 @@ function setupVideolandInterception() {
 bootstrapProvider({
   providerName: 'videoland',
   setupInterception: setupVideolandInterception,
+});
+
+  }
+
+  // Provider registration: skyshowtime
+  if (location.hostname === 'skyshowtime.com' || location.hostname.endsWith('.skyshowtime.com')) {
+
+  // â”€â”€â”€ providers/skyshowtime/extractor.js â”€â”€â”€
+
+/**
+ * SkyShowtime extraction scaffold.
+ *
+ * The provider is registered so its panel and trigger are available during
+ * playback. Network response shapes still need to be mapped before segment
+ * timestamps can be captured.
+ */
+
+function isSkyShowtimePlayerPage() {
+  return Boolean(document.querySelector('video'));
+}
+
+function setupSkyShowtimeInterception() {
+  console.info('[SSE] SkyShowtime provider initialized; segment extraction is not mapped yet.');
+}
+
+
+  // â”€â”€â”€ providers/skyshowtime/index.js â”€â”€â”€
+
+/** SkyShowtime provider registration. */
+
+
+bootstrapProvider({
+  providerName: 'skyshowtime',
+  setupInterception: setupSkyShowtimeInterception,
+  isPlayerPage: isSkyShowtimePlayerPage,
 });
 
   }
