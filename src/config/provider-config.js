@@ -116,17 +116,17 @@ export const PROVIDER_CONFIGS = {
     name: 'SkyShowtime',
     match: 'https://www.skyshowtime.com/*',
     colors: {
-      primary: '#0072CE',
-      primaryDark: '#005A9C',
+      primary: '#a3127e',
+      primaryDark: '#841b94',
       secondary: '#1565c0',
       secondaryDark: '#0d47a1',
     },
-    nameColor: '#0072CE',
-    infoAccent: '#0072CE',
+    nameColor: '#a3127e',
+    infoAccent: '#a3127e',
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'SkyShowtime extraction is being prepared. Playback metadata will be added once its API responses are mapped.',
+    captureHint: 'All available seasons and episodes are captured automatically from SkyShowtime catalogue metadata.',
   },
 };
 

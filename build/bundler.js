@@ -33,6 +33,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @connect      v3.sg.media-imdb.com
 // @connect      api.introdb.app
 // @connect      api4.thetvdb.com
+// @connect      atom.skyshowtime.com
 // @run-at       document-start
 // ==/UserScript==
 
