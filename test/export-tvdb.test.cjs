@@ -8,10 +8,11 @@ function loadBootstrap({ mappingResult }) {
   const calls = { map: [], dedup: [], toasts: [], previews: [], infoLogs: [], warnLogs: [] };
   const state = {
     allItems: [
-      { _eid: 'regular', _episodeTitle: 'Regular', imdb_id: 'tt123', segment_type: 'intro', season: 4, episode: 8, start_sec: 1, end_sec: 2 },
-      { _eid: 'special', _episodeTitle: 'Bonus', imdb_id: 'tt123', segment_type: 'intro', season: 0, episode: 1, start_sec: 3, end_sec: 4 },
+      { _eid: 'regular', _episodeTitle: 'Regular', imdb_id: 'tt123', segment_type: 'intro', season: 4, episode: 8, start_sec: 1, end_sec: 7 },
+      { _eid: 'special', _episodeTitle: 'Bonus', imdb_id: 'tt123', segment_type: 'intro', season: 0, episode: 1, start_sec: 3, end_sec: 9 },
     ],
     imdbId: 'tt123',
+    introdbApiKey: 'introdb-key',
     tvdbApiKey: 'local-key',
     providerEpisodes: [{ season: 4, episode: 8, title: 'Regular' }, { season: 0, episode: 1, title: 'Bonus', isSpecial: true }],
     submitInProgress: false,
@@ -21,7 +22,7 @@ function loadBootstrap({ mappingResult }) {
   let source = fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'bootstrap.js'), 'utf8')
     .replace(/^import .*$/gm, '')
     .replace(/^export /gm, '');
-  source += '\nglobalThis.bootstrapExports = { exportJSON };';
+  source += '\nglobalThis.bootstrapExports = { exportJSON, submitToIntroDB };';
 
   const context = vm.createContext({
     state,
@@ -72,11 +73,11 @@ function loadBootstrap({ mappingResult }) {
     },
   });
   vm.runInContext(source, context, { filename: 'bootstrap.js' });
-  return { exportJSON: context.bootstrapExports.exportJSON, calls };
+  return { ...context.bootstrapExports, calls, state };
 }
 
 test('JSON export uses TVDB mapping and canonical episode numbers before deduplication', async () => {
-  const mappedItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 2 };
+  const mappedItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 6 };
   const bootstrap = loadBootstrap({
     mappingResult: {
       success: true,
@@ -109,7 +110,7 @@ test('JSON export produces no preview when TVDB rejects the series mapping', asy
 });
 
 test('partial title mapping logs regular episode match and skip counts with reasons', async () => {
-  const mappedItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 2 };
+  const mappedItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 7 };
   const bootstrap = loadBootstrap({
     mappingResult: {
       success: true,
@@ -136,4 +137,40 @@ test('partial title mapping logs regular episode match and skip counts with reas
   assert.equal(bootstrap.calls.previews.length, 1);
   assert.ok(bootstrap.calls.infoLogs.some(message =>
     message.includes('Regular episodes matched: 1; skipped: 1; reasons: generic title: 1.')));
+});
+
+test('JSON export reports and stops when every mapped segment is under 5 seconds', async () => {
+  const bootstrap = loadBootstrap({
+    mappingResult: {
+      success: true,
+      method: 'order',
+      items: [{ imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 5.9 }],
+      stats: { providerRegular: 1, tvdbRegular: 1 },
+    },
+  });
+
+  await bootstrap.exportJSON();
+
+  assert.equal(bootstrap.calls.dedup.length, 0);
+  assert.equal(bootstrap.calls.previews.length, 0);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('1 segment(s) under 5 seconds')));
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('Nothing left to export')));
+});
+
+test('IntroDB submission reports and stops when every mapped segment is under 5 seconds', async () => {
+  const bootstrap = loadBootstrap({
+    mappingResult: {
+      success: true,
+      method: 'order',
+      items: [{ imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 5.9 }],
+      stats: { providerRegular: 1, tvdbRegular: 1 },
+    },
+  });
+
+  await bootstrap.submitToIntroDB();
+
+  assert.equal(bootstrap.calls.dedup.length, 0);
+  assert.equal(bootstrap.state.submitInProgress, false);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('1 segment(s) under 5 seconds')));
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('Nothing left to submit')));
 });

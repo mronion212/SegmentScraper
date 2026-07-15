@@ -408,7 +408,7 @@ export function toast(msg) {
  * Show the export data in a modal before files are downloaded.
  * The preview deliberately uses textContent so captured metadata cannot inject HTML.
  */
-export function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
+export function showExportPreview({ items, fileCount, duplicateCount, shortSegmentCount, downloads, onDownload, onCancel }) {
   document.getElementById('nfe-export-preview')?.remove();
 
   const { colors: providerColors, name: providerName } = getProviderConfig(currentProvider);
@@ -432,7 +432,7 @@ export function showExportPreview({ items, fileCount, duplicateCount, onConfirm 
   heading.textContent = `Controleer ${providerName} JSON-export`;
   heading.style.cssText = `margin:0 0 6px; color:${providerColors.primary}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
-  summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}.`;
+  summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}${shortSegmentCount ? `; ${shortSegmentCount} korter dan 5 seconden uitgesloten` : ''}.`;
   summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
   const preview = document.createElement('pre');
   preview.textContent = JSON.stringify({ items }, null, 2);
@@ -446,14 +446,34 @@ export function showExportPreview({ items, fileCount, duplicateCount, onConfirm 
   const cancel = document.createElement('button');
   cancel.textContent = 'Annuleren';
   cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
-  const confirm = document.createElement('button');
-  confirm.textContent = 'Download JSON';
-  confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
+  const confirm = document.createElement('a');
+  confirm.href = downloads[0].url;
+  confirm.download = downloads[0].filename;
+  confirm.textContent = fileCount > 1 ? `Download JSON (1/${fileCount})` : 'Download JSON';
+  confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer; text-decoration:none;`;
 
-  const close = () => overlay.remove();
-  cancel.addEventListener('click', close);
-  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  confirm.addEventListener('click', () => { close(); onConfirm(); });
+  let downloadIndex = 0;
+  const cancelExport = () => {
+    onCancel();
+    overlay.remove();
+  };
+  cancel.addEventListener('click', cancelExport);
+  overlay.addEventListener('click', event => { if (event.target === overlay) cancelExport(); });
+  confirm.addEventListener('click', () => {
+    onDownload(downloadIndex);
+    downloadIndex++;
+    if (downloadIndex >= downloads.length) {
+      setTimeout(() => overlay.remove());
+      return;
+    }
+    confirm.style.pointerEvents = 'none';
+    setTimeout(() => {
+      confirm.href = downloads[downloadIndex].url;
+      confirm.download = downloads[downloadIndex].filename;
+      confirm.textContent = `Download next JSON (${downloadIndex + 1}/${fileCount})`;
+      confirm.style.pointerEvents = 'auto';
+    });
+  });
   actions.append(cancel, confirm);
   dialog.append(heading, summary, preview, actions);
   overlay.append(dialog);

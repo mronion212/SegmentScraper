@@ -1613,7 +1613,7 @@ function toast(msg) {
  * Show the export data in a modal before files are downloaded.
  * The preview deliberately uses textContent so captured metadata cannot inject HTML.
  */
-function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
+function showExportPreview({ items, fileCount, duplicateCount, shortSegmentCount, downloads, onDownload, onCancel }) {
   document.getElementById('nfe-export-preview')?.remove();
 
   const { colors: providerColors, name: providerName } = getProviderConfig(currentProvider);
@@ -1637,7 +1637,7 @@ function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   heading.textContent = `Controleer ${providerName} JSON-export`;
   heading.style.cssText = `margin:0 0 6px; color:${providerColors.primary}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
-  summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}.`;
+  summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}${shortSegmentCount ? `; ${shortSegmentCount} korter dan 5 seconden uitgesloten` : ''}.`;
   summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
   const preview = document.createElement('pre');
   preview.textContent = JSON.stringify({ items }, null, 2);
@@ -1651,14 +1651,34 @@ function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   const cancel = document.createElement('button');
   cancel.textContent = 'Annuleren';
   cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
-  const confirm = document.createElement('button');
-  confirm.textContent = 'Download JSON';
-  confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
+  const confirm = document.createElement('a');
+  confirm.href = downloads[0].url;
+  confirm.download = downloads[0].filename;
+  confirm.textContent = fileCount > 1 ? `Download JSON (1/${fileCount})` : 'Download JSON';
+  confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer; text-decoration:none;`;
 
-  const close = () => overlay.remove();
-  cancel.addEventListener('click', close);
-  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  confirm.addEventListener('click', () => { close(); onConfirm(); });
+  let downloadIndex = 0;
+  const cancelExport = () => {
+    onCancel();
+    overlay.remove();
+  };
+  cancel.addEventListener('click', cancelExport);
+  overlay.addEventListener('click', event => { if (event.target === overlay) cancelExport(); });
+  confirm.addEventListener('click', () => {
+    onDownload(downloadIndex);
+    downloadIndex++;
+    if (downloadIndex >= downloads.length) {
+      setTimeout(() => overlay.remove());
+      return;
+    }
+    confirm.style.pointerEvents = 'none';
+    setTimeout(() => {
+      confirm.href = downloads[downloadIndex].url;
+      confirm.download = downloads[downloadIndex].filename;
+      confirm.textContent = `Download next JSON (${downloadIndex + 1}/${fileCount})`;
+      confirm.style.pointerEvents = 'auto';
+    });
+  });
   actions.append(cancel, confirm);
   dialog.append(heading, summary, preview, actions);
   overlay.append(dialog);
@@ -1872,6 +1892,14 @@ function isAlreadyInIntroDB(item) {
   return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
 }
 
+function filterShortSegments(items) {
+  const filteredItems = items.filter(item => item.end_sec - item.start_sec >= 5);
+  return {
+    items: filteredItems,
+    skipped: items.length - filteredItems.length,
+  };
+}
+
 async function mapCapturedItemsWithTvdb(action) {
   const capturedItems = state.allItems.slice();
   const pendingItems = capturedItems.filter(item => !item.imdb_id || item.imdb_id === 'IMDB_PENDING');
@@ -1959,6 +1987,16 @@ async function exportJSON() {
     return;
   }
 
+  const shortSegments = filterShortSegments(items);
+  items = shortSegments.items;
+  if (shortSegments.skipped > 0) {
+    toast(`${shortSegments.skipped} segment(s) under 5 seconds removed from export.`);
+  }
+  if (!items.length) {
+    toast('Nothing left to export after removing segments under 5 seconds.');
+    return;
+  }
+
   const episodeKeys = [...new Set(
     items
       .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
@@ -2001,32 +2039,32 @@ async function exportJSON() {
     }
   }
 
-  let downloaded = 0;
-  function downloadNext(index) {
-    if (index >= files.length) {
-      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${items.length} entries`);
-      return;
-    }
-    const file = files[index];
+  const downloads = files.map(file => {
     const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = Object.assign(document.createElement('a'), {
-      href: url,
-      download: `timestamps_${file.imdbId}${file.part}.json`,
-    });
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
+    return {
+      url: URL.createObjectURL(blob),
+      filename: `timestamps_${file.imdbId}${file.part}.json`,
+    };
+  });
+  let downloaded = 0;
+  const revokeDownloads = () => downloads.forEach(download => URL.revokeObjectURL(download.url));
+
+  function handleDownload(index) {
     downloaded++;
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setTimeout(() => downloadNext(index + 1), 400);
+    setTimeout(() => URL.revokeObjectURL(downloads[index].url), 1000);
+    if (downloaded === downloads.length) {
+      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${items.length} entries`);
+    }
   }
 
   showExportPreview({
     items,
     fileCount: files.length,
     duplicateCount,
-    onConfirm: () => downloadNext(0),
+    shortSegmentCount: shortSegments.skipped,
+    downloads,
+    onDownload: handleDownload,
+    onCancel: revokeDownloads,
   });
 }
 
@@ -2064,11 +2102,23 @@ async function submitToIntroDB() {
 
   const mapped = await mapCapturedItemsWithTvdb('IntroDB submission');
   const capturedItems = mapped.capturedItems;
-  const allMapped = mapped.items;
+  let allMapped = mapped.items;
   if (!allMapped.length) {
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
     toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : 'No series has a reliable TVDB episode mapping; nothing was submitted.');
     setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : 'Submission blocked: TVDB mapping unavailable or unreliable');
+    stopSubmission();
+    return;
+  }
+
+  const shortSegments = filterShortSegments(allMapped);
+  allMapped = shortSegments.items;
+  if (shortSegments.skipped > 0) {
+    toast(`${shortSegments.skipped} segment(s) under 5 seconds skipped from IntroDB submission.`);
+  }
+  if (!allMapped.length) {
+    toast('Nothing left to submit after removing segments under 5 seconds.');
+    setIntrodbStatus('Nothing submitted: all segments were under 5 seconds');
     stopSubmission();
     return;
   }
@@ -2096,7 +2146,10 @@ async function submitToIntroDB() {
     return;
   }
 
-  const skipMessage = skipped > 0 ? ` (${skipped} skipped or already existed)` : '';
+  const skipDetails = [];
+  if (shortSegments.skipped > 0) skipDetails.push(`${shortSegments.skipped} under 5 seconds`);
+  if (skipped - shortSegments.skipped > 0) skipDetails.push(`${skipped - shortSegments.skipped} otherwise skipped or already existed`);
+  const skipMessage = skipDetails.length ? ` (${skipDetails.join('; ')})` : '';
   const ids = [...new Set(items.map(item => item.imdb_id))].join(', ');
   if (!confirm(`Submit ${items.length} timestamp${items.length !== 1 ? 's' : ''} to IntroDB?${skipMessage}\nID(s): ${ids}`)) {
     stopSubmission();

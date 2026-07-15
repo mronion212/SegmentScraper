@@ -97,6 +97,14 @@ export function isAlreadyInIntroDB(item) {
   return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
 }
 
+export function filterShortSegments(items) {
+  const filteredItems = items.filter(item => item.end_sec - item.start_sec >= 5);
+  return {
+    items: filteredItems,
+    skipped: items.length - filteredItems.length,
+  };
+}
+
 async function mapCapturedItemsWithTvdb(action) {
   const capturedItems = state.allItems.slice();
   const pendingItems = capturedItems.filter(item => !item.imdb_id || item.imdb_id === 'IMDB_PENDING');
@@ -184,6 +192,16 @@ export async function exportJSON() {
     return;
   }
 
+  const shortSegments = filterShortSegments(items);
+  items = shortSegments.items;
+  if (shortSegments.skipped > 0) {
+    toast(`${shortSegments.skipped} segment(s) under 5 seconds removed from export.`);
+  }
+  if (!items.length) {
+    toast('Nothing left to export after removing segments under 5 seconds.');
+    return;
+  }
+
   const episodeKeys = [...new Set(
     items
       .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
@@ -226,32 +244,32 @@ export async function exportJSON() {
     }
   }
 
-  let downloaded = 0;
-  function downloadNext(index) {
-    if (index >= files.length) {
-      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${items.length} entries`);
-      return;
-    }
-    const file = files[index];
+  const downloads = files.map(file => {
     const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = Object.assign(document.createElement('a'), {
-      href: url,
-      download: `timestamps_${file.imdbId}${file.part}.json`,
-    });
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
+    return {
+      url: URL.createObjectURL(blob),
+      filename: `timestamps_${file.imdbId}${file.part}.json`,
+    };
+  });
+  let downloaded = 0;
+  const revokeDownloads = () => downloads.forEach(download => URL.revokeObjectURL(download.url));
+
+  function handleDownload(index) {
     downloaded++;
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setTimeout(() => downloadNext(index + 1), 400);
+    setTimeout(() => URL.revokeObjectURL(downloads[index].url), 1000);
+    if (downloaded === downloads.length) {
+      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${items.length} entries`);
+    }
   }
 
   showExportPreview({
     items,
     fileCount: files.length,
     duplicateCount,
-    onConfirm: () => downloadNext(0),
+    shortSegmentCount: shortSegments.skipped,
+    downloads,
+    onDownload: handleDownload,
+    onCancel: revokeDownloads,
   });
 }
 
@@ -289,11 +307,23 @@ export async function submitToIntroDB() {
 
   const mapped = await mapCapturedItemsWithTvdb('IntroDB submission');
   const capturedItems = mapped.capturedItems;
-  const allMapped = mapped.items;
+  let allMapped = mapped.items;
   if (!allMapped.length) {
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
     toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : 'No series has a reliable TVDB episode mapping; nothing was submitted.');
     setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : 'Submission blocked: TVDB mapping unavailable or unreliable');
+    stopSubmission();
+    return;
+  }
+
+  const shortSegments = filterShortSegments(allMapped);
+  allMapped = shortSegments.items;
+  if (shortSegments.skipped > 0) {
+    toast(`${shortSegments.skipped} segment(s) under 5 seconds skipped from IntroDB submission.`);
+  }
+  if (!allMapped.length) {
+    toast('Nothing left to submit after removing segments under 5 seconds.');
+    setIntrodbStatus('Nothing submitted: all segments were under 5 seconds');
     stopSubmission();
     return;
   }
@@ -321,7 +351,10 @@ export async function submitToIntroDB() {
     return;
   }
 
-  const skipMessage = skipped > 0 ? ` (${skipped} skipped or already existed)` : '';
+  const skipDetails = [];
+  if (shortSegments.skipped > 0) skipDetails.push(`${shortSegments.skipped} under 5 seconds`);
+  if (skipped - shortSegments.skipped > 0) skipDetails.push(`${skipped - shortSegments.skipped} otherwise skipped or already existed`);
+  const skipMessage = skipDetails.length ? ` (${skipDetails.join('; ')})` : '';
   const ids = [...new Set(items.map(item => item.imdb_id))].join(', ');
   if (!confirm(`Submit ${items.length} timestamp${items.length !== 1 ? 's' : ''} to IntroDB?${skipMessage}\nID(s): ${ids}`)) {
     stopSubmission();
