@@ -160,6 +160,18 @@ async function mapCapturedItemsWithTvdb(action) {
   };
 }
 
+const MIN_OUTPUT_SEGMENT_DURATION_SECONDS = 5;
+
+function filterShortOutputSegments(items) {
+  return items.filter(item => {
+    const start = Number(item?.start_sec);
+    const end = Number(item?.end_sec);
+    return Number.isFinite(start)
+      && Number.isFinite(end)
+      && end - start >= MIN_OUTPUT_SEGMENT_DURATION_SECONDS;
+  });
+}
+
 export async function exportJSON() {
   if (!state.allItems.length) {
     toast('No timestamps yet.');
@@ -177,8 +189,17 @@ export async function exportJSON() {
 
   toast('Validating JSON export against TVDB...');
   const mapped = await mapCapturedItemsWithTvdb('JSON export');
-  let items = mapped.items;
+  const mappedItems = mapped.items;
+  let items = filterShortOutputSegments(mappedItems);
+  const shortSegmentCount = mappedItems.length - items.length;
+  if (shortSegmentCount > 0) {
+    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
+  }
   if (!items.length) {
+    if (mappedItems.length && shortSegmentCount === mappedItems.length) {
+      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+      return;
+    }
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
     toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : 'No series has a reliable TVDB episode mapping; nothing was exported.');
     return;
@@ -289,8 +310,19 @@ export async function submitToIntroDB() {
 
   const mapped = await mapCapturedItemsWithTvdb('IntroDB submission');
   const capturedItems = mapped.capturedItems;
-  const allMapped = mapped.items;
+  const mappedItems = mapped.items;
+  const allMapped = filterShortOutputSegments(mappedItems);
+  const shortSegmentCount = mappedItems.length - allMapped.length;
+  if (shortSegmentCount > 0) {
+    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds skipped.`);
+  }
   if (!allMapped.length) {
+    if (mappedItems.length && shortSegmentCount === mappedItems.length) {
+      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was submitted.`);
+      setIntrodbStatus(`Nothing submitted: segments must be at least ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds`);
+      stopSubmission();
+      return;
+    }
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
     toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : 'No series has a reliable TVDB episode mapping; nothing was submitted.');
     setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : 'Submission blocked: TVDB mapping unavailable or unreliable');

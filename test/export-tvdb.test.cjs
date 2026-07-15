@@ -5,13 +5,14 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 function loadBootstrap({ mappingResult }) {
-  const calls = { map: [], dedup: [], toasts: [], previews: [], infoLogs: [], warnLogs: [] };
+  const calls = { map: [], dedup: [], toasts: [], previews: [], submissions: [], confirmations: [], infoLogs: [], warnLogs: [] };
   const state = {
     allItems: [
       { _eid: 'regular', _episodeTitle: 'Regular', imdb_id: 'tt123', segment_type: 'intro', season: 4, episode: 8, start_sec: 1, end_sec: 2 },
       { _eid: 'special', _episodeTitle: 'Bonus', imdb_id: 'tt123', segment_type: 'intro', season: 0, episode: 1, start_sec: 3, end_sec: 4 },
     ],
     imdbId: 'tt123',
+    introdbApiKey: 'introdb-key',
     tvdbApiKey: 'local-key',
     providerEpisodes: [{ season: 4, episode: 8, title: 'Regular' }, { season: 0, episode: 1, title: 'Bonus', isSpecial: true }],
     submitInProgress: false,
@@ -21,7 +22,7 @@ function loadBootstrap({ mappingResult }) {
   let source = fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'bootstrap.js'), 'utf8')
     .replace(/^import .*$/gm, '')
     .replace(/^export /gm, '');
-  source += '\nglobalThis.bootstrapExports = { exportJSON };';
+  source += '\nglobalThis.bootstrapExports = { exportJSON, submitToIntroDB };';
 
   const context = vm.createContext({
     state,
@@ -53,7 +54,10 @@ function loadBootstrap({ mappingResult }) {
       calls.dedup.push({ key, apiKey, options });
       return new Set();
     },
-    submitSegment: async () => ({ success: true }),
+    submitSegment: async item => {
+      calls.submissions.push(item);
+      return { success: true };
+    },
     injectBtn: () => {},
     getNextEpBtn: () => null,
     setProviderName: () => {},
@@ -61,6 +65,12 @@ function loadBootstrap({ mappingResult }) {
     updateCounters: () => {},
     updatePanelTitle: () => {},
     toast: message => calls.toasts.push(message),
+    setIntrodbStatus: () => {},
+    setTvdbStatus: () => {},
+    confirm: message => {
+      calls.confirmations.push(message);
+      return true;
+    },
     updateImdbInput: () => {},
     showExportPreview: options => calls.previews.push(options),
     getProviderConfig: () => ({ name: 'Netflix' }),
@@ -72,11 +82,15 @@ function loadBootstrap({ mappingResult }) {
     },
   });
   vm.runInContext(source, context, { filename: 'bootstrap.js' });
-  return { exportJSON: context.bootstrapExports.exportJSON, calls };
+  return {
+    exportJSON: context.bootstrapExports.exportJSON,
+    submitToIntroDB: context.bootstrapExports.submitToIntroDB,
+    calls,
+  };
 }
 
 test('JSON export uses TVDB mapping and canonical episode numbers before deduplication', async () => {
-  const mappedItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 2 };
+  const mappedItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 7 };
   const bootstrap = loadBootstrap({
     mappingResult: {
       success: true,
@@ -109,7 +123,7 @@ test('JSON export produces no preview when TVDB rejects the series mapping', asy
 });
 
 test('partial title mapping logs regular episode match and skip counts with reasons', async () => {
-  const mappedItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 2 };
+  const mappedItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 7 };
   const bootstrap = loadBootstrap({
     mappingResult: {
       success: true,
@@ -136,4 +150,44 @@ test('partial title mapping logs regular episode match and skip counts with reas
   assert.equal(bootstrap.calls.previews.length, 1);
   assert.ok(bootstrap.calls.infoLogs.some(message =>
     message.includes('Regular episodes matched: 1; skipped: 1; reasons: generic title: 1.')));
+});
+
+test('JSON export removes segments shorter than five seconds and keeps exact boundary', async () => {
+  const shortItem = { imdb_id: 'tt123', segment_type: 'recap', season: 1, episode: 2, start_sec: 10, end_sec: 14.999 };
+  const boundaryItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 20, end_sec: 25 };
+  const bootstrap = loadBootstrap({
+    mappingResult: {
+      success: true,
+      method: 'order',
+      reason: 'regular-episode counts match',
+      items: [shortItem, boundaryItem],
+      stats: { providerRegular: 1, tvdbRegular: 1 },
+    },
+  });
+
+  await bootstrap.exportJSON();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [boundaryItem]);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('shorter than 5 seconds removed')));
+});
+
+test('IntroDB submission removes segments shorter than five seconds', async () => {
+  const shortItem = { imdb_id: 'tt123', segment_type: 'recap', season: 1, episode: 2, start_sec: 10, end_sec: 12 };
+  const eligibleItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 20, end_sec: 27 };
+  const bootstrap = loadBootstrap({
+    mappingResult: {
+      success: true,
+      method: 'order',
+      reason: 'regular-episode counts match',
+      items: [shortItem, eligibleItem],
+      stats: { providerRegular: 1, tvdbRegular: 1 },
+    },
+  });
+
+  await bootstrap.submitToIntroDB();
+  await new Promise(resolve => setTimeout(resolve, 10));
+
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.submissions)), [eligibleItem]);
+  assert.match(bootstrap.calls.confirmations[0], /Submit 1 timestamp/);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('shorter than 5 seconds skipped')));
 });
