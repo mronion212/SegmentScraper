@@ -8,6 +8,8 @@ import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingS
 import { injectBtn, getNextEpBtn } from '../ui/button.js';
 import { setProviderName, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput, showExportPreview } from '../ui/panel.js';
 import { getProviderConfig } from '../config/provider-config.js';
+import { loadIntrodbSettings, saveIntrodbSettings } from '../core/introdb-settings.js';
+import { loadTvdbSettings, saveTvdbSettings, mapSeriesItemsToTvdb } from '../core/tvdb.js';
 
 const BUTTON_IDLE_DELAY_MS = 3000;
 let activeProviderConfig = getProviderConfig('netflix');
@@ -26,6 +28,13 @@ export function setIntrodbStatus(msg) {
   el.style.display = msg ? 'block' : 'none';
 }
 
+export function setTvdbStatus(msg) {
+  const el = document.getElementById('nfe-tvdb-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = msg ? 'block' : 'none';
+}
+
 /** Apply the shared IMDb flow after an extractor discovers a show. */
 export function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null }) {
   if (title && title !== state.showTitle) {
@@ -36,6 +45,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     state.dbSearchDone = false;
     state.imdbId = '';
     state.dedupCacheV2 = {};
+    state.providerEpisodes = [];
     updatePanelTitle();
   }
 
@@ -87,29 +97,108 @@ export function isAlreadyInIntroDB(item) {
   return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
 }
 
+async function mapCapturedItemsWithTvdb(action) {
+  const capturedItems = state.allItems.slice();
+  const pendingItems = capturedItems.filter(item => !item.imdb_id || item.imdb_id === 'IMDB_PENDING');
+  if (pendingItems.length) {
+    toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
+  }
+
+  const seriesGroups = new Map();
+  for (const item of capturedItems.filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')) {
+    if (!seriesGroups.has(item.imdb_id)) seriesGroups.set(item.imdb_id, []);
+    seriesGroups.get(item.imdb_id).push(item);
+  }
+
+  const items = [];
+  let unreliableSkipped = 0;
+  let specialSegmentsExcluded = 0;
+  const reasonLabels = {
+    genericTitle: 'generic title',
+    missingTitle: 'missing title',
+    duplicateProviderTitle: 'duplicate provider title',
+    noExactMatch: 'no exact normalized TVDB match',
+    ambiguousTvdbTitle: 'ambiguous TVDB title',
+    reusedTvdbEpisode: 'TVDB episode already matched',
+  };
+  const describeReasons = reasons => Object.entries(reasons || {})
+    .map(([reason, count]) => `${reasonLabels[reason] || reason}: ${count}`)
+    .join(', ') || 'none';
+  for (const [imdbId, seriesItems] of seriesGroups) {
+    const catalog = imdbId === state.imdbId ? state.providerEpisodes : [];
+    const mapped = await mapSeriesItemsToTvdb(seriesItems, catalog);
+    const stats = mapped.stats;
+    if (!mapped.success) {
+      unreliableSkipped += seriesItems.length;
+      const counts = stats ? ` Provider regular: ${stats.providerRegular}; TVDB regular: ${stats.tvdbRegular}; provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}.` : '';
+      const titleCounts = stats ? ` Regular episodes matched: ${stats.regularEpisodesMatched ?? 0}; skipped: ${stats.regularEpisodesSkipped ?? stats.providerRegular}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}.` : '';
+      console.warn(`[NFE-TVDB] Skipping series ${imdbId} from ${action}: ${mapped.reason}.${counts}${titleCounts}`);
+      continue;
+    }
+
+    specialSegmentsExcluded += stats?.capturedSpecialsExcluded || 0;
+    unreliableSkipped += stats?.capturedRegularSegmentsSkipped || 0;
+    if (mapped.method === 'order') {
+      console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts match (${stats.providerRegular}); mapped by TVDB order. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
+    } else if (mapped.method === 'title') {
+      console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts differ (provider ${stats.providerRegular}, TVDB ${stats.tvdbRegular}); retained reliable exact normalized one-to-one title mappings. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
+    } else {
+      console.info(`[NFE-TVDB] ${action} series ${imdbId}: no regular segments included (${mapped.reason}); captured special segments omitted: ${stats?.capturedSpecialsExcluded || 0}.`);
+    }
+    items.push(...mapped.items);
+  }
+
+  if (unreliableSkipped) {
+    toast(`${unreliableSkipped} timestamp(s) skipped from ${action} because TVDB mapping was not reliable.`);
+  }
+  return {
+    items,
+    capturedItems,
+    pendingSkipped: pendingItems.length,
+    unreliableSkipped,
+    specialSegmentsExcluded,
+  };
+}
+
 export async function exportJSON() {
   if (!state.allItems.length) {
     toast('No timestamps yet.');
     return;
   }
+  if (!state.tvdbApiKey) {
+    toast('Please enter your own TVDB API key before exporting JSON.');
+    setTvdbStatus('No TVDB API key configured');
+    return;
+  }
+  if (state.submitInProgress) {
+    toast('Submission in progress, please wait...');
+    return;
+  }
 
-  let items = state.allItems.map(({ _eid, ...rest }) => rest);
-  const pendingCount = items.filter(item => item.imdb_id === 'IMDB_PENDING').length;
-  if (pendingCount > 0 && !confirm(`${pendingCount} timestamp(s) still have no IMDb ID assigned (IMDB_PENDING).\nThese will be exported as-is. Continue?`)) return;
+  toast('Validating JSON export against TVDB...');
+  const mapped = await mapCapturedItemsWithTvdb('JSON export');
+  let items = mapped.items;
+  if (!items.length) {
+    const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
+    toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : 'No series has a reliable TVDB episode mapping; nothing was exported.');
+    return;
+  }
 
   const episodeKeys = [...new Set(
     items
-      .filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')
-      .map(item => `${item.imdb_id}|${item.season}|${item.episode}`)
+      .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
   )];
-  const notLoaded = episodeKeys.filter(key => !(state.dedupCacheV2 && state.dedupCacheV2[key]));
-  if (notLoaded.length > 0) {
-    toast(`Checking IntroDB for existing segments (${notLoaded.length} episode(s))...`);
-    await Promise.all(notLoaded.map(key => loadExistingSegmentsForEpisode(key)));
-  }
+  toast(`Checking IntroDB for existing segments (${episodeKeys.length} canonical episode(s))...`);
+  const canonicalExisting = new Map(await Promise.all(episodeKeys.map(async key => [
+    key,
+    await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
+  ])));
 
   const beforeCount = items.length;
-  items = items.filter(item => !isAlreadyInIntroDB(item));
+  items = items.filter(item => {
+    const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
+    return !canonicalExisting.get(key)?.has(item.segment_type);
+  });
   const duplicateCount = beforeCount - items.length;
   if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
   if (!items.length) {
@@ -181,39 +270,64 @@ export async function submitToIntroDB() {
     setIntrodbStatus('No API key configured');
     return;
   }
+  if (!state.tvdbApiKey) {
+    toast('Please enter your own TVDB API key in the panel above.');
+    setTvdbStatus('No TVDB API key configured');
+    return;
+  }
   if (state.submitInProgress) {
     toast('Submission in progress, please wait...');
     return;
   }
 
-  const allMapped = state.allItems.map(({ _eid, ...rest }) => rest);
-  const pendingItems = allMapped.filter(item => item.imdb_id === 'IMDB_PENDING');
-  if (pendingItems.length > 0) toast(`${pendingItems.length} timestamp(s) have no IMDb ID yet (IMDB_PENDING) and will be skipped.`);
+  state.submitInProgress = true;
+  updateSubmitBtn('Checking TVDB...');
+  const stopSubmission = () => {
+    state.submitInProgress = false;
+    updateSubmitBtn('Submit to IntroDB');
+  };
+
+  const mapped = await mapCapturedItemsWithTvdb('IntroDB submission');
+  const capturedItems = mapped.capturedItems;
+  const allMapped = mapped.items;
+  if (!allMapped.length) {
+    const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
+    toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : 'No series has a reliable TVDB episode mapping; nothing was submitted.');
+    setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : 'Submission blocked: TVDB mapping unavailable or unreliable');
+    stopSubmission();
+    return;
+  }
 
   const episodeKeys = [...new Set(
     allMapped
       .filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')
       .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
   )];
-  const notLoaded = episodeKeys.filter(key => !(state.dedupCacheV2 && state.dedupCacheV2[key]));
-  if (notLoaded.length > 0) {
-    toast(`Checking IntroDB for existing segments (${notLoaded.length} episode(s))...`);
-    await Promise.all(notLoaded.map(key => loadExistingSegmentsForEpisode(key)));
-  }
+  toast(`Checking IntroDB for existing segments (${episodeKeys.length} canonical episode(s))...`);
+  const canonicalExisting = new Map(await Promise.all(episodeKeys.map(async key => [
+    key,
+    await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
+  ])));
 
-  const items = allMapped.filter(item => item.imdb_id !== 'IMDB_PENDING' && !isAlreadyInIntroDB(item));
-  const skipped = allMapped.length - items.length;
+  const items = allMapped.filter(item => {
+    const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
+    return !canonicalExisting.get(key)?.has(item.segment_type);
+  });
+  const skipped = capturedItems.length - items.length;
   if (!items.length) {
     toast('All timestamps already exist in IntroDB.');
     setIntrodbStatus('Nothing new to submit (all duplicates)');
+    stopSubmission();
     return;
   }
 
-  const skipMessage = skipped > 0 ? ` (${skipped} already existed, skipped)` : '';
+  const skipMessage = skipped > 0 ? ` (${skipped} skipped or already existed)` : '';
   const ids = [...new Set(items.map(item => item.imdb_id))].join(', ');
-  if (!confirm(`Submit ${items.length} timestamp${items.length !== 1 ? 's' : ''} to IntroDB?${skipMessage}\nID(s): ${ids}`)) return;
+  if (!confirm(`Submit ${items.length} timestamp${items.length !== 1 ? 's' : ''} to IntroDB?${skipMessage}\nID(s): ${ids}`)) {
+    stopSubmission();
+    return;
+  }
 
-  state.submitInProgress = true;
   state.submitResults = { ok: 0, fail: 0 };
   updateSubmitBtn(`Submitting 0/${items.length}...`);
   let sent = 0;
@@ -233,9 +347,6 @@ export async function submitToIntroDB() {
       sent++;
       if (result.success) {
         state.submitResults.ok++;
-        const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-        if (!state.dedupCacheV2[key]) state.dedupCacheV2[key] = new Set();
-        state.dedupCacheV2[key].add(item.segment_type);
       } else {
         state.submitResults.fail++;
         console.warn('[NFE] IntroDB rejected:', result.status, item);
@@ -256,8 +367,9 @@ export async function submitToIntroDB() {
 export function clearData() {
   if (!confirm('Delete all captured timestamps?')) return;
   const introdbApiKey = state.introdbApiKey;
+  const { apiKey: tvdbApiKey, pin: tvdbPin } = loadTvdbSettings();
   for (const key of Object.keys(state)) delete state[key];
-  Object.assign(state, createState(activeProviderConfig.name), { introdbApiKey });
+  Object.assign(state, createState(activeProviderConfig.name), { introdbApiKey, tvdbApiKey, tvdbPin });
   updateCounters();
   updatePanelTitle();
   setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
@@ -318,9 +430,24 @@ function configurePanelCallbacks() {
         toast('Please enter an IntroDB API key.');
         return;
       }
-      state.introdbApiKey = value;
-      setIntrodbStatus('API key saved');
-      toast('IntroDB API key saved');
+      saveIntrodbSettings(value);
+      document.getElementById('nfe-apikey-input').value = '';
+      setIntrodbStatus('API key saved locally');
+      toast('IntroDB API key saved locally');
+    },
+    onTvdbSet: () => {
+      const apiKey = document.getElementById('nfe-tvdb-apikey-input').value.trim();
+      const pin = document.getElementById('nfe-tvdb-pin-input').value.trim();
+      if (!apiKey) {
+        toast('Please enter your own TVDB API key.');
+        setTvdbStatus('No TVDB API key configured');
+        return;
+      }
+      saveTvdbSettings(apiKey, pin);
+      document.getElementById('nfe-tvdb-apikey-input').value = '';
+      document.getElementById('nfe-tvdb-pin-input').value = '';
+      setTvdbStatus('TVDB credentials saved locally');
+      toast('TVDB credentials saved locally');
     },
   };
 }
@@ -374,6 +501,8 @@ export function bootstrapProvider({
 }) {
   activeProviderConfig = getProviderConfig(providerName);
   Object.assign(state, createState(activeProviderConfig.name));
+  loadIntrodbSettings();
+  loadTvdbSettings();
   setProviderName(providerName);
   configurePanelCallbacks();
   setupInterception();
@@ -400,5 +529,11 @@ export function bootstrapProvider({
   }, 1000);
 
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-  win.__segmentScraper = { getAll: () => state.allItems, state };
+  win.__segmentScraper = {
+    getAll: () => state.allItems,
+    get state() {
+      const { introdbApiKey, tvdbApiKey, tvdbPin, ...publicState } = state;
+      return publicState;
+    },
+  };
 }

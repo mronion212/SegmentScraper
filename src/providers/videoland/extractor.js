@@ -5,6 +5,7 @@
 
 import { state } from '../../core/state.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
+import { recordProviderEpisode } from '../../core/tvdb.js';
 
 const VIDEOLAND_LAYOUT_URL_MATCH = /\/layout(\?|$)/i;
 
@@ -29,6 +30,7 @@ function extractVideolandRootMeta(json) {
     duration: coerceVideolandNumber(video?.duration),
     programId: json?.seo?.parent?.id != null ? String(json.seo.parent.id) : null,
     programTitle: json?.seo?.parent?.name || null,
+    episodeTitle: video?.name || video?.title || null,
   };
 }
 
@@ -83,6 +85,7 @@ export function processVideolandLayout(json) {
   const season = rootMeta.season;
   const episode = rootMeta.episode;
   const title = (rootMeta.programTitle || activeItem.title || '').trim();
+  const episodeTitle = (rootMeta.episodeTitle || activeItem.title || '').trim();
   state.clipMap.set(clipId, { season, episode, title, programId: rootMeta.programId });
 
   if (season != null && episode != null) {
@@ -90,6 +93,7 @@ export function processVideolandLayout(json) {
     state.currentEpisode = episode;
   }
   updateVideolandTitle(title, rootMeta.programId);
+  recordProviderEpisode({ providerId: clipId, season, episode, title: episodeTitle });
 
   if (season == null || episode == null) return;
   const extractedItems = [];
@@ -103,6 +107,7 @@ export function processVideolandLayout(json) {
     if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
     extractedItems.push({
       _eid: episodeId,
+      _episodeTitle: episodeTitle,
       imdb_id: state.imdbId || 'IMDB_PENDING',
       segment_type: segmentType,
       season,

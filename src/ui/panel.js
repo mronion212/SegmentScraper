@@ -119,6 +119,29 @@ export function createPanel() {
 
      <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
        <div style="flex:1;height:1px;background:#222"></div>
+       <span style="font-size:10px;color:${colors.textMuted};font-weight:600;letter-spacing:0.5px">TVDB</span>
+       <div style="flex:1;height:1px;background:#222"></div>
+     </div>
+
+     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
+       <div style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:5px">Your TVDB API Key</div>
+       <input id="nfe-tvdb-apikey-input" type="password" placeholder="Enter your TVDB API key..."
+         style="width:100%;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
+                padding:6px 8px;font-size:12px;outline:none;margin-bottom:5px"/>
+       <div style="display:flex;gap:4px">
+         <input id="nfe-tvdb-pin-input" type="password" placeholder="Subscriber PIN (optional)"
+           style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
+                  padding:6px 8px;font-size:12px;outline:none"/>
+         <button id="nfe-tvdb-set"
+           style="background:${providerColors.primary};border:none;border-radius:6px;color:#fff;
+                  padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700">Save</button>
+       </div>
+       <div id="nfe-tvdb-status" style="font-size:11px;color:${colors.textSecondary};margin-top:6px;line-height:1.4;${state.tvdbApiKey ? '' : 'display:none;'}">${state.tvdbApiKey ? 'TVDB credentials saved locally' : ''}</div>
+       <div style="font-size:9px;color:${colors.textMuted};margin-top:5px">Episode metadata provided by <a href="https://thetvdb.com" target="_blank" rel="noopener noreferrer" style="color:${colors.textSecondary}">TheTVDB</a>.</div>
+     </div>
+
+     <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
+       <div style="flex:1;height:1px;background:#222"></div>
        <span style="font-size:10px;color:${colors.textMuted};font-weight:600;letter-spacing:0.5px">INTRODB</span>
        <div style="flex:1;height:1px;background:#222"></div>
      </div>
@@ -126,7 +149,7 @@ export function createPanel() {
      <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
        <div style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:5px">API Key</div>
        <div style="display:flex;gap:4px">
-         <input id="nfe-apikey-input" type="password" placeholder="Enter your IntroDB API key..." value="${state.introdbApiKey}"
+         <input id="nfe-apikey-input" type="password" placeholder="Enter your IntroDB API key..."
            style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
                   padding:6px 8px;font-size:12px;outline:none;transition:border-color 0.15s"
            onfocus="this.style.borderColor='${colors.accent}'" onblur="this.style.borderColor='#303030'"/>
@@ -137,7 +160,7 @@ export function createPanel() {
        </div>
      </div>
 
-     <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved' : ''}</div>
+     <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
 
      <button id="nfe-submit"
        style="width:100%;background:${providerColors.secondary};border:none;border-radius:8px;color:#fff;
@@ -170,6 +193,8 @@ export function createPanel() {
     const imdbInput = document.getElementById('nfe-imdb-input');
     const apikeySetBtn = document.getElementById('nfe-apikey-set');
     const apikeyInput = document.getElementById('nfe-apikey-input');
+    const tvdbSetBtn = document.getElementById('nfe-tvdb-set');
+    const tvdbInputs = [document.getElementById('nfe-tvdb-apikey-input'), document.getElementById('nfe-tvdb-pin-input')];
     
     if (closeBtn) closeBtn.addEventListener('click', () => {
       console.log('[NFE] Close button clicked');
@@ -225,6 +250,12 @@ export function createPanel() {
         if (apikeySetBtn) apikeySetBtn.click();
       }
     });
+    if (tvdbSetBtn) tvdbSetBtn.addEventListener('click', () => {
+      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onTvdbSet) window.nfePanelCallbacks.onTvdbSet();
+    });
+    tvdbInputs.filter(Boolean).forEach(input => input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') tvdbSetBtn?.click();
+    }));
   };
   
   setupEventListeners();
@@ -347,7 +378,7 @@ export function updateImdbInput() {
  */
 export function updateApikeyInput() {
   const inp = document.getElementById('nfe-apikey-input');
-  if (inp) inp.value = state.introdbApiKey || '';
+  if (inp) inp.value = '';
 }
 
 /**
@@ -399,7 +430,7 @@ export function showExportPreview({ items, fileCount, duplicateCount, onConfirm 
 
   const heading = document.createElement('h2');
   heading.textContent = `Controleer ${providerName} JSON-export`;
-  heading.style.cssText = `margin:0 0 6px; color:${colors.accent}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
+  heading.style.cssText = `margin:0 0 6px; color:${providerColors.primary}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
   summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}.`;
   summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;

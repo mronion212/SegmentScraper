@@ -27,9 +27,12 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @match        https://www.skyshowtime.com/*
 // @match        https://skyshowtime.com/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        unsafeWindow
 // @connect      v3.sg.media-imdb.com
 // @connect      api.introdb.app
+// @connect      api4.thetvdb.com
 // @run-at       document-start
 // ==/UserScript==
 
@@ -94,6 +97,8 @@ function bundle() {
   const commonFileOrder = [
     'core/state.js',
     'core/network.js',
+    'core/introdb-settings.js',
+    'core/tvdb.js',
     'config/provider-config.js',
     'normalization/segment-mapper.js',
     'ui/panel.js',
