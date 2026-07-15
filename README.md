@@ -106,3 +106,7 @@ The generated userscript is written to `SegmentScraper.user.js`.
 Before a JSON export or IntroDB submission, SegmentScraper compares regular-episode counts against TheTVDB. Equal counts map by order. When counts differ, every regular provider episode is checked for an exact normalized, one-to-one, non-generic title match. Reliable matches are retained and unmatched episodes are skipped; the series is skipped only when no reliable mappings exist. Specials remain outside this normal mapping, export, and submission flow.
 
 Episode metadata provided by [TheTVDB](https://thetvdb.com/).
+
+## Acknowledgements
+
+Thanks to [Comasss](https://github.com/Comasss) for the initial idea behind this scraping project and for contributing as the first person involved.
