@@ -64,6 +64,7 @@ export function normalizeSegmentType(providerSegmentType, providerName) {
  * @param {number} params.startSec - Start time in seconds
  * @param {number} params.endSec - End time in seconds
  * @param {string} [params.imdbId] - IMDb ID (optional, defaults to IMDB_PENDING)
+ * @param {string} [params.episodeTitle] - Provider episode title used only for TVDB mapping
  * @returns {Object|null} - Normalized segment item or null if type not recognized
  */
 export function createNormalizedSegment({
@@ -74,13 +75,15 @@ export function createNormalizedSegment({
   episode,
   startSec,
   endSec,
-  imdbId = 'IMDB_PENDING'
+  imdbId = 'IMDB_PENDING',
+  episodeTitle = ''
 }) {
   const segmentType = normalizeSegmentType(providerSegmentType, providerName);
   if (!segmentType) return null;
   
   return {
     _eid: episodeId,
+    _episodeTitle: episodeTitle,
     imdb_id: imdbId,
     segment_type: segmentType,
     season,

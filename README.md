@@ -20,6 +20,8 @@ SkyShowtime is registered in the userscript and displays the shared panel during
 - Previews JSON before download
 - Submits timestamps to IntroDB
 - Removes segments already present in IntroDB from exports and submissions
+- Maps regular provider episodes to canonical TheTVDB season/episode numbers before JSON export or submission
+- Excludes provider specials and TheTVDB Season 0 from count checks and normal submission mapping
 - Uses one shared provider panel based on the Netflix layout
 
 The panel layout, dimensions, typography, controls, counters, backgrounds, borders, and spacing are identical for every provider. A provider may only customize:
@@ -36,7 +38,8 @@ SegmentScraper/
 |-- src/
 |   |-- core/
 |   |   |-- state.js             # Shared state and cache management
-|   |   `-- network.js           # IMDb and IntroDB requests
+|   |   |-- network.js           # IMDb and IntroDB requests
+|   |   `-- tvdb.js              # TVDB authentication and canonical episode mapping
 |   |-- ui/
 |   |   |-- panel.js             # Shared Netflix-based provider panel
 |   |   `-- button.js            # Shared player trigger button
@@ -97,4 +100,9 @@ The generated userscript is written to `SegmentScraper.user.js`.
 3. Open a supported streaming service and start playback.
 4. Open the SegmentScraper panel from the injected player button.
 5. Set the IMDb ID if automatic lookup did not resolve it.
-6. Download the JSON export, or save an IntroDB API key and submit directly.
+6. Enter your own TheTVDB v4 API key and, when required, your optional subscriber PIN. These credentials and the reusable bearer token are stored locally by the userscript manager.
+7. Download the JSON export, or save an IntroDB API key locally and submit directly. The stored key is not rendered back into the panel or written to logs.
+
+Before a JSON export or IntroDB submission, SegmentScraper compares regular-episode counts against TheTVDB. Equal counts map by order. When counts differ, every regular provider episode is checked for an exact normalized, one-to-one, non-generic title match. Reliable matches are retained and unmatched episodes are skipped; the series is skipped only when no reliable mappings exist. Specials remain outside this normal mapping, export, and submission flow.
+
+Episode metadata provided by [TheTVDB](https://thetvdb.com/).

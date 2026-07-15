@@ -41,6 +41,9 @@ export const createState = (providerName) => ({
   submitResults: { ok: 0, fail: 0 },
   dedupCacheV2: {},
   introdbApiKey: '',
+  tvdbApiKey: '',
+  tvdbPin: '',
+  providerEpisodes: [],
 });
 
 export const state = createState('Streaming Service');

@@ -2,11 +2,27 @@
 
 import { state } from '../../core/state.js';
 import { createNormalizedSegment } from '../../normalization/segment-mapper.js';
+import { setProviderEpisodeCatalog } from '../../core/tvdb.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 
 export const NETFLIX_TITLE_OVERRIDES = {
   '81748089': 'tt2431250',
 };
+
+function isNetflixSpecialSeason(season) {
+  if (Number(season?.seq) === 0 || season?.isSpecial === true) return true;
+  const specialTypes = new Set(['special', 'specials', 'supplemental', 'bonus', 'extras', 'trailer', 'trailers']);
+  const type = String(season?.type || season?.seasonType || '').trim().toLowerCase();
+  if (specialTypes.has(type)) return true;
+  const label = String(season?.name || season?.shortName || season?.title || '').trim().toLowerCase();
+  return /^(?:specials?|bonus|extras|trailers?\s*(?:&|and)\s*more)$/.test(label);
+}
+
+function isNetflixSpecialEpisode(season, episode) {
+  if (isNetflixSpecialSeason(season) || episode?.isSpecial === true) return true;
+  const type = String(episode?.type || episode?.episodeType || '').trim().toLowerCase();
+  return ['special', 'supplemental', 'bonus', 'extra', 'trailer'].includes(type);
+}
 
 export function processNetflixMetadata(data) {
   const video = data.video;
@@ -21,6 +37,16 @@ export function processNetflixMetadata(data) {
     imdbOverride: showId ? NETFLIX_TITLE_OVERRIDES[showId] : null,
   });
 
+  setProviderEpisodeCatalog((video.seasons || []).flatMap(season =>
+    (season.episodes || []).map(episode => ({
+      providerId: episode.episodeId || episode.id,
+      season: season.seq,
+      episode: episode.seq,
+      title: episode.title || episode.name || '',
+      isSpecial: isNetflixSpecialEpisode(season, episode),
+    }))
+  ));
+
   const extractedItems = [];
   for (const season of video.seasons || []) {
     for (const episode of season.episodes || []) {
@@ -33,6 +59,7 @@ export function processNetflixMetadata(data) {
         season: season.seq,
         episode: episode.seq,
         imdbId: state.imdbId || 'IMDB_PENDING',
+        episodeTitle: episode.title || episode.name || '',
       };
       const markers = episode.skipMarkers || {};
       const segments = [

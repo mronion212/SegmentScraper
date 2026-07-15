@@ -176,8 +176,8 @@ export async function loadExistingSegments(imdbId, apiKey) {
  * Load existing segments for a specific episode (for export deduplication)
  * Uses GM_xmlhttpRequest to avoid CORS issues
  */
-export async function loadExistingSegmentsForEpisode(key, apiKey) {
-  if (state.dedupCacheV2[key]) {
+export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, writeCache = true } = {}) {
+  if (useCache && state.dedupCacheV2[key]) {
     return state.dedupCacheV2[key];
   }
   
@@ -200,19 +200,19 @@ export async function loadExistingSegmentsForEpisode(key, apiKey) {
               for (const t of ['intro', 'recap', 'outro']) {
                 if (json && json[t] != null) set.add(t);
               }
-              state.dedupCacheV2[key] = set;
+              if (writeCache) state.dedupCacheV2[key] = set;
               resolve(set);
             } else {
-              state.dedupCacheV2[key] = new Set();
+              if (writeCache) state.dedupCacheV2[key] = new Set();
               resolve(new Set());
             }
           } catch (_) {
-            state.dedupCacheV2[key] = new Set();
+            if (writeCache) state.dedupCacheV2[key] = new Set();
             resolve(new Set());
           }
         },
         onerror: () => {
-          state.dedupCacheV2[key] = new Set();
+          if (writeCache) state.dedupCacheV2[key] = new Set();
           resolve(new Set());
         }
       });
@@ -225,11 +225,11 @@ export async function loadExistingSegmentsForEpisode(key, apiKey) {
           for (const t of ['intro', 'recap', 'outro']) {
             if (json && json[t] != null) set.add(t);
           }
-          state.dedupCacheV2[key] = set;
+          if (writeCache) state.dedupCacheV2[key] = set;
           resolve(set);
         })
         .catch(() => {
-          state.dedupCacheV2[key] = new Set();
+          if (writeCache) state.dedupCacheV2[key] = new Set();
           resolve(new Set());
         });
     }

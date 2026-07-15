@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "build": "node build/bundler.js",
-    "dev": "node build/bundler.js && cat SegmentScraper.user.js"
+    "dev": "node build/bundler.js && cat SegmentScraper.user.js",
+    "test": "node --test"
   },
   "repository": {
     "type": "git",
