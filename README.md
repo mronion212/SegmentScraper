@@ -7,10 +7,10 @@ SegmentScraper extracts intro, recap, and outro timestamps from supported stream
 - Netflix
 - Prime Video
 - Videoland
-- SkyShowtime (prepared; extraction mapping pending)
+- SkyShowtime
 
 Disney+ and HBO Max are present in the provider configuration but do not yet have extraction modules.
-SkyShowtime is registered in the userscript and displays the shared panel during playback; its network metadata still needs to be mapped before timestamps can be captured.
+SkyShowtime captures catalogue metadata automatically from page or worker network requests and maps SOI/EOI, SOR/EOR, and SOCR/runtime to intro, recap, and outro segments.
 
 ## Features
 

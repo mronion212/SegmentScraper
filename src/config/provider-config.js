@@ -126,7 +126,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'SkyShowtime extraction is being prepared. Playback metadata will be added once its API responses are mapped.',
+    captureHint: 'All available seasons and episodes are captured automatically from SkyShowtime catalogue metadata.',
   },
 };
 
