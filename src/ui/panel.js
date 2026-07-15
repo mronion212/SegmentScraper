@@ -429,10 +429,15 @@ export function showExportPreview({ items, fileCount, duplicateCount, onConfirm 
   `;
 
   const heading = document.createElement('h2');
-  heading.textContent = `Controleer ${providerName} JSON-export`;
+  heading.textContent = `Review ${providerName} JSON export`;
   heading.style.cssText = `margin:0 0 6px; color:${providerColors.primary}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
-  summary.textContent = `${items.length} timestamps in ${fileCount} bestand(en)${duplicateCount ? `; ${duplicateCount} duplicaten uitgesloten` : ''}.`;
+  const timestampLabel = items.length === 1 ? 'timestamp' : 'timestamps';
+  const fileLabel = fileCount === 1 ? 'file' : 'files';
+  const duplicateSummary = duplicateCount
+    ? `; ${duplicateCount} ${duplicateCount === 1 ? 'duplicate' : 'duplicates'} excluded`
+    : '';
+  summary.textContent = `${items.length} ${timestampLabel} in ${fileCount} ${fileLabel}${duplicateSummary}.`;
   summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
   const preview = document.createElement('pre');
   preview.textContent = JSON.stringify({ items }, null, 2);
@@ -444,7 +449,7 @@ export function showExportPreview({ items, fileCount, duplicateCount, onConfirm 
   const actions = document.createElement('div');
   actions.style.cssText = 'display:flex; justify-content:flex-end; gap:8px;';
   const cancel = document.createElement('button');
-  cancel.textContent = 'Annuleren';
+  cancel.textContent = 'Cancel';
   cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
   const confirm = document.createElement('button');
   confirm.textContent = 'Download JSON';
