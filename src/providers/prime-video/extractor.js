@@ -60,6 +60,51 @@ function extractPrimeVideoAsin(bodyText, url) {
   return null;
 }
 
+function coercePrimeVideoInteger(value) {
+  const number = Number(value);
+  return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function findPrimeVideoEpisodeMetadata(root) {
+  const candidates = [];
+  const visited = new WeakSet();
+  const seasonKeys = ['seasonNumber', 'season', 'seasonSequenceNumber', 'seasonSequence'];
+  const episodeKeys = ['episodeNumber', 'episode', 'episodeSequenceNumber', 'episodeSequence'];
+  const firstInteger = (node, keys) => {
+    for (const key of keys) {
+      const value = coercePrimeVideoInteger(node?.[key]);
+      if (value != null) return value;
+    }
+    return null;
+  };
+
+  function walk(node, depth = 0, path = '') {
+    if (!node || typeof node !== 'object' || depth > 8 || visited.has(node)) return;
+    visited.add(node);
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => walk(item, depth + 1, `${path}[${index}]`));
+      return;
+    }
+
+    const season = firstInteger(node, seasonKeys);
+    const episode = firstInteger(node, episodeKeys);
+    if (season != null && episode != null) {
+      const seriesTitle = String(node.seriesTitle || node.showTitle || node.seriesName || node.parentTitle || '').trim();
+      const episodeTitle = String(node.episodeTitle || node.title || node.name || '').trim();
+      const catalogScore = /catalogMetadata|catalog/i.test(path) ? 4 : 0;
+      candidates.push({ season, episode, seriesTitle, episodeTitle, score: catalogScore + (seriesTitle ? 2 : 0) + (episodeTitle ? 1 : 0) });
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (value && typeof value === 'object') walk(value, depth + 1, path ? `${path}.${key}` : key);
+    }
+  }
+
+  walk(root);
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0] || null;
+}
+
 function readPrimeVideoSeasonEpisode() {
   const player = document.getElementById('dv-web-player');
   const episodeInfo = document.querySelector('[class*="atvwebplayersdk-episode-info"]');
@@ -90,9 +135,17 @@ function updatePrimeVideoTitle(rawTitle) {
   const seasonMatch = cleaned.match(/\s*(Seizoen|Season)\s*(\d+)/i);
   const title = seasonMatch ? cleaned.slice(0, seasonMatch.index).trim() : cleaned;
   handleDetectedShow({ title, showId: title });
+  return title;
 }
 
-function finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle = '') {
+function findPrimeVideoEpisodeCollision(asin, showId, season, episode) {
+  for (const [knownAsin, known] of state.asinMap) {
+    if (knownAsin !== asin && known.showId === showId && known.season === season && known.episode === episode) return known;
+  }
+  return null;
+}
+
+function finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle = '', showId = state.showId) {
   const events = data?.transitionTimecodes?.result?.events || [];
   const extractedItems = [];
 
@@ -103,11 +156,18 @@ function finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle = ''
     if (!segmentType || typeof event.startTimeMs !== 'number' || typeof event.endTimeMs !== 'number') continue;
 
     const episodeId = `${asin}_${segmentType}`;
-    if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+    const alreadyCaptured = item => item._eid === episodeId || (
+      item._showId === showId &&
+      item.season === season &&
+      item.episode === episode &&
+      item.segment_type === segmentType
+    );
+    if (state.allItems.some(alreadyCaptured) || extractedItems.some(alreadyCaptured)) continue;
     extractedItems.push({
       _eid: episodeId,
       _episodeTitle: episodeTitle,
-      imdb_id: state.imdbId || 'IMDB_PENDING',
+      _showId: showId,
+      imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
       segment_type: segmentType,
       season,
       episode,
@@ -118,18 +178,28 @@ function finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle = ''
   recordExtractedSegments(extractedItems);
 }
 
+function commitPrimeVideoEpisode(asin, snapshot, { allowNumberReuse = false } = {}) {
+  const showId = updatePrimeVideoTitle(snapshot.seriesTitle || snapshot.title);
+  const collision = findPrimeVideoEpisodeCollision(asin, showId, snapshot.season, snapshot.episode);
+  if (collision && !allowNumberReuse) return false;
+
+  const episodeTitle = snapshot.episodeTitle || '';
+  state.asinMap.set(asin, { season: snapshot.season, episode: snapshot.episode, episodeTitle, showId });
+  state.currentSeason = snapshot.season;
+  state.currentEpisode = snapshot.episode;
+  if (!collision) {
+    recordProviderEpisode({ providerId: asin, season: snapshot.season, episode: snapshot.episode, title: episodeTitle }, showId);
+  }
+  const pending = state.pendingByAsin.get(asin) || [];
+  state.pendingByAsin.delete(asin);
+  pending.forEach(data => finalizePrimeVideoEvents(asin, snapshot.season, snapshot.episode, data, episodeTitle, showId));
+  return true;
+}
+
 function pollPrimeVideoEpisode(asin, attempt) {
   const snapshot = readPrimeVideoSeasonEpisode();
   if (snapshot.isPlayerActive && snapshot.season != null && snapshot.episode != null) {
-    state.asinMap.set(asin, { season: snapshot.season, episode: snapshot.episode, episodeTitle: snapshot.episodeTitle });
-    state.currentSeason = snapshot.season;
-    state.currentEpisode = snapshot.episode;
-    updatePrimeVideoTitle(snapshot.title);
-    recordProviderEpisode({ providerId: asin, season: snapshot.season, episode: snapshot.episode, title: snapshot.episodeTitle });
-    const pending = state.pendingByAsin.get(asin) || [];
-    state.pendingByAsin.delete(asin);
-    pending.forEach(data => finalizePrimeVideoEvents(asin, snapshot.season, snapshot.episode, data, snapshot.episodeTitle));
-    return;
+    if (commitPrimeVideoEpisode(asin, snapshot)) return;
   }
   if (attempt >= 40) {
     console.warn('[PVE] Could not resolve season/episode for ASIN:', asin);
@@ -144,12 +214,20 @@ export function processPrimeVideoMetadata(data, bodyText, url) {
   const asin = extractPrimeVideoAsin(bodyText, url);
   if (!asin) return;
   if (state.asinMap.has(asin)) {
-    const { season, episode, episodeTitle } = state.asinMap.get(asin);
-    finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle);
+    const { season, episode, episodeTitle, showId } = state.asinMap.get(asin);
+    finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle, showId);
     return;
   }
   if (!state.pendingByAsin.has(asin)) state.pendingByAsin.set(asin, []);
   state.pendingByAsin.get(asin).push(data);
+  const metadata = findPrimeVideoEpisodeMetadata(data);
+  if (metadata) {
+    commitPrimeVideoEpisode(asin, {
+      ...metadata,
+      title: metadata.seriesTitle || document.title,
+    }, { allowNumberReuse: true });
+    return;
+  }
   pollPrimeVideoEpisode(asin, 0);
 }
 

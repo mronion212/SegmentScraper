@@ -233,13 +233,12 @@ async function ensureTvdbEpisodeNameLanguage(episodes, providerEpisodes, languag
     const returnedTitle = normalizeTitle(episode?.name);
     const declaredLanguage = getDeclaredEpisodeNameLanguage(episode);
     const correspondingProviderTitle = providerTitlesByNumber.get(`${episode?.seasonNumber}|${episode?.number}`);
-    const contradictsEnglishProviderTitle = language === 'eng' && correspondingProviderTitle &&
-      returnedTitle !== correspondingProviderTitle;
+    const contradictsProviderTitle = correspondingProviderTitle && returnedTitle !== correspondingProviderTitle;
     const returnedLanguage = declaredLanguage || language;
     const needsExplicitTranslation = episode?.id != null && (
       !returnedTitle ||
       (declaredLanguage && declaredLanguage !== language) ||
-      contradictsEnglishProviderTitle
+      contradictsProviderTitle
     );
 
     if (!needsExplicitTranslation) return { ...episode, _nameLanguage: returnedLanguage };
@@ -266,13 +265,52 @@ async function ensureTvdbEpisodeNameLanguage(episodes, providerEpisodes, languag
   }));
 }
 
-function logTvdbEpisodeLanguageAudit(seriesId, language, episodes) {
+function logTvdbEpisodeLanguageAudit(seriesId, language, receivedEpisodes, matchingEpisodes) {
+  const matchingById = new Map((matchingEpisodes || []).map(episode => [String(episode.id), episode]));
+  const titleResponse = {
+    seriesId: String(seriesId),
+    requestedLanguage: language,
+    episodes: (receivedEpisodes || []).map(episode => {
+      const matching = matchingById.get(String(episode.id)) || episode;
+      return {
+        id: episode.id,
+        season: episode.seasonNumber,
+        episode: episode.number,
+        receivedTitle: String(episode.name || '').trim(),
+        receivedLanguage: getDeclaredEpisodeNameLanguage(episode) || 'unknown',
+        matchingTitle: String(matching.name || '').trim(),
+        matchingLanguage: String(matching._nameLanguage || getDeclaredEpisodeNameLanguage(matching) || language).trim().toLowerCase(),
+      };
+    }),
+  };
   console.info('[TVDB] Series episode language audit', {
     seriesId: String(seriesId),
     requestedLanguage: language,
     endpointUrlShape: TVDB_EPISODE_ENDPOINT_SHAPE,
-    returnedEpisodeNameLanguages: summarizeEpisodeNameLanguages(episodes),
+    returnedEpisodeNameLanguages: summarizeEpisodeNameLanguages(matchingEpisodes),
   });
+  console.info('[TVDB] Series episode title response', titleResponse);
+  console.info('[TVDB] Series episode title response JSON', JSON.stringify(titleResponse));
+}
+
+function logTvdbEpisodeMatchTitles(seriesId, providerEpisodes, episodes) {
+  const matchingInput = {
+    seriesId: String(seriesId),
+    providerEpisodes: providerEpisodes.map(episode => ({
+      providerId: episode.providerId,
+      season: episode.season,
+      episode: episode.episode,
+      title: episode.title,
+    })),
+    tvdbEpisodes: episodes.map(episode => ({
+      id: episode.id,
+      season: episode.season,
+      episode: episode.episode,
+      titles: [episode.title, ...(episode.alternateTitles || [])].filter(Boolean),
+    })),
+  };
+  console.info('[TVDB] Episode titles available for matching', matchingInput);
+  console.info('[TVDB] Title matching input JSON', JSON.stringify(matchingInput));
 }
 
 function cleanTvdbEpisodes(episodes) {
@@ -299,6 +337,23 @@ function cleanTvdbEpisodes(episodes) {
   };
 }
 
+function mergeTvdbEpisodeTitles(primaryCatalog, alternateCatalogs) {
+  const byId = new Map(primaryCatalog.episodes.map(episode => [String(episode.id), episode]));
+  const byNumber = new Map(primaryCatalog.episodes.map(episode => [`${episode.season}|${episode.episode}`, episode]));
+  for (const catalog of alternateCatalogs) {
+    for (const alternate of catalog.episodes) {
+      const target = byId.get(String(alternate.id)) || byNumber.get(`${alternate.season}|${alternate.episode}`);
+      const title = String(alternate.title || '').trim();
+      if (!target || !title || normalizeTitle(title) === normalizeTitle(target.title)) continue;
+      target.alternateTitles ||= [];
+      if (!target.alternateTitles.some(existing => normalizeTitle(existing) === normalizeTitle(title))) {
+        target.alternateTitles.push(title);
+      }
+    }
+  }
+  return primaryCatalog;
+}
+
 function findDuplicateNumber(episodes) {
   const seen = new Set();
   for (const episode of episodes) {
@@ -309,9 +364,9 @@ function findDuplicateNumber(episodes) {
   return null;
 }
 
-function mapEpisodes(providerEpisodes, tvdbEpisodes) {
+function mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch = false } = {}) {
   const mapping = new Map();
-  if (providerEpisodes.length === tvdbEpisodes.length) {
+  if (!requireTitleMatch && providerEpisodes.length === tvdbEpisodes.length) {
     providerEpisodes.forEach((episode, index) => mapping.set(`${episode.season}|${episode.episode}`, tvdbEpisodes[index]));
     return {
       success: true,
@@ -330,10 +385,13 @@ function mapEpisodes(providerEpisodes, tvdbEpisodes) {
 
   const tvdbByTitle = new Map();
   for (const episode of tvdbEpisodes) {
-    const title = normalizeTitle(episode.title);
-    if (!title) continue;
-    if (!tvdbByTitle.has(title)) tvdbByTitle.set(title, []);
-    tvdbByTitle.get(title).push(episode);
+    const titles = new Set([episode.title, ...(episode.alternateTitles || [])]
+      .map(normalizeTitle)
+      .filter(Boolean));
+    for (const title of titles) {
+      if (!tvdbByTitle.has(title)) tvdbByTitle.set(title, []);
+      tvdbByTitle.get(title).push(episode);
+    }
   }
 
   const skipReasons = {};
@@ -446,17 +504,33 @@ export async function mapSeriesItemsToTvdb(items, providerCatalog) {
   }
   try {
     const tvdbSeriesId = await resolveTvdbSeriesId(imdbId);
+    const requireTitleMatch = regularItems.every(item => item._tvdbRequireTitleMatch === true);
     const episodeList = await fetchTvdbEpisodeList(tvdbSeriesId, TVDB_EPISODE_LANGUAGE);
     const localizedEpisodes = await ensureTvdbEpisodeNameLanguage(episodeList, providerEpisodes, TVDB_EPISODE_LANGUAGE);
-    logTvdbEpisodeLanguageAudit(tvdbSeriesId, TVDB_EPISODE_LANGUAGE, localizedEpisodes);
+    logTvdbEpisodeLanguageAudit(tvdbSeriesId, TVDB_EPISODE_LANGUAGE, episodeList, localizedEpisodes);
     const tvdbCatalog = cleanTvdbEpisodes(localizedEpisodes);
     const tvdbEpisodes = tvdbCatalog.episodes;
+    if (requireTitleMatch || providerEpisodes.length !== tvdbEpisodes.length) {
+      const additionalLanguages = [...new Set(items.flatMap(item =>
+        Array.isArray(item._tvdbEpisodeLanguages) ? item._tvdbEpisodeLanguages : []
+      ).map(language => String(language || '').trim().toLowerCase()))]
+        .filter(language => language && language !== TVDB_EPISODE_LANGUAGE);
+      const alternateCatalogs = [];
+      for (const language of additionalLanguages) {
+        const alternateList = await fetchTvdbEpisodeList(tvdbSeriesId, language);
+        const alternateLocalized = await ensureTvdbEpisodeNameLanguage(alternateList, providerEpisodes, language);
+        logTvdbEpisodeLanguageAudit(tvdbSeriesId, language, alternateList, alternateLocalized);
+        alternateCatalogs.push(cleanTvdbEpisodes(alternateLocalized));
+      }
+      mergeTvdbEpisodeTitles(tvdbCatalog, alternateCatalogs);
+    }
+    logTvdbEpisodeMatchTitles(tvdbSeriesId, providerEpisodes, tvdbEpisodes);
     if (!tvdbEpisodes.length) return { success: false, reason: 'TVDB returned no usable episode metadata' };
     const duplicateTvdbNumber = findDuplicateNumber(tvdbEpisodes);
     if (duplicateTvdbNumber) {
       return { success: false, reason: `TVDB metadata has duplicate regular episode number ${duplicateTvdbNumber.replace('|', 'x')}` };
     }
-    const result = mapEpisodes(providerEpisodes, tvdbEpisodes);
+    const result = mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch });
     const stats = {
       providerRegular: providerEpisodes.length,
       tvdbRegular: tvdbEpisodes.length,
@@ -473,7 +547,7 @@ export async function mapSeriesItemsToTvdb(items, providerCatalog) {
     for (const item of regularItems) {
       const match = result.mapping.get(`${item.season}|${item.episode}`);
       if (!match) continue;
-      const { _eid, _episodeTitle, ...submissionItem } = item;
+      const { _eid, _episodeTitle, _showId, _tvdbEpisodeLanguages, _tvdbRequireTitleMatch, ...submissionItem } = item;
       mappedItems.push({ ...submissionItem, season: match.season, episode: match.episode });
     }
     stats.capturedRegularSegmentsMatched = mappedItems.length;
@@ -484,11 +558,25 @@ export async function mapSeriesItemsToTvdb(items, providerCatalog) {
   }
 }
 
-export function setProviderEpisodeCatalog(episodes) {
-  state.providerEpisodes = normalizeProviderEpisodes(episodes);
+export function setProviderEpisodeCatalog(episodes, showId = state.showId) {
+  const normalized = normalizeProviderEpisodes(episodes);
+  const normalizedShowId = showId != null ? String(showId) : '';
+  if (!normalizedShowId || normalizedShowId === state.showId) state.providerEpisodes = normalized;
+  if (normalizedShowId) {
+    state.providerEpisodesByShowId ||= {};
+    state.providerEpisodesByShowId[normalizedShowId] = normalized;
+  }
 }
 
-export function recordProviderEpisode(episode) {
-  const current = normalizeProviderEpisodes([...(state.providerEpisodes || []), episode]);
-  state.providerEpisodes = current;
+export function recordProviderEpisode(episode, showId = state.showId) {
+  const normalizedShowId = showId != null ? String(showId) : '';
+  const previous = normalizedShowId
+    ? state.providerEpisodesByShowId?.[normalizedShowId] || []
+    : state.providerEpisodes || [];
+  const current = normalizeProviderEpisodes([...previous, episode]);
+  if (!normalizedShowId || normalizedShowId === state.showId) state.providerEpisodes = current;
+  if (normalizedShowId) {
+    state.providerEpisodesByShowId ||= {};
+    state.providerEpisodesByShowId[normalizedShowId] = current;
+  }
 }

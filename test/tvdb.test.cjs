@@ -4,15 +4,15 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadTvdb({ searchIds = ['101'], episodes = [], translations = {} } = {}) {
+function loadTvdb({ searchIds = ['101'], episodes = [], episodesByLanguage = {}, translations = {} } = {}) {
   const storage = new Map();
   const requests = [];
   const logs = [];
-  const state = { tvdbApiKey: 'test-api-key', tvdbPin: 'test-pin', providerEpisodes: [] };
+  const state = { tvdbApiKey: 'test-api-key', tvdbPin: 'test-pin', providerEpisodes: [], providerEpisodesByShowId: {}, showId: null };
   let source = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'tvdb.js'), 'utf8')
     .replace(/^import .*$/gm, '')
     .replace(/^export /gm, '');
-  source += '\nglobalThis.tvdbExports = { mapSeriesItemsToTvdb, loadTvdbSettings, saveTvdbSettings, fetchTvdbEpisodeList };';
+  source += '\nglobalThis.tvdbExports = { mapSeriesItemsToTvdb, loadTvdbSettings, saveTvdbSettings, fetchTvdbEpisodeList, setProviderEpisodeCatalog, recordProviderEpisode };';
 
   const testConsole = {
     ...console,
@@ -33,9 +33,16 @@ function loadTvdb({ searchIds = ['101'], episodes = [], translations = {} } = {}
         body = { data: { token: 'local-test-token' } };
       } else if (options.url.includes('/search/remoteid/')) {
         body = { data: searchIds.map(id => ({ series: { id } })) };
-      } else if (options.url.endsWith('/series/101/episodes/default/eng?page=0') ||
-        options.url.endsWith('/series/101/episodes/default/spa?page=0')) {
-        body = { data: { series: { episodes } } };
+      } else if (/\/series\/101\/episodes\/default\/[a-z]{3}\?/.test(options.url)) {
+        const requestUrl = new URL(options.url);
+        const language = requestUrl.pathname.match(/\/episodes\/default\/([a-z]{3})$/)[1];
+        const season = Number(requestUrl.searchParams.get('season')) || null;
+        const page = Number(requestUrl.searchParams.get('page')) || 0;
+        const languageEpisodes = episodesByLanguage[language] || episodes;
+        const filteredEpisodes = season == null
+          ? languageEpisodes
+          : languageEpisodes.filter(episode => Number(episode.seasonNumber) === season);
+        body = { data: { series: { episodes: filteredEpisodes.slice(page * 500, (page + 1) * 500) } } };
       } else if (/\/episodes\/[^/]+\/translations\/[^/]+$/.test(options.url)) {
         const [, episodeId, language] = options.url.match(/\/episodes\/([^/]+)\/translations\/([^/]+)$/);
         const original = episodes.find(episode => String(episode.id) === decodeURIComponent(episodeId));
@@ -70,6 +77,20 @@ function segment(season, episode, title = '') {
 function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
+
+test('stores incremental provider episode catalogs separately per series', () => {
+  const tvdb = loadTvdb();
+  tvdb.state.showId = 'series-b';
+
+  tvdb.recordProviderEpisode({ providerId: 'a1', season: 1, episode: 1, title: 'Alpha' }, 'series-a');
+  tvdb.recordProviderEpisode({ providerId: 'b1', season: 2, episode: 1, title: 'Beta' }, 'series-b');
+
+  assert.deepEqual(plain(tvdb.state.providerEpisodesByShowId), {
+    'series-a': [{ providerId: 'a1', season: 1, episode: 1, title: 'Alpha', isSpecial: false }],
+    'series-b': [{ providerId: 'b1', season: 2, episode: 1, title: 'Beta', isSpecial: false }],
+  });
+  assert.deepEqual(plain(tvdb.state.providerEpisodes), plain(tvdb.state.providerEpisodesByShowId['series-b']));
+});
 
 test('excludes both Season 0 catalogs and maps equal regular counts by order', async () => {
   const tvdb = loadTvdb({ episodes: [
@@ -120,6 +141,77 @@ test('uses exact normalized one-to-one titles only when regular counts differ', 
   assert.equal(result.success, true);
   assert.equal(result.method, 'title');
   assert.deepEqual(plain(result.items.map(item => [item.season, item.episode])), [[1, 1]]);
+});
+
+test('matches tagged Videoland episodes against both English and Dutch TVDB titles', async () => {
+  const tvdb = loadTvdb({
+    episodesByLanguage: {
+      eng: [
+        { id: 11, seasonNumber: 1, number: 1, name: 'The Arrival', language: 'eng' },
+        { id: 12, seasonNumber: 1, number: 2, name: 'The Choice', language: 'eng' },
+        { id: 13, seasonNumber: 1, number: 3, name: 'TVDB Only', language: 'eng' },
+      ],
+      nld: [
+        { id: 11, seasonNumber: 1, number: 1, name: 'De Aankomst', language: 'nld' },
+        { id: 12, seasonNumber: 1, number: 2, name: 'De Keuze', language: 'nld' },
+        { id: 13, seasonNumber: 1, number: 3, name: 'Alleen TVDB', language: 'nld' },
+      ],
+    },
+    translations: {
+      12: { name: 'The Choice', language: 'eng' },
+    },
+  });
+  const englishItem = { ...segment(1, 1, 'The Arrival'), _tvdbEpisodeLanguages: ['eng', 'nld'], _tvdbRequireTitleMatch: true };
+  const dutchItem = { ...segment(1, 2, 'De Keuze'), _tvdbEpisodeLanguages: ['eng', 'nld'], _tvdbRequireTitleMatch: true };
+  const result = await tvdb.mapSeriesItemsToTvdb(
+    [englishItem, dutchItem],
+    [
+      { providerId: 'a', season: 1, episode: 1, title: 'The Arrival' },
+      { providerId: 'b', season: 1, episode: 2, title: 'De Keuze' },
+    ],
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.method, 'title');
+  assert.deepEqual(plain(result.items.map(item => [item.season, item.episode])), [[1, 1], [1, 2]]);
+  assert.equal(result.items.some(item => '_tvdbEpisodeLanguages' in item), false);
+  assert.equal(tvdb.requests.filter(request => request.url.endsWith('/series/101/episodes/default/eng?page=0')).length, 1);
+  assert.equal(tvdb.requests.filter(request => request.url.endsWith('/series/101/episodes/default/nld?page=0')).length, 1);
+  const dutchResponseLog = tvdb.logs.find(args =>
+    args[0] === '[TVDB] Series episode title response' && args[1].requestedLanguage === 'nld');
+  assert.deepEqual(plain(dutchResponseLog[1].episodes.map(episode => episode.receivedTitle)), ['De Aankomst', 'De Keuze', 'Alleen TVDB']);
+  const matchingLog = tvdb.logs.find(args => args[0] === '[TVDB] Episode titles available for matching');
+  assert.deepEqual(plain(matchingLog[1].tvdbEpisodes.slice(0, 2).map(episode => episode.titles)), [
+    ['The Arrival', 'De Aankomst'],
+    ['The Choice', 'De Keuze'],
+  ]);
+  const matchingJsonLog = tvdb.logs.find(args => args[0] === '[TVDB] Title matching input JSON');
+  const matchingJson = JSON.parse(matchingJsonLog[1]);
+  assert.deepEqual(matchingJson.providerEpisodes.map(episode => episode.title), ['The Arrival', 'De Keuze']);
+  assert.deepEqual(matchingJson.tvdbEpisodes.slice(0, 2).map(episode => episode.titles), [
+    ['The Arrival', 'De Aankomst'],
+    ['The Choice', 'De Keuze'],
+  ]);
+});
+
+test('requires an exact title for tagged Videoland items even when episode counts and numbers match', async () => {
+  const episodes = [{ id: 11, seasonNumber: 1, number: 1, name: 'TVDB title' }];
+  const videoland = loadTvdb({ episodes });
+  const videolandItem = { ...segment(1, 1, 'Series title'), _tvdbRequireTitleMatch: true };
+  const rejected = await videoland.mapSeriesItemsToTvdb(
+    [videolandItem],
+    [{ providerId: 'clip-1', season: 1, episode: 1, title: 'Series title' }],
+  );
+  assert.equal(rejected.success, false);
+  assert.match(rejected.reason, /no reliable exact title mappings/);
+
+  const untagged = loadTvdb({ episodes });
+  const mappedByExistingProviderBehavior = await untagged.mapSeriesItemsToTvdb(
+    [segment(1, 1, 'Series title')],
+    [{ providerId: 'clip-1', season: 1, episode: 1, title: 'Series title' }],
+  );
+  assert.equal(mappedByExistingProviderBehavior.success, true);
+  assert.equal(mappedByExistingProviderBehavior.method, 'order');
 });
 
 test('keeps reliable title mappings when generic and unmatched provider titles are skipped', async () => {

@@ -45,7 +45,7 @@ export function processNetflixMetadata(data) {
       title: episode.title || episode.name || '',
       isSpecial: isNetflixSpecialEpisode(season, episode),
     }))
-  ));
+  ), showId);
 
   const extractedItems = [];
   for (const season of video.seasons || []) {
@@ -56,9 +56,10 @@ export function processNetflixMetadata(data) {
       const common = {
         providerName: 'netflix',
         episodeId,
+        showId,
         season: season.seq,
         episode: episode.seq,
-        imdbId: state.imdbId || 'IMDB_PENDING',
+        imdbId: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
         episodeTitle: episode.title || episode.name || '',
       };
       const markers = episode.skipMarkers || {};

@@ -35,6 +35,7 @@ export const createState = (providerName) => ({
   showId: null,
   showYear: '',
   showIds: new Set(),
+  imdbIdsByShowId: {},
   interceptedCount: 0,
   panelVisible: false,
   submitInProgress: false,
@@ -44,6 +45,7 @@ export const createState = (providerName) => ({
   tvdbApiKey: '',
   tvdbPin: '',
   providerEpisodes: [],
+  providerEpisodesByShowId: {},
 });
 
 export const state = createState('Streaming Service');
