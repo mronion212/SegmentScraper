@@ -7,7 +7,7 @@ const vm = require('node:vm');
 const plain = value => JSON.parse(JSON.stringify(value));
 
 function loadSkyShowtimeExtractor(globals = {}) {
-  const state = { allItems: [], imdbId: '', showTitle: '', providerEpisodes: [] };
+  const state = { allItems: [], imdbId: '', imdbIdsByShowId: {}, showTitle: '', providerEpisodes: [] };
   const detectedShows = [];
   let source = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'providers', 'skyshowtime', 'extractor.js'),
@@ -117,16 +117,17 @@ test('maps SkyShowtime marker names and inherited season metadata', () => {
     { providerId: 'episode-4', season: 2, episode: 4, title: 'Fourth Episode', isSpecial: false },
   ]);
   assert.deepEqual(plain(sky.state.allItems.map(item => ({
+    showId: item._showId,
     type: item.segment_type,
     season: item.season,
     episode: item.episode,
     start: item.start_sec,
     end: item.end_sec,
   }))), [
-    { type: 'recap', season: 2, episode: 3, start: 0, end: 12.345 },
-    { type: 'intro', season: 2, episode: 3, start: 12.345, end: 88 },
-    { type: 'outro', season: 2, episode: 3, start: 3500.123, end: 3600 },
-    { type: 'outro', season: 2, episode: 4, start: 117, end: 120 },
+    { showId: 'series-123', type: 'recap', season: 2, episode: 3, start: 0, end: 12.345 },
+    { showId: 'series-123', type: 'intro', season: 2, episode: 3, start: 12.345, end: 88 },
+    { showId: 'series-123', type: 'outro', season: 2, episode: 3, start: 3500.123, end: 3600 },
+    { showId: 'series-123', type: 'outro', season: 2, episode: 4, start: 117, end: 120 },
   ]);
 });
 

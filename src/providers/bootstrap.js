@@ -15,6 +15,26 @@ const BUTTON_IDLE_DELAY_MS = 3000;
 let activeProviderConfig = getProviderConfig('netflix');
 let buttonHideTimer;
 
+function getItemShowId(item) {
+  return item?._showId != null ? String(item._showId) : '';
+}
+
+function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
+  const normalizedShowId = showId != null ? String(showId) : '';
+  const hasTaggedItems = state.allItems.some(item => getItemShowId(item));
+  state.allItems.forEach(item => {
+    const belongsToShow = normalizedShowId
+      ? getItemShowId(item) === normalizedShowId || (!hasTaggedItems && !getItemShowId(item))
+      : !getItemShowId(item);
+    const canUpdate = overwrite || !item.imdb_id || item.imdb_id === 'IMDB_PENDING';
+    if (belongsToShow && canUpdate) item.imdb_id = imdbId;
+  });
+  if (normalizedShowId) {
+    state.imdbIdsByShowId ||= {};
+    state.imdbIdsByShowId[normalizedShowId] = imdbId;
+  }
+}
+
 export function setDbStatus(msg) {
   state.dbStatusMsg = msg;
   const el = document.getElementById('nfe-imdb-status');
@@ -37,9 +57,14 @@ export function setTvdbStatus(msg) {
 
 /** Apply the shared IMDb flow after an extractor discovers a show. */
 export function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null }) {
-  if (title && title !== state.showTitle) {
+  const normalizedShowId = showId != null ? String(showId) : null;
+  const showChanged = Boolean(title) && (
+    title !== state.showTitle ||
+    (normalizedShowId && normalizedShowId !== state.showId)
+  );
+  if (showChanged) {
     state.showTitle = title;
-    state.showId = showId != null ? String(showId) : null;
+    state.showId = normalizedShowId;
     if (state.showId) state.showIds.add(state.showId);
     state.showYear = year ? String(year) : '';
     state.dbSearchDone = false;
@@ -52,11 +77,26 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
   if (state.dbSearchDone || !state.showTitle) return;
   state.dbSearchDone = true;
 
+  const lookupTitle = state.showTitle;
+  const lookupYear = state.showYear;
+  const lookupShowId = state.showId;
+  const isCurrentShow = () => lookupShowId
+    ? state.showId === lookupShowId
+    : state.showTitle === lookupTitle;
+
+  const cachedImdbId = lookupShowId && state.imdbIdsByShowId?.[lookupShowId];
+  if (!imdbOverride && cachedImdbId) {
+    state.imdbId = cachedImdbId;
+    applyImdbIdToShow(cachedImdbId, lookupShowId);
+    updateImdbInput();
+    setDbStatus(`Found: ${cachedImdbId}`);
+    updateCounters();
+    return;
+  }
+
   if (imdbOverride) {
     state.imdbId = imdbOverride;
-    state.allItems.forEach(item => {
-      if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = imdbOverride;
-    });
+    applyImdbIdToShow(imdbOverride, lookupShowId);
     updateImdbInput();
     setDbStatus(`Manual override applied · ID: ${imdbOverride}`);
     updateCounters();
@@ -64,21 +104,22 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     return;
   }
 
-  searchImdbByTitle(state.showTitle, state.showYear).then(result => {
+  searchImdbByTitle(lookupTitle, lookupYear).then(result => {
     if (result.success) {
+      applyImdbIdToShow(result.imdbId, lookupShowId);
+      if (!isCurrentShow()) return;
       state.imdbId = result.imdbId;
-      state.allItems.forEach(item => {
-        if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
-      });
       updateImdbInput();
       setDbStatus(`Found: ${result.imdbId}`);
       updateCounters();
       loadExistingSegments(result.imdbId);
     } else {
+      if (!isCurrentShow()) return;
       setDbStatus(`IMDb lookup failed: ${result.error}`);
     }
   }).catch(error => {
     console.error('[NFE] IMDb search error:', error);
+    if (!isCurrentShow()) return;
     setDbStatus('IMDb lookup error');
   });
 }
@@ -125,7 +166,10 @@ async function mapCapturedItemsWithTvdb(action) {
     .map(([reason, count]) => `${reasonLabels[reason] || reason}: ${count}`)
     .join(', ') || 'none';
   for (const [imdbId, seriesItems] of seriesGroups) {
-    const catalog = imdbId === state.imdbId ? state.providerEpisodes : [];
+    const showId = getItemShowId(seriesItems[0]);
+    const catalog = showId
+      ? state.providerEpisodesByShowId?.[showId] || []
+      : (imdbId === state.imdbId ? state.providerEpisodes : []);
     const mapped = await mapSeriesItemsToTvdb(seriesItems, catalog);
     const stats = mapped.stats;
     if (!mapped.success) {
@@ -420,7 +464,7 @@ function configurePanelCallbacks() {
       const value = document.getElementById('nfe-imdb-input').value.trim();
       if (!value) return;
       state.imdbId = value;
-      state.allItems.forEach(item => { item.imdb_id = value; });
+      applyImdbIdToShow(value, state.showId, { overwrite: true });
       state.dedupCacheV2 = {};
       setDbStatus(`ID saved: ${value}`);
       updateCounters();
@@ -438,12 +482,12 @@ function configurePanelCallbacks() {
       if (!query) { toast('No title detected yet.'); return; }
       state.dbSearchDone = false;
       state.dedupCacheV2 = {};
+      const searchShowId = state.showId;
       searchImdbByTitle(query, state.showYear).then(result => {
         if (result.success) {
+          applyImdbIdToShow(result.imdbId, searchShowId);
+          if (searchShowId && state.showId !== searchShowId) return;
           state.imdbId = result.imdbId;
-          state.allItems.forEach(item => {
-            if (item.imdb_id === 'IMDB_PENDING') item.imdb_id = result.imdbId;
-          });
           updateImdbInput();
           setDbStatus(`Found: ${result.imdbId}`);
           updateCounters();

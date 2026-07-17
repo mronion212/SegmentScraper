@@ -125,7 +125,8 @@ function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, star
   extractedItems.push({
     _eid: episodeId,
     _episodeTitle: common.episodeTitle,
-    imdb_id: state.imdbId || 'IMDB_PENDING',
+    _showId: common.showId,
+    imdb_id: state.imdbIdsByShowId?.[common.showId] || 'IMDB_PENDING',
     segment_type: providerSegmentType,
     season: common.season,
     episode: common.episode,
@@ -140,10 +141,13 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
   if (!episodes.length) return 0;
 
   const showEpisode = episodes.find(episode => episode.seriesName || episode.titleLong || episode.titleMedium || episode.title);
+  const showId = showEpisode
+    ? showEpisode.providerSeriesId || showEpisode.seriesId || showEpisode.seriesUuid || null
+    : null;
   if (showEpisode) {
     handleDetectedShow({
       title: showEpisode.seriesName || showEpisode.titleLong || showEpisode.titleMedium || showEpisode.title,
-      showId: showEpisode.providerSeriesId || showEpisode.seriesId || showEpisode.seriesUuid || null,
+      showId,
       year: showEpisode.year || '',
     });
   }
@@ -159,7 +163,7 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
       title: episode.episodeName || episode.titleLong || episode.titleMedium || episode.title || '',
       isSpecial: isSkyShowtimeSpecialEpisode(episode),
     }];
-  }));
+  }), showId);
 
   const extractedItems = [];
   for (const episode of episodes) {
@@ -175,6 +179,7 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
     const common = {
       episodeId: makeSkyShowtimeEpisodeId(episode, season, episodeNumber),
       episodeTitle: episode.episodeName || episode.titleLong || episode.titleMedium || episode.title || '',
+      showId: episode.providerSeriesId || episode.seriesId || episode.seriesUuid || showId || 'unknown-series',
       season,
       episode: episodeNumber,
     };

@@ -23,14 +23,17 @@ function coerceVideolandNumber(value) {
 
 function extractVideolandRootMeta(json) {
   const video = json?.seo?.video || null;
+  const entity = json?.entity || null;
   return {
-    entityId: json?.entity?.id != null ? String(json.entity.id) : null,
+    entityId: entity?.id != null ? String(entity.id) : null,
+    entity,
     season: coerceVideolandNumber(video?.season),
     episode: coerceVideolandNumber(video?.episode),
     duration: coerceVideolandNumber(video?.duration),
     programId: json?.seo?.parent?.id != null ? String(json.seo.parent.id) : null,
     programTitle: json?.seo?.parent?.name || null,
     episodeTitle: video?.name || video?.title || null,
+    extraTitle: video?.extraTitle || null,
   };
 }
 
@@ -59,7 +62,45 @@ function mapVideolandChapterType(type) {
 }
 
 function updateVideolandTitle(title, programId) {
-  handleDetectedShow({ title, showId: programId });
+  const showId = String(programId || title);
+  handleDetectedShow({ title, showId });
+  return showId;
+}
+
+function normalizeVideolandEpisodeTitle(value) {
+  return String(value || '').trim().replace(/^\d+\s*\.\s*/, '').trim();
+}
+
+function chooseVideolandEpisodeTitle(rootMeta, activeItem, programTitle) {
+  const candidates = [
+    rootMeta?.entity?.extraTitle,
+    rootMeta?.entity?.episodeTitle,
+    rootMeta?.entity?.episodeName,
+    rootMeta?.entity?.subtitle,
+    rootMeta?.entity?.subTitle,
+    rootMeta?.entity?.secondaryTitle,
+    rootMeta?.entity?.title,
+    rootMeta?.entity?.name,
+    activeItem?.episodeTitle,
+    activeItem?.episodeName,
+    activeItem?.extraTitle,
+    activeItem?.subtitle,
+    activeItem?.subTitle,
+    activeItem?.secondaryTitle,
+    activeItem?.video?.episodeTitle,
+    activeItem?.video?.episodeName,
+    activeItem?.video?.extraTitle,
+    activeItem?.video?.subtitle,
+    activeItem?.video?.subTitle,
+    activeItem?.video?.secondaryTitle,
+    activeItem?.title,
+    activeItem?.video?.title,
+    activeItem?.video?.name,
+    rootMeta?.extraTitle,
+    rootMeta?.episodeTitle,
+  ].map(normalizeVideolandEpisodeTitle).filter(Boolean);
+  const normalizedProgramTitle = String(programTitle || '').trim().toLocaleLowerCase();
+  return candidates.find(candidate => candidate.toLocaleLowerCase() !== normalizedProgramTitle) || '';
 }
 
 export function processVideolandLayout(json) {
@@ -85,15 +126,21 @@ export function processVideolandLayout(json) {
   const season = rootMeta.season;
   const episode = rootMeta.episode;
   const title = (rootMeta.programTitle || activeItem.title || '').trim();
-  const episodeTitle = (rootMeta.episodeTitle || activeItem.title || '').trim();
-  state.clipMap.set(clipId, { season, episode, title, programId: rootMeta.programId });
+  const episodeTitle = chooseVideolandEpisodeTitle(rootMeta, activeItem, title);
+  if (!episodeTitle) {
+    console.warn('[VLE] No episode-specific title found; the series title will not be used for TVDB matching.', {
+      clipId,
+      seriesTitle: title,
+    });
+  }
+  const showId = updateVideolandTitle(title, rootMeta.programId);
+  state.clipMap.set(clipId, { season, episode, title, showId });
 
   if (season != null && episode != null) {
     state.currentSeason = season;
     state.currentEpisode = episode;
   }
-  updateVideolandTitle(title, rootMeta.programId);
-  recordProviderEpisode({ providerId: clipId, season, episode, title: episodeTitle });
+  recordProviderEpisode({ providerId: clipId, season, episode, title: episodeTitle }, showId);
 
   if (season == null || episode == null) return;
   const extractedItems = [];
@@ -108,7 +155,10 @@ export function processVideolandLayout(json) {
     extractedItems.push({
       _eid: episodeId,
       _episodeTitle: episodeTitle,
-      imdb_id: state.imdbId || 'IMDB_PENDING',
+      _showId: showId,
+      _tvdbEpisodeLanguages: ['eng', 'nld'],
+      _tvdbRequireTitleMatch: true,
+      imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
       segment_type: segmentType,
       season,
       episode,
