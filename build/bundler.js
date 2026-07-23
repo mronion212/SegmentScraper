@@ -9,8 +9,8 @@ const path = require('path');
 
 // Userscript header template
 const USERSCRIPT_HEADER = `// ==UserScript==
-// @name         SegmentScraper v1.3.0.12 - Multi-Provider Timestamps Extractor
-// @version      1.3.0.12
+// @name         SegmentScraper v1.4.0 - Multi-Provider Timestamps Extractor
+// @version      1.4.0
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -26,6 +26,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @match        https://play.max.com/*
 // @match        https://www.skyshowtime.com/*
 // @match        https://skyshowtime.com/*
+// @match        https://www.crunchyroll.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -34,6 +35,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @connect      api.introdb.app
 // @connect      api4.thetvdb.com
 // @connect      atom.skyshowtime.com
+// @connect      static.crunchyroll.com
 // @run-at       document-start
 // ==/UserScript==
 
@@ -127,6 +129,11 @@ function bundle() {
       name: 'skyshowtime',
       condition: "location.hostname === 'skyshowtime.com' || location.hostname.endsWith('.skyshowtime.com')",
       files: ['providers/skyshowtime/extractor.js', 'providers/skyshowtime/index.js'],
+    },
+    {
+      name: 'crunchyroll',
+      condition: "location.hostname === 'crunchyroll.com' || location.hostname.endsWith('.crunchyroll.com')",
+      files: ['providers/crunchyroll/extractor.js', 'providers/crunchyroll/index.js'],
     },
   ];
   

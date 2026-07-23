@@ -40,6 +40,11 @@ export const PROVIDER_MAPPINGS = {
     recap: SEGMENT_TYPES.RECAP,
     outro: SEGMENT_TYPES.OUTRO,
   },
+  crunchyroll: {
+    intro: SEGMENT_TYPES.INTRO,
+    recap: SEGMENT_TYPES.RECAP,
+    credits: SEGMENT_TYPES.OUTRO,
+  },
 };
 
 /**
