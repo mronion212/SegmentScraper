@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         SegmentScraper v1.4.0 - Multi-Provider Timestamps Extractor
-// @version      1.4.0
+// @name         SegmentScraper v1.4.3 - Multi-Provider Timestamps Extractor
+// @version      1.4.3
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -2663,55 +2663,63 @@ bootstrapProvider({
 
   // â”€â”€â”€ providers/prime-video/extractor.js â”€â”€â”€
 
-/**
- * Prime Video-specific extraction logic.
- * Captures GetVodPlaybackResources transition timecodes and resolves the
- * episode number from the active player DOM.
- */
-const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
+/** Prime Video catalogue, playback-resource, and timestamp extraction. */
 
-function ensurePrimeVideoState() {
-  if (!(state.asinMap instanceof Map)) state.asinMap = new Map();
-  if (!(state.pendingByAsin instanceof Map)) state.pendingByAsin = new Map();
-  if (state.currentSeason == null) state.currentSeason = 1;
-  if (state.currentEpisode == null) state.currentEpisode = 1;
+const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
+const PRIME_VIDEO_ID_PATTERN = /^(?:[A-Z0-9]{9,12}|amzn1\.dv\.gti\.[a-f0-9-]{20,})$/i;
+const PRIME_VIDEO_CARD_SELECTOR = '[data-testid="episode-list-item"], li[id^="av-ep-episode-"]';
+const PRIME_VIDEO_EPISODE_HEADING_PATTERN = /^\s*(\d+)\s*[.\-:]\s*(.*?)\s*$/;
+const PRIME_VIDEO_POLL_INTERVAL_MS = 250;
+const PRIME_VIDEO_MAX_POLL_ATTEMPTS = 40;
+const PRIME_VIDEO_SELECTION_TTL_MS = 60000;
+const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 1000;
+
+function isPrimeVideoTitleId(value) {
+  return typeof value === 'string' && PRIME_VIDEO_ID_PATTERN.test(value);
 }
 
-function findPrimeVideoAsinInObject(obj, depth = 0) {
+function ensurePrimeVideoState() {
+  if (!(state.primeVideoTitleMap instanceof Map)) state.primeVideoTitleMap = new Map();
+  if (!(state.primeVideoPendingByTitleId instanceof Map)) state.primeVideoPendingByTitleId = new Map();
+  if (!(state.primeVideoDetailMap instanceof Map)) state.primeVideoDetailMap = new Map();
+  if (!(state.primeVideoPollingTitleIds instanceof Set)) state.primeVideoPollingTitleIds = new Set();
+}
+
+function findPrimeVideoTitleIdInObject(obj, depth = 0) {
   if (!obj || typeof obj !== 'object' || depth > 5) return null;
   const keys = ['asin', 'ASIN', 'titleId', 'titleID', 'contentId', 'catalogId'];
   for (const key of keys) {
-    if (typeof obj[key] === 'string' && /^[A-Z0-9]{9,12}$/i.test(obj[key])) return obj[key];
+    if (isPrimeVideoTitleId(obj[key])) return obj[key];
   }
   for (const key in obj) {
     const value = obj[key];
     if (value && typeof value === 'object') {
-      const found = findPrimeVideoAsinInObject(value, depth + 1);
+      const found = findPrimeVideoTitleIdInObject(value, depth + 1);
       if (found) return found;
     }
   }
   return null;
 }
 
-function extractPrimeVideoAsin(bodyText, url) {
+function extractPrimeVideoTitleId(bodyText, url) {
   if (url) {
-    const titleIdMatch = url.match(/[?&]titleId=([^&]+)/i);
-    if (titleIdMatch) return decodeURIComponent(titleIdMatch[1]);
-    const asinMatch = url.match(/[?&](?:asin|ASIN)=([A-Z0-9]{9,12})/i);
-    if (asinMatch) return asinMatch[1];
+    const titleIdMatch = url.match(/[?&](?:titleId|cGTI)=([^&]+)/i);
+    if (titleIdMatch) {
+      const titleId = decodeURIComponent(titleIdMatch[1]);
+      if (isPrimeVideoTitleId(titleId)) return titleId;
+    }
+    const legacyIdMatch = url.match(/[?&](?:asin|ASIN)=([A-Z0-9]{9,12})/i);
+    if (legacyIdMatch) return legacyIdMatch[1];
   }
   if (!bodyText) return null;
   try {
-    const found = findPrimeVideoAsinInObject(JSON.parse(bodyText));
+    const found = findPrimeVideoTitleIdInObject(JSON.parse(bodyText));
     if (found) return found;
   } catch (_) {}
 
   const patterns = [
-    /"asin"\s*:\s*"([A-Z0-9]{9,12})"/i,
-    /"titleId"\s*:\s*"([A-Z0-9]{9,12})"/i,
-    /"titleID"\s*:\s*"([A-Z0-9]{9,12})"/i,
-    /"contentId"\s*:\s*"([A-Z0-9]{9,12})"/i,
-    /asin=([A-Z0-9]{9,12})/i,
+    /"(?:asin|titleId|titleID|contentId|catalogId)"\s*:\s*"((?:amzn1\.dv\.gti\.[a-f0-9-]{20,})|(?:[A-Z0-9]{9,12}))"/i,
+    /(?:asin|titleId)=((?:amzn1\.dv\.gti\.[a-f0-9-]{20,})|(?:[A-Z0-9]{9,12}))/i,
   ];
   for (const pattern of patterns) {
     const match = bodyText.match(pattern);
@@ -2765,47 +2773,220 @@ function findPrimeVideoEpisodeMetadata(root) {
   return candidates[0] || null;
 }
 
-function readPrimeVideoSeasonEpisode() {
+function parsePrimeVideoEpisodeText(text) {
+  const normalized = String(text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const patterns = [
+    /\bS\s*(\d+)\s*(?:E|EP|AFL\.?|FOLGE)\s*(\d+)\b/i,
+    /\b(?:SEASON|SEIZOEN|SAISON|STAFFEL|TEMPORADA|STAGIONE)\s*(\d+)[^\d]{0,30}(?:EPISODE|AFLEVERING|FOLGE|EPISODIO)\s*(\d+)\b/i,
+  ];
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (!match) continue;
+    const season = coercePrimeVideoInteger(match[1]);
+    const episode = coercePrimeVideoInteger(match[2]);
+    if (season == null || episode == null) continue;
+    const episodeTitle = normalized
+      .slice((match.index || 0) + match[0].length)
+      .replace(/^\s*[-:|.]\s*/, '')
+      .trim();
+    return { season, episode, episodeTitle };
+  }
+  return null;
+}
+
+function readPrimeVideoPlayerSnapshot() {
   const player = document.getElementById('dv-web-player');
-  const episodeInfo = document.querySelector('[class*="atvwebplayersdk-episode-info"]');
   const isPlayerActive = !!player && player.offsetWidth > 0 && player.offsetHeight > 0;
   let season = null;
   let episode = null;
   let episodeTitle = '';
 
-  if (episodeInfo) {
-    const text = episodeInfo.textContent.trim();
-    const seasonMatch = text.match(/S(\d+)/i);
-    const episodeMatch = text.match(/(?:Afl\.?|E)\s*(\d+)/i);
-    if (seasonMatch) season = parseInt(seasonMatch[1], 10);
-    if (episodeMatch) episode = parseInt(episodeMatch[1], 10);
-    const titleNode = episodeInfo.querySelector('[class*="title" i]');
-    const rawEpisodeTitle = (titleNode?.textContent || text).trim();
-    episodeTitle = rawEpisodeTitle
-      .replace(/^\s*S\d+\s*(?:E|Afl\.?)\s*\d+\s*[-:|.]?\s*/i, '')
-      .replace(/^\s*(?:Episode|Aflevering)\s*\d+\s*[-:|.]?\s*/i, '')
-      .trim();
-    if (episodeTitle === rawEpisodeTitle && seasonMatch && episodeMatch) episodeTitle = '';
+  const candidates = [];
+  if (player?.querySelectorAll) {
+    candidates.push(...player.querySelectorAll(
+      '[class*="episode-info" i], [data-testid*="episode" i], [data-automation-id*="episode" i], [aria-label*="episode" i], [aria-label*="aflevering" i]'
+    ));
+  }
+  candidates.push(player);
+
+  for (const node of [...new Set(candidates.filter(Boolean))]) {
+    const ariaLabel = node.getAttribute?.('aria-label') || '';
+    const text = `${ariaLabel} ${node.textContent || ''}`.trim();
+    const parsed = parsePrimeVideoEpisodeText(text);
+    if (!parsed) continue;
+    season = parsed.season;
+    episode = parsed.episode;
+    const titleNode = node.querySelector?.('[class*="title" i], [data-testid*="title" i]');
+    episodeTitle = String(titleNode?.textContent || parsed.episodeTitle || '').trim();
+    break;
   }
   return { isPlayerActive, season, episode, title: document.title, episodeTitle };
 }
 
 function updatePrimeVideoTitle(rawTitle) {
   const cleaned = rawTitle.replace(/^Prime Video[:\-]\s*/i, '').trim();
-  const seasonMatch = cleaned.match(/\s*(Seizoen|Season)\s*(\d+)/i);
+  const seasonMatch = cleaned.match(/\s*(?:-|–)?\s*(?:S|SEASON|SEIZOEN|SAISON|STAFFEL|TEMPORADA|STAGIONE)\s*\d+\s*$/i);
   const title = seasonMatch ? cleaned.slice(0, seasonMatch.index).trim() : cleaned;
   handleDetectedShow({ title, showId: title });
   return title;
 }
 
-function findPrimeVideoEpisodeCollision(asin, showId, season, episode) {
-  for (const [knownAsin, known] of state.asinMap) {
-    if (knownAsin !== asin && known.showId === showId && known.season === season && known.episode === episode) return known;
+function readPrimeVideoSelectedSeason(root = document) {
+  const selector = root.querySelector?.('#av-droplist-av-atf-season-selector');
+  const label = selector?.getAttribute?.('aria-label') || selector?.value || '';
+  const pageTitle = root.title || '';
+  const number = String(label).match(/\d+/)?.[0] ||
+    String(pageTitle).match(/(?:^|\s|-)(?:S|SEASON|SEIZOEN|SAISON|STAFFEL|TEMPORADA|STAGIONE)\s*(\d+)\b/i)?.[1];
+  return coercePrimeVideoInteger(number);
+}
+
+function readPrimeVideoSeriesTitle(root = document) {
+  const heading = root.querySelector?.('main h1') || root.querySelector?.('h1');
+  const text = String(heading?.textContent || '').trim();
+  if (text) return text;
+  return String(heading?.querySelector?.('img[alt]')?.getAttribute?.('alt') || '').trim();
+}
+
+function readPrimeVideoCardTitleId(card) {
+  const selector = card.querySelector?.('input[id^="selector-"]');
+  const selectorId = selector?.getAttribute?.('id') || selector?.id || '';
+  const titleId = selectorId.replace(/^selector-/, '');
+  if (isPrimeVideoTitleId(titleId)) return titleId;
+
+  const metadataNode = card.querySelector?.('[data-testid*="amzn1.dv.gti."], [data-automation-id*="amzn1.dv.gti."]');
+  if (metadataNode) {
+    for (const attribute of ['data-testid', 'data-automation-id']) {
+      const value = metadataNode.getAttribute?.(attribute) || '';
+      const match = value.match(/amzn1\.dv\.gti\.[a-f0-9-]{20,}/i);
+      if (match && isPrimeVideoTitleId(match[0])) return match[0];
+    }
+  }
+
+  const link = card.querySelector?.('a[href*="cGTI="], a[href*="titleId="]');
+  return extractPrimeVideoTitleId('', link?.getAttribute?.('href') || '');
+}
+
+function readPrimeVideoCardEpisode(card) {
+  const heading = String(card?.querySelector?.('h3')?.textContent || '').trim();
+  const match = heading.match(PRIME_VIDEO_EPISODE_HEADING_PATTERN);
+  const episode = coercePrimeVideoInteger(match?.[1]);
+  return episode == null ? null : { episode, episodeTitle: match?.[2] || '' };
+}
+
+function readPrimeVideoDetailId(url) {
+  return String(url || '').match(/\/detail\/([A-Z0-9]{10,})/i)?.[1]?.toUpperCase() || null;
+}
+
+function readPrimeVideoCardDetailId(card) {
+  const directLink = card.querySelector?.('a[href*="/detail/"]');
+  const directId = readPrimeVideoDetailId(directLink?.getAttribute?.('href'));
+  if (directId) return directId;
+
+  const returnLink = card.querySelector?.('a[href*="return_url="]');
+  const href = returnLink?.getAttribute?.('href') || '';
+  const encoded = href.match(/[?&]return_url=([^&]+)/i)?.[1];
+  if (!encoded || typeof atob !== 'function') return null;
+  try {
+    const base64 = decodeURIComponent(encoded).replace(/-/g, '+').replace(/_/g, '/');
+    return readPrimeVideoDetailId(atob(base64));
+  } catch (_) {
+    return null;
+  }
+}
+
+function readCurrentPrimeVideoDetailId() {
+  if (typeof location === 'undefined') return null;
+  return readPrimeVideoDetailId(location.href || location.pathname);
+}
+
+function rememberPrimeVideoEpisodeSelection(card, root = document) {
+  ensurePrimeVideoState();
+  const season = readPrimeVideoSelectedSeason(root);
+  const seriesTitle = readPrimeVideoSeriesTitle(root);
+  const cardEpisode = readPrimeVideoCardEpisode(card);
+  if (season == null || !cardEpisode || !seriesTitle) return false;
+
+  const showId = updatePrimeVideoTitle(seriesTitle);
+  state.primeVideoSelectedEpisode = {
+    season,
+    ...cardEpisode,
+    showId,
+    seriesTitle,
+    selectedAt: Date.now(),
+  };
+  return true;
+}
+
+/**
+ * Prime's current detail page exposes stable episode GTIs before playback.
+ * Cache them up front because the player overlay no longer reliably renders
+ * the old atvwebplayersdk episode-info element.
+ */
+function scanPrimeVideoEpisodeCatalog(root = document) {
+  ensurePrimeVideoState();
+  const season = readPrimeVideoSelectedSeason(root);
+  const seriesTitle = readPrimeVideoSeriesTitle(root);
+  if (season == null || !seriesTitle) return 0;
+
+  const showId = updatePrimeVideoTitle(seriesTitle);
+  const cards = root.querySelectorAll?.(PRIME_VIDEO_CARD_SELECTOR) || [];
+  const seen = new Set();
+  let found = 0;
+
+  for (const card of cards) {
+    const cardEpisode = readPrimeVideoCardEpisode(card);
+    const titleId = readPrimeVideoCardTitleId(card);
+    if (!cardEpisode || !titleId || seen.has(titleId)) continue;
+    seen.add(titleId);
+
+    const snapshot = { season, ...cardEpisode, showId };
+    state.primeVideoTitleMap.set(titleId, snapshot);
+    const detailId = readPrimeVideoCardDetailId(card);
+    if (detailId) state.primeVideoDetailMap.set(detailId, { ...snapshot, seriesTitle });
+    recordProviderEpisode({ providerId: titleId, season, episode: cardEpisode.episode, title: cardEpisode.episodeTitle }, showId);
+    found++;
+  }
+  return found;
+}
+
+function findPrimeVideoEpisodeCollision(titleId, showId, season, episode) {
+  for (const [knownTitleId, known] of state.primeVideoTitleMap) {
+    if (knownTitleId !== titleId && known.showId === showId && known.season === season && known.episode === episode) return known;
   }
   return null;
 }
 
-function finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle = '', showId = state.showId) {
+function formatPrimeVideoTimestamp(milliseconds) {
+  const totalMilliseconds = Math.max(0, Math.round(milliseconds));
+  const hours = Math.floor(totalMilliseconds / 3600000);
+  const minutes = Math.floor((totalMilliseconds % 3600000) / 60000);
+  const seconds = Math.floor((totalMilliseconds % 60000) / 1000);
+  const millis = totalMilliseconds % 1000;
+  const clock = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
+  return hours ? `${String(hours).padStart(2, '0')}:${clock}` : clock;
+}
+
+function logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, items) {
+  if (!items.length) return;
+  const episodeLabel = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
+  console.info(`[PVE] Captured timestamps · ${showId || 'Unknown series'} · ${episodeLabel}`, {
+    title: episodeTitle || '',
+    titleId,
+    segments: items.map(item => ({
+      type: item.segment_type,
+      start: formatPrimeVideoTimestamp(item.start_sec * 1000),
+      end: formatPrimeVideoTimestamp(item.end_sec * 1000),
+      start_sec: item.start_sec,
+      end_sec: item.end_sec,
+    })),
+  });
+}
+
+function finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle = '', showId = state.showId) {
   const events = data?.transitionTimecodes?.result?.events || [];
   const extractedItems = [];
 
@@ -2815,7 +2996,7 @@ function finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle = ''
     if (event.eventType === 'SKIP_INTRO') segmentType = 'intro';
     if (!segmentType || typeof event.startTimeMs !== 'number' || typeof event.endTimeMs !== 'number') continue;
 
-    const episodeId = `${asin}_${segmentType}`;
+    const episodeId = `${titleId}_${segmentType}`;
     const alreadyCaptured = item => item._eid === episodeId || (
       item._showId === showId &&
       item.season === season &&
@@ -2835,64 +3016,95 @@ function finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle = ''
       end_sec: event.endTimeMs / 1000,
     });
   }
+  logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, extractedItems);
   recordExtractedSegments(extractedItems);
 }
 
-function commitPrimeVideoEpisode(asin, snapshot, { allowNumberReuse = false } = {}) {
+function commitPrimeVideoEpisode(titleId, snapshot, { allowNumberReuse = false } = {}) {
   const showId = updatePrimeVideoTitle(snapshot.seriesTitle || snapshot.title);
-  const collision = findPrimeVideoEpisodeCollision(asin, showId, snapshot.season, snapshot.episode);
+  const collision = findPrimeVideoEpisodeCollision(titleId, showId, snapshot.season, snapshot.episode);
   if (collision && !allowNumberReuse) return false;
 
   const episodeTitle = snapshot.episodeTitle || '';
-  state.asinMap.set(asin, { season: snapshot.season, episode: snapshot.episode, episodeTitle, showId });
-  state.currentSeason = snapshot.season;
-  state.currentEpisode = snapshot.episode;
+  state.primeVideoTitleMap.set(titleId, { season: snapshot.season, episode: snapshot.episode, episodeTitle, showId });
+  state.primeVideoPollingTitleIds.delete(titleId);
   if (!collision) {
-    recordProviderEpisode({ providerId: asin, season: snapshot.season, episode: snapshot.episode, title: episodeTitle }, showId);
+    recordProviderEpisode({ providerId: titleId, season: snapshot.season, episode: snapshot.episode, title: episodeTitle }, showId);
   }
-  const pending = state.pendingByAsin.get(asin) || [];
-  state.pendingByAsin.delete(asin);
-  pending.forEach(data => finalizePrimeVideoEvents(asin, snapshot.season, snapshot.episode, data, episodeTitle, showId));
+  const pending = state.primeVideoPendingByTitleId.get(titleId) || [];
+  state.primeVideoPendingByTitleId.delete(titleId);
+  pending.forEach(data => finalizePrimeVideoEvents(titleId, snapshot.season, snapshot.episode, data, episodeTitle, showId));
   return true;
 }
 
-function pollPrimeVideoEpisode(asin, attempt) {
-  const snapshot = readPrimeVideoSeasonEpisode();
+function pollPrimeVideoEpisode(titleId, attempt) {
+  const snapshot = readPrimeVideoPlayerSnapshot();
   if (snapshot.isPlayerActive && snapshot.season != null && snapshot.episode != null) {
-    if (commitPrimeVideoEpisode(asin, snapshot)) return;
+    if (commitPrimeVideoEpisode(titleId, snapshot)) return;
   }
-  if (attempt >= 40) {
-    console.warn('[PVE] Could not resolve season/episode for ASIN:', asin);
-    state.pendingByAsin.delete(asin);
+  if (attempt >= PRIME_VIDEO_MAX_POLL_ATTEMPTS) {
+    console.warn('[PVE] Could not resolve season/episode for title ID:', titleId);
+    state.primeVideoPendingByTitleId.delete(titleId);
+    state.primeVideoPollingTitleIds.delete(titleId);
     return;
   }
-  setTimeout(() => pollPrimeVideoEpisode(asin, attempt + 1), 250);
+  setTimeout(() => pollPrimeVideoEpisode(titleId, attempt + 1), PRIME_VIDEO_POLL_INTERVAL_MS);
 }
 
 function processPrimeVideoMetadata(data, bodyText, url) {
   ensurePrimeVideoState();
-  const asin = extractPrimeVideoAsin(bodyText, url);
-  if (!asin) return;
-  if (state.asinMap.has(asin)) {
-    const { season, episode, episodeTitle, showId } = state.asinMap.get(asin);
-    finalizePrimeVideoEvents(asin, season, episode, data, episodeTitle, showId);
+  const titleId = extractPrimeVideoTitleId(bodyText, url);
+  if (!titleId) return;
+  if (state.primeVideoTitleMap.has(titleId)) {
+    const { season, episode, episodeTitle, showId } = state.primeVideoTitleMap.get(titleId);
+    finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle, showId);
     return;
   }
-  if (!state.pendingByAsin.has(asin)) state.pendingByAsin.set(asin, []);
-  state.pendingByAsin.get(asin).push(data);
+  if (!state.primeVideoPendingByTitleId.has(titleId)) state.primeVideoPendingByTitleId.set(titleId, []);
+  state.primeVideoPendingByTitleId.get(titleId).push(data);
   const metadata = findPrimeVideoEpisodeMetadata(data);
   if (metadata) {
-    commitPrimeVideoEpisode(asin, {
+    commitPrimeVideoEpisode(titleId, {
       ...metadata,
       title: metadata.seriesTitle || document.title,
     }, { allowNumberReuse: true });
     return;
   }
-  pollPrimeVideoEpisode(asin, 0);
+  const currentDetailId = readCurrentPrimeVideoDetailId();
+  const detailSnapshot = currentDetailId && state.primeVideoDetailMap.get(currentDetailId);
+  if (detailSnapshot) {
+    commitPrimeVideoEpisode(titleId, {
+      ...detailSnapshot,
+      title: detailSnapshot.seriesTitle || document.title,
+    }, { allowNumberReuse: true });
+    return;
+  }
+  const selectedSnapshot = state.primeVideoSelectedEpisode;
+  if (selectedSnapshot && Date.now() - selectedSnapshot.selectedAt < PRIME_VIDEO_SELECTION_TTL_MS) {
+    commitPrimeVideoEpisode(titleId, {
+      ...selectedSnapshot,
+      title: selectedSnapshot.seriesTitle || document.title,
+    }, { allowNumberReuse: true });
+    return;
+  }
+  if (!state.primeVideoPollingTitleIds.has(titleId)) {
+    state.primeVideoPollingTitleIds.add(titleId);
+    pollPrimeVideoEpisode(titleId, 0);
+  }
 }
 
 function setupPrimeVideoInterception() {
   ensurePrimeVideoState();
+  const scanCatalog = () => {
+    try { scanPrimeVideoEpisodeCatalog(); }
+    catch (error) { console.warn('[PVE] Failed to scan episode catalogue:', error); }
+  };
+  scanCatalog();
+  setInterval(scanCatalog, PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS);
+  document.addEventListener('click', event => {
+    const card = event.target?.closest?.(PRIME_VIDEO_CARD_SELECTOR);
+    if (card) rememberPrimeVideoEpisodeSelection(card);
+  }, true);
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
   const OriginalXHR = win.XMLHttpRequest;
 

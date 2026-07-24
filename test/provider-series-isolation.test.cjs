@@ -204,15 +204,17 @@ test('Videoland uses extraTitle and removes its episode-number prefix for TVDB m
   assert.equal(videoland.state.allItems[0]._episodeTitle, 'Green Birds');
 });
 
-test('Prime Video keeps the series id in its ASIN cache and on extracted timestamps', () => {
-  const episodeInfo = {
+test('Prime Video keeps the series id in its title cache and on extracted timestamps', () => {
+  const player = {
+    offsetWidth: 100,
+    offsetHeight: 100,
     textContent: 'S1 E1 - Episode one',
+    querySelectorAll: () => [],
     querySelector: () => ({ textContent: 'Episode one' }),
   };
   const document = {
     title: 'Prime Video: Alpha Season 1',
-    getElementById: () => ({ offsetWidth: 100, offsetHeight: 100 }),
-    querySelector: () => episodeInfo,
+    getElementById: () => player,
   };
   const prime = loadExtractor('src/providers/prime-video/extractor.js', 'processPrimeVideoMetadata', { document });
   prime.state.imdbIdsByShowId = { Alpha: 'tt500', Beta: 'tt600' };
@@ -231,8 +233,8 @@ test('Prime Video keeps the series id in its ASIN cache and on extracted timesta
     ['Beta', 'tt600'],
   ]);
   assert.deepEqual(plain(prime.catalogs.map(catalog => catalog.showId)), ['Alpha', 'Beta']);
-  assert.equal(prime.state.asinMap.get('ALPHA00001').showId, 'Alpha');
-  assert.equal(prime.state.asinMap.get('BETA000001').showId, 'Beta');
+  assert.equal(prime.state.primeVideoTitleMap.get('ALPHA00001').showId, 'Alpha');
+  assert.equal(prime.state.primeVideoTitleMap.get('BETA000001').showId, 'Beta');
 });
 
 test('Prime Video prefers response episode metadata while the player DOM is stale', () => {
