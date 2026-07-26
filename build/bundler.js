@@ -19,6 +19,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @match        https://www.primevideo.com/*
 // @match        https://www.amazon.*/gp/video/*
 // @match        https://*.primevideo.com/*
+// @match        https://tv.apple.com/*
 // @match        https://www.videoland.com/*
 // @match        https://videoland.com/*
 // @match        https://v2.videoland.com/*
@@ -119,6 +120,11 @@ function bundle() {
       name: 'prime-video',
       condition: "location.hostname === 'primevideo.com' || location.hostname.endsWith('.primevideo.com') || (/^www\\.amazon\\./i.test(location.hostname) && location.pathname.startsWith('/gp/video/'))",
       files: ['providers/prime-video/extractor.js', 'providers/prime-video/index.js'],
+    },
+    {
+      name: 'apple-tv',
+      condition: "location.hostname === 'tv.apple.com'",
+      files: ['providers/apple-tv/extractor.js', 'providers/apple-tv/index.js'],
     },
     {
       name: 'videoland',
