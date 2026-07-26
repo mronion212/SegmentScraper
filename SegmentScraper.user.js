@@ -657,13 +657,15 @@ function normalizeProviderEpisodes(episodes) {
     const number = Number(episode.episode);
     if (!Number.isInteger(season) || !Number.isInteger(number) || season < 0 || number < 1) continue;
     const key = episode.providerId ? `id:${episode.providerId}` : `number:${season}:${number}`;
-    if (!unique.has(key)) unique.set(key, {
+    const normalized = {
       providerId: episode.providerId == null ? '' : String(episode.providerId),
       season,
       episode: number,
       title: String(episode.title || '').trim(),
       isSpecial: season === 0 || episode.isSpecial === true,
-    });
+    };
+    if (!unique.has(key)) unique.set(key, normalized);
+    else if (!unique.get(key).title && normalized.title) unique.get(key).title = normalized.title;
   }
   return [...unique.values()].sort((a, b) => a.season - b.season || a.episode - b.episode);
 }
@@ -2690,6 +2692,7 @@ const PRIME_VIDEO_MAX_POLL_ATTEMPTS = 40;
 const PRIME_VIDEO_SELECTION_TTL_MS = 60000;
 const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 1000;
 const PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS = 500;
+const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set(['SKIP_RECAP', 'SKIP_INTRO', 'END_CREDITS', 'NEXT_UP']);
 
 function isPrimeVideoTitleId(value) {
   return typeof value === 'string' && PRIME_VIDEO_ID_PATTERN.test(value);
@@ -2699,6 +2702,11 @@ function ensurePrimeVideoState() {
   if (!(state.primeVideoTitleMap instanceof Map)) state.primeVideoTitleMap = new Map();
   if (!(state.primeVideoPendingByTitleId instanceof Map)) state.primeVideoPendingByTitleId = new Map();
   if (!(state.primeVideoDetailMap instanceof Map)) state.primeVideoDetailMap = new Map();
+  if (!(state.primeVideoPlaybackTitleByDetailId instanceof Map)) state.primeVideoPlaybackTitleByDetailId = new Map();
+  if (!(state.primeVideoCatalogByShowId instanceof Map)) state.primeVideoCatalogByShowId = new Map();
+  if (!(state.primeVideoMetadataByTitleId instanceof Map)) state.primeVideoMetadataByTitleId = new Map();
+  if (!(state.primeVideoEpisodeTitleByTitleId instanceof Map)) state.primeVideoEpisodeTitleByTitleId = new Map();
+  if (!(state.primeVideoFetchedSeasonCatalogUrls instanceof Set)) state.primeVideoFetchedSeasonCatalogUrls = new Set();
   if (!(state.primeVideoPollingTitleIds instanceof Set)) state.primeVideoPollingTitleIds = new Set();
   if (!(state.primeVideoPendingOutroTitleIds instanceof Set)) state.primeVideoPendingOutroTitleIds = new Set();
   if (!(state.primeVideoSegmentBatches instanceof Map)) state.primeVideoSegmentBatches = new Map();
@@ -2790,6 +2798,42 @@ function findPrimeVideoEpisodeMetadata(root) {
   walk(root);
   candidates.sort((a, b) => b.score - a.score);
   return candidates[0] || null;
+}
+
+function findPrimeVideoEpisodeTitle(root, expectedShowTitle = '') {
+  const candidates = [];
+  const visited = new WeakSet();
+  const normalizedShowTitle = String(expectedShowTitle || '').trim().toLowerCase();
+
+  function walk(node, depth = 0, path = '') {
+    if (!node || typeof node !== 'object' || depth > 8 || visited.has(node)) return;
+    visited.add(node);
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => walk(item, depth + 1, `${path}[${index}]`));
+      return;
+    }
+
+    const contentType = String(node.contentType || node.type || node.titleType || '').toUpperCase();
+    const episodeContext = contentType === 'EPISODE' ||
+      coercePrimeVideoInteger(node.episodeNumber || node.episodeSequenceNumber) != null;
+    for (const key of ['episodeTitle', 'displayTitle', 'title', 'name']) {
+      const title = typeof node[key] === 'string' ? node[key].trim() : '';
+      if (!title || title.length > 300 || title.toLowerCase() === normalizedShowTitle) continue;
+      let score = key === 'episodeTitle' ? 20 : 0;
+      if (episodeContext) score += 12;
+      if (/catalogMetadata\.catalog|episode/i.test(path)) score += 6;
+      if (key === 'displayTitle') score += 2;
+      candidates.push({ title, score });
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (value && typeof value === 'object') walk(value, depth + 1, path ? `${path}.${key}` : key);
+    }
+  }
+
+  walk(root);
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0]?.title || '';
 }
 
 function parsePrimeVideoEpisodeText(text) {
@@ -2922,6 +2966,90 @@ function readCurrentPrimeVideoDetailId() {
   return readPrimeVideoDetailId(location.href || location.pathname);
 }
 
+function refreshPrimeVideoEpisodeTitle(showId, season, episode, episodeTitle) {
+  if (!episodeTitle) return;
+  for (const snapshot of state.primeVideoTitleMap.values()) {
+    if (snapshot.showId === showId && snapshot.season === season && snapshot.episode === episode) {
+      snapshot.episodeTitle = episodeTitle;
+    }
+  }
+  for (const item of state.allItems) {
+    if (item._showId === showId && item.season === season && item.episode === episode) {
+      item._episodeTitle = episodeTitle;
+    }
+  }
+  for (const batch of state.primeVideoSegmentBatches.values()) {
+    if (batch.showId !== showId || batch.season !== season || batch.episode !== episode) continue;
+    batch.episodeTitle = episodeTitle;
+    batch.items.forEach(item => { item._episodeTitle = episodeTitle; });
+  }
+  if (state.primeVideoActiveEpisode?.showId === showId &&
+      state.primeVideoActiveEpisode.season === season && state.primeVideoActiveEpisode.episode === episode) {
+    state.primeVideoActiveEpisode.episodeTitle = episodeTitle;
+  }
+}
+
+function settlePrimeVideoPlaybackFallbacks(titleId) {
+  const currentDetailId = readCurrentPrimeVideoDetailId();
+  if (currentDetailId && state.primeVideoDetailMap.has(currentDetailId) &&
+      !state.primeVideoPlaybackTitleByDetailId.has(currentDetailId)) {
+    state.primeVideoPlaybackTitleByDetailId.set(currentDetailId, titleId);
+  }
+
+  if (state.primeVideoSelectedEpisode && state.primeVideoSelectedEpisode.resolvedTitleId == null) {
+    state.primeVideoSelectedEpisode.resolvedTitleId = titleId;
+  }
+}
+
+function setPrimeVideoActiveEpisode(snapshot) {
+  const current = state.primeVideoActiveEpisode;
+  if (current?.showId === snapshot.showId) {
+    const currentPosition = current.season * 100000 + current.episode;
+    const nextPosition = snapshot.season * 100000 + snapshot.episode;
+    if (nextPosition < currentPosition) return;
+  }
+  state.primeVideoActiveEpisode = {
+    season: snapshot.season,
+    episode: snapshot.episode,
+    episodeTitle: snapshot.episodeTitle || '',
+    showId: snapshot.showId,
+  };
+}
+
+function hasPrimeVideoSegmentEvents(data) {
+  const events = data?.transitionTimecodes?.result?.events;
+  return Array.isArray(events) && events.some(event => PRIME_VIDEO_SUPPORTED_EVENT_TYPES.has(event?.eventType));
+}
+
+function inferNextPrimeVideoEpisode() {
+  const active = state.primeVideoActiveEpisode;
+  if (!active?.showId || active.season == null || active.episode == null) return null;
+  const rawPageTitle = readPrimeVideoSeriesTitle(document) || String(document.title || '')
+    .replace(/^Prime Video[:\-]\s*/i, '')
+    .replace(/\s*(?:-|\u2013)?\s*(?:S|SEASON|SEIZOEN|SAISON|STAFFEL|TEMPORADA|STAGIONE)\s*\d+\s*$/i, '')
+    .trim();
+  if (rawPageTitle && rawPageTitle !== active.showId) return null;
+
+  const seasons = state.primeVideoCatalogByShowId.get(active.showId);
+  const currentSeason = seasons?.get(active.season);
+  const lastCatalogEpisode = currentSeason?.size ? Math.max(...currentSeason.keys()) : null;
+  let season = active.season;
+  let episode = active.episode + 1;
+  if (lastCatalogEpisode != null && active.episode >= lastCatalogEpisode) {
+    season++;
+    episode = 1;
+  }
+
+  const catalogSnapshot = seasons?.get(season)?.get(episode);
+  return {
+    season,
+    episode,
+    episodeTitle: catalogSnapshot?.episodeTitle || '',
+    showId: active.showId,
+    seriesTitle: active.showId,
+  };
+}
+
 function rememberPrimeVideoEpisodeSelection(card, root = document) {
   ensurePrimeVideoState();
   const season = readPrimeVideoSelectedSeason(root);
@@ -2953,6 +3081,16 @@ function scanPrimeVideoEpisodeCatalog(root = document) {
 
   const showId = updatePrimeVideoTitle(seriesTitle);
   const cards = root.querySelectorAll?.(PRIME_VIDEO_CARD_SELECTOR) || [];
+  let seasons = state.primeVideoCatalogByShowId.get(showId);
+  if (!seasons) {
+    seasons = new Map();
+    state.primeVideoCatalogByShowId.set(showId, seasons);
+  }
+  let seasonCatalog = seasons.get(season);
+  if (!seasonCatalog) {
+    seasonCatalog = new Map();
+    seasons.set(season, seasonCatalog);
+  }
   const seen = new Set();
   let found = 0;
 
@@ -2963,13 +3101,64 @@ function scanPrimeVideoEpisodeCatalog(root = document) {
     seen.add(titleId);
 
     const snapshot = { season, ...cardEpisode, showId };
+    const collision = findPrimeVideoEpisodeCollision(titleId, showId, season, cardEpisode.episode);
     state.primeVideoTitleMap.set(titleId, snapshot);
+    seasonCatalog.set(cardEpisode.episode, snapshot);
+    refreshPrimeVideoEpisodeTitle(showId, season, cardEpisode.episode, cardEpisode.episodeTitle);
     const detailId = readPrimeVideoCardDetailId(card);
     if (detailId) state.primeVideoDetailMap.set(detailId, { ...snapshot, seriesTitle });
-    recordProviderEpisode({ providerId: titleId, season, episode: cardEpisode.episode, title: cardEpisode.episodeTitle }, showId);
+    if (!collision) {
+      recordProviderEpisode({ providerId: titleId, season, episode: cardEpisode.episode, title: cardEpisode.episodeTitle }, showId);
+    }
     found++;
   }
   return found;
+}
+
+async function preloadPrimeVideoSeasonCatalogs(root = document, options = {}) {
+  ensurePrimeVideoState();
+  const baseUrl = root.location?.href || (typeof location !== 'undefined' ? location.href : '');
+  if (!baseUrl) return 0;
+  const currentDetailId = readPrimeVideoDetailId(baseUrl);
+  const links = root.querySelectorAll?.('a[href*="atv_dp_season_select_s"]') || [];
+  const fetchImpl = options.fetchImpl || ((...args) => fetch(...args));
+  const parseHtml = options.parseHtml || (html => new DOMParser().parseFromString(html, 'text/html'));
+  let total = 0;
+
+  await Promise.all([...links].map(async link => {
+    const href = link.getAttribute?.('href') || '';
+    if (!href) return;
+    let url;
+    try {
+      url = new URL(href, baseUrl);
+      if (url.origin !== new URL(baseUrl).origin) return;
+    } catch (_) {
+      return;
+    }
+
+    const urlKey = url.href;
+    if (state.primeVideoFetchedSeasonCatalogUrls.has(urlKey)) return;
+    state.primeVideoFetchedSeasonCatalogUrls.add(urlKey);
+    if (readPrimeVideoDetailId(urlKey) === currentDetailId) return;
+
+    try {
+      const response = await fetchImpl(urlKey, { credentials: 'same-origin' });
+      if (!response?.ok) throw new Error(`HTTP ${response?.status || 'error'}`);
+      const seasonDocument = parseHtml(await response.text());
+      const found = scanPrimeVideoEpisodeCatalog(seasonDocument);
+      total += found;
+      if (found) {
+        console.info('[PVE] Preloaded Prime Video season catalogue:', {
+          url: urlKey,
+          episodes: found,
+        });
+      }
+    } catch (error) {
+      state.primeVideoFetchedSeasonCatalogUrls.delete(urlKey);
+      console.warn('[PVE] Could not preload season catalogue:', urlKey, error);
+    }
+  }));
+  return total;
 }
 
 function findPrimeVideoEpisodeCollision(titleId, showId, season, episode) {
@@ -3220,7 +3409,10 @@ function commitPrimeVideoEpisode(titleId, snapshot, { allowNumberReuse = false }
   if (collision && !allowNumberReuse) return false;
 
   const episodeTitle = snapshot.episodeTitle || '';
-  state.primeVideoTitleMap.set(titleId, { season: snapshot.season, episode: snapshot.episode, episodeTitle, showId });
+  const resolvedSnapshot = { season: snapshot.season, episode: snapshot.episode, episodeTitle, showId };
+  state.primeVideoTitleMap.set(titleId, resolvedSnapshot);
+  setPrimeVideoActiveEpisode(resolvedSnapshot);
+  settlePrimeVideoPlaybackFallbacks(titleId);
   state.primeVideoPollingTitleIds.delete(titleId);
   if (!collision) {
     recordProviderEpisode({ providerId: titleId, season: snapshot.season, episode: snapshot.episode, title: episodeTitle }, showId);
@@ -3249,24 +3441,48 @@ function processPrimeVideoMetadata(data, bodyText, url) {
   ensurePrimeVideoState();
   const titleId = extractPrimeVideoTitleId(bodyText, url);
   if (!titleId) return;
+  const responseMetadata = findPrimeVideoEpisodeMetadata(data);
+  const expectedShowTitle = responseMetadata?.seriesTitle || state.showId || readPrimeVideoSeriesTitle(document);
+  const responseEpisodeTitle = responseMetadata?.episodeTitle || findPrimeVideoEpisodeTitle(data, expectedShowTitle);
+  if (responseMetadata) {
+    state.primeVideoMetadataByTitleId.set(titleId, { ...responseMetadata, episodeTitle: responseEpisodeTitle });
+  }
+  if (responseEpisodeTitle) {
+    state.primeVideoEpisodeTitleByTitleId.set(titleId, responseEpisodeTitle);
+    const mapped = state.primeVideoTitleMap.get(titleId);
+    if (mapped) {
+      refreshPrimeVideoEpisodeTitle(mapped.showId, mapped.season, mapped.episode, responseEpisodeTitle);
+      recordProviderEpisode({
+        providerId: titleId,
+        season: mapped.season,
+        episode: mapped.episode,
+        title: responseEpisodeTitle,
+      }, mapped.showId);
+    }
+  }
+  if (!hasPrimeVideoSegmentEvents(data)) return;
   if (state.primeVideoTitleMap.has(titleId)) {
     const { season, episode, episodeTitle, showId } = state.primeVideoTitleMap.get(titleId);
+    setPrimeVideoActiveEpisode({ season, episode, episodeTitle, showId });
+    settlePrimeVideoPlaybackFallbacks(titleId);
     finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle, showId);
     return;
   }
   if (!state.primeVideoPendingByTitleId.has(titleId)) state.primeVideoPendingByTitleId.set(titleId, []);
   state.primeVideoPendingByTitleId.get(titleId).push(data);
-  const metadata = findPrimeVideoEpisodeMetadata(data);
+  const metadata = responseMetadata || state.primeVideoMetadataByTitleId.get(titleId);
   if (metadata) {
     commitPrimeVideoEpisode(titleId, {
       ...metadata,
+      episodeTitle: metadata.episodeTitle || state.primeVideoEpisodeTitleByTitleId.get(titleId) || '',
       title: metadata.seriesTitle || document.title,
     }, { allowNumberReuse: true });
     return;
   }
   const currentDetailId = readCurrentPrimeVideoDetailId();
   const detailSnapshot = currentDetailId && state.primeVideoDetailMap.get(currentDetailId);
-  if (detailSnapshot) {
+  const detailPlaybackTitleId = currentDetailId && state.primeVideoPlaybackTitleByDetailId.get(currentDetailId);
+  if (detailSnapshot && (!detailPlaybackTitleId || detailPlaybackTitleId === titleId)) {
     commitPrimeVideoEpisode(titleId, {
       ...detailSnapshot,
       title: detailSnapshot.seriesTitle || document.title,
@@ -3274,11 +3490,24 @@ function processPrimeVideoMetadata(data, bodyText, url) {
     return;
   }
   const selectedSnapshot = state.primeVideoSelectedEpisode;
-  if (selectedSnapshot && Date.now() - selectedSnapshot.selectedAt < PRIME_VIDEO_SELECTION_TTL_MS) {
+  const selectionIsCurrent = selectedSnapshot && selectedSnapshot.resolvedTitleId == null &&
+    Date.now() - selectedSnapshot.selectedAt < PRIME_VIDEO_SELECTION_TTL_MS;
+  if (selectionIsCurrent) {
     commitPrimeVideoEpisode(titleId, {
       ...selectedSnapshot,
       title: selectedSnapshot.seriesTitle || document.title,
     }, { allowNumberReuse: true });
+    return;
+  }
+  const inferredSnapshot = inferNextPrimeVideoEpisode();
+  if (inferredSnapshot) {
+    inferredSnapshot.episodeTitle ||= state.primeVideoEpisodeTitleByTitleId.get(titleId) || '';
+    console.info('[PVE] Inferred next episode from the scanned season boundary:', {
+      titleId,
+      season: inferredSnapshot.season,
+      episode: inferredSnapshot.episode,
+    });
+    commitPrimeVideoEpisode(titleId, inferredSnapshot, { allowNumberReuse: true });
     return;
   }
   if (!state.primeVideoPollingTitleIds.has(titleId)) {
@@ -3290,11 +3519,27 @@ function processPrimeVideoMetadata(data, bodyText, url) {
 function setupPrimeVideoInterception() {
   ensurePrimeVideoState();
   const scanCatalog = () => {
-    try { scanPrimeVideoEpisodeCatalog(); }
+    try {
+      scanPrimeVideoEpisodeCatalog();
+      preloadPrimeVideoSeasonCatalogs();
+    }
     catch (error) { console.warn('[PVE] Failed to scan episode catalogue:', error); }
   };
   scanCatalog();
   setInterval(scanCatalog, PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS);
+  if (typeof MutationObserver === 'function') {
+    let scanTimer = null;
+    const observer = new MutationObserver(() => {
+      if (scanTimer != null) clearTimeout(scanTimer);
+      scanTimer = setTimeout(scanCatalog, PRIME_VIDEO_POLL_INTERVAL_MS);
+    });
+    observer.observe(document.documentElement || document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['aria-label'],
+    });
+  }
   document.addEventListener('click', event => {
     const card = event.target?.closest?.(PRIME_VIDEO_CARD_SELECTOR);
     if (card) rememberPrimeVideoEpisodeSelection(card);

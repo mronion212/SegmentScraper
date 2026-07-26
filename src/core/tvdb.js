@@ -201,13 +201,15 @@ function normalizeProviderEpisodes(episodes) {
     const number = Number(episode.episode);
     if (!Number.isInteger(season) || !Number.isInteger(number) || season < 0 || number < 1) continue;
     const key = episode.providerId ? `id:${episode.providerId}` : `number:${season}:${number}`;
-    if (!unique.has(key)) unique.set(key, {
+    const normalized = {
       providerId: episode.providerId == null ? '' : String(episode.providerId),
       season,
       episode: number,
       title: String(episode.title || '').trim(),
       isSpecial: season === 0 || episode.isSpecial === true,
-    });
+    };
+    if (!unique.has(key)) unique.set(key, normalized);
+    else if (!unique.get(key).title && normalized.title) unique.get(key).title = normalized.title;
   }
   return [...unique.values()].sort((a, b) => a.season - b.season || a.episode - b.episode);
 }
