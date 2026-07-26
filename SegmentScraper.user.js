@@ -2689,6 +2689,7 @@ const PRIME_VIDEO_POLL_INTERVAL_MS = 250;
 const PRIME_VIDEO_MAX_POLL_ATTEMPTS = 40;
 const PRIME_VIDEO_SELECTION_TTL_MS = 60000;
 const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 1000;
+const PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS = 500;
 
 function isPrimeVideoTitleId(value) {
   return typeof value === 'string' && PRIME_VIDEO_ID_PATTERN.test(value);
@@ -2700,6 +2701,7 @@ function ensurePrimeVideoState() {
   if (!(state.primeVideoDetailMap instanceof Map)) state.primeVideoDetailMap = new Map();
   if (!(state.primeVideoPollingTitleIds instanceof Set)) state.primeVideoPollingTitleIds = new Set();
   if (!(state.primeVideoPendingOutroTitleIds instanceof Set)) state.primeVideoPendingOutroTitleIds = new Set();
+  if (!(state.primeVideoSegmentBatches instanceof Map)) state.primeVideoSegmentBatches = new Map();
 }
 
 function findPrimeVideoTitleIdInObject(obj, depth = 0) {
@@ -3081,6 +3083,36 @@ function logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle,
   });
 }
 
+function flushPrimeVideoSegmentBatch(titleId) {
+  const batch = state.primeVideoSegmentBatches.get(titleId);
+  if (!batch) return;
+  state.primeVideoSegmentBatches.delete(titleId);
+  const items = batch.items.filter(item => !state.allItems.some(existing => existing._eid === item._eid));
+  logPrimeVideoTimestamps(titleId, batch.showId, batch.season, batch.episode, batch.episodeTitle, items);
+  recordExtractedSegments(items);
+}
+
+function queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle, items, { waitForOutro = false, outroResolved = false } = {}) {
+  let batch = state.primeVideoSegmentBatches.get(titleId);
+  if (!batch) {
+    batch = { titleId, showId, season, episode, episodeTitle, items: [], timer: null, waitingForOutro: false };
+    state.primeVideoSegmentBatches.set(titleId, batch);
+  }
+  for (const item of items) {
+    if (!batch.items.some(existing => existing._eid === item._eid)) batch.items.push(item);
+  }
+  if (waitForOutro) batch.waitingForOutro = true;
+  if (outroResolved) batch.waitingForOutro = false;
+  if (batch.waitingForOutro || !batch.items.length) return;
+
+  if (batch.timer != null && typeof clearTimeout === 'function') clearTimeout(batch.timer);
+  if (typeof window === 'undefined') {
+    flushPrimeVideoSegmentBatch(titleId);
+    return;
+  }
+  batch.timer = setTimeout(() => flushPrimeVideoSegmentBatch(titleId), PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS);
+}
+
 function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episode, episodeTitle, segmentType, startTimeMs, endTimeMs) {
   const episodeId = `${titleId}_${segmentType}`;
   const alreadyCaptured = item => item._eid === episodeId || (
@@ -3110,13 +3142,13 @@ function pollPrimeVideoOutroDuration(titleId, showId, season, episode, episodeTi
     const extractedItems = [];
     appendPrimeVideoSegment(extractedItems, titleId, showId, season, episode, episodeTitle, 'outro', startTimeMs, endTimeMs);
     state.primeVideoPendingOutroTitleIds.delete(titleId);
-    logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, extractedItems);
-    recordExtractedSegments(extractedItems);
+    queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle, extractedItems, { outroResolved: true });
     return;
   }
   if (attempt >= PRIME_VIDEO_MAX_POLL_ATTEMPTS) {
     state.primeVideoPendingOutroTitleIds.delete(titleId);
     console.warn('[PVE] NEXT_UP had a start time, but no episode duration could be resolved:', titleId);
+    queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle, [], { outroResolved: true });
     return;
   }
   setTimeout(
@@ -3172,13 +3204,14 @@ function finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle =
       .find(value => value != null);
     if (startTimeMs != null && !state.primeVideoPendingOutroTitleIds.has(titleId)) {
       state.primeVideoPendingOutroTitleIds.add(titleId);
+      queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle, extractedItems, { waitForOutro: true });
       pollPrimeVideoOutroDuration(titleId, showId, season, episode, episodeTitle, startTimeMs);
+      return;
     } else if (startTimeMs == null) {
       console.warn('[PVE] Prime returned an outro event without a usable start time:', outroCandidates);
     }
   }
-  logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, extractedItems);
-  recordExtractedSegments(extractedItems);
+  queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle, extractedItems);
 }
 
 function commitPrimeVideoEpisode(titleId, snapshot, { allowNumberReuse = false } = {}) {

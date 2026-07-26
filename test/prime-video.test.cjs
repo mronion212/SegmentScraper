@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 const plain = value => JSON.parse(JSON.stringify(value));
 
-function loadPrimeVideoExtractor(document) {
+function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
   const state = {
     allItems: [],
     imdbId: '',
@@ -17,6 +17,8 @@ function loadPrimeVideoExtractor(document) {
   };
   const detectedShows = [];
   const logs = [];
+  const timers = new Map();
+  let nextTimerId = 1;
   let source = fs.readFileSync(
     path.join(__dirname, '..', 'src', 'providers', 'prime-video', 'extractor.js'),
     'utf8'
@@ -25,7 +27,7 @@ function loadPrimeVideoExtractor(document) {
     .replace(/\bexport\s+(?=(?:async\s+)?function\b|const\b|let\b|var\b|class\b)/g, '');
   source += '\nglobalThis.primeExports = { extractPrimeVideoTitleId, processPrimeVideoMetadata, readPrimeVideoPlayerSnapshot, rememberPrimeVideoEpisodeSelection, scanPrimeVideoEpisodeCatalog };';
 
-  const context = vm.createContext({
+  const contextValues = {
     state,
     document,
     location: document.location,
@@ -50,10 +52,30 @@ function loadPrimeVideoExtractor(document) {
         state.providerEpisodes.push(episode);
       }
     },
-    setTimeout() {},
-  });
+    setTimeout(callback) {
+      if (!deferTimers) return 0;
+      const id = nextTimerId++;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+  };
+  if (deferTimers) contextValues.window = {};
+  const context = vm.createContext(contextValues);
   vm.runInContext(source, context, { filename: 'prime-video-extractor.js' });
-  return { ...context.primeExports, state, detectedShows, logs };
+  return {
+    ...context.primeExports,
+    state,
+    detectedShows,
+    logs,
+    runTimers() {
+      const callbacks = [...timers.values()];
+      timers.clear();
+      callbacks.forEach(callback => callback());
+    },
+  };
 }
 
 function attributeElement(attributes = {}, extras = {}) {
@@ -438,4 +460,34 @@ test('prefers END_CREDITS over NEXT_UP when Prime supplies both outro timecodes'
     start: item.start_sec,
     end: item.end_sec,
   }))), [{ type: 'outro', start: 2900, end: 3156 }]);
+});
+
+test('batches Prime segments arriving in separate playback responses', () => {
+  const { document, ids } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document, { deferTimers: true });
+  prime.scanPrimeVideoEpisodeCatalog();
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: { events: [{ eventType: 'NEXT_UP', startTimeMs: 3229000, endTimeMs: 3701000 }] },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`);
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: { events: [{ eventType: 'SKIP_RECAP', startTimeMs: 0, endTimeMs: 73000 }] },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`);
+
+  assert.equal(prime.state.allItems.length, 0);
+  prime.runTimers();
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    type: item.segment_type,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [
+    { type: 'outro', start: 3229, end: 3701 },
+    { type: 'recap', start: 0, end: 73 },
+  ]);
+  assert.equal(prime.logs.length, 1);
+  assert.equal(prime.logs[0][1].segments.length, 2);
 });
