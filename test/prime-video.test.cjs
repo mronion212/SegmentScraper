@@ -317,3 +317,125 @@ test('maps a playable GTI through the episode card selected immediately before p
     title: item._episodeTitle,
   }))), [{ type: 'recap', season: 1, episode: 4, title: 'Aflevering 4' }]);
 });
+
+test('uses the NEXT_UP response timecode as an outro without playing to the end', () => {
+  const { document, ids } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document);
+  prime.scanPrimeVideoEpisodeCatalog();
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: {
+        events: [
+          { eventType: 'SKIP_INTRO', startTimeMs: 15000, endTimeMs: 75000 },
+          { eventType: 'NEXT_UP', startTimeMs: '2905250', endTimeMs: '3156000' },
+        ],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    type: item.segment_type,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [
+    { type: 'intro', start: 15, end: 75 },
+    { type: 'outro', start: 2905.25, end: 3156 },
+  ]);
+});
+
+test('uses response runtime when NEXT_UP only supplies its start time', () => {
+  const { document, ids } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document);
+  prime.scanPrimeVideoEpisodeCatalog();
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { playback: { runtimeSeconds: '3156' } },
+    transitionTimecodes: {
+      result: {
+        events: [{ eventType: 'NEXT_UP', startTimeMs: '2905250' }],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    type: item.segment_type,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [{ type: 'outro', start: 2905.25, end: 3156 }]);
+});
+
+test('uses the already-known media duration when NEXT_UP omits its end time', () => {
+  const { document, ids } = primeDetailDocument();
+  const originalQuerySelectorAll = document.querySelectorAll.bind(document);
+  document.querySelectorAll = css => css === '#dv-web-player video, [id^="dv-web-player"] video, video'
+    ? [{ duration: 3156 }]
+    : originalQuerySelectorAll(css);
+  const prime = loadPrimeVideoExtractor(document);
+  prime.scanPrimeVideoEpisodeCatalog();
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: {
+        events: [{ eventType: 'NEXT_UP', startTimeMs: 2905250 }],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    type: item.segment_type,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [{ type: 'outro', start: 2905.25, end: 3156 }]);
+});
+
+test('derives exact duration from Prime elapsed and remaining player clocks', () => {
+  const { document, ids } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document);
+  prime.scanPrimeVideoEpisodeCatalog();
+  const originalQuerySelectorAll = document.querySelectorAll.bind(document);
+  document.querySelectorAll = css => {
+    if (css === '#dv-web-player video, [id^="dv-web-player"] video, video') return [];
+    if (css.includes('.atvwebplayersdk-timeindicator-text')) {
+      return [attributeElement({ 'aria-label': '' }, { textContent: '48:25 / 04:11' })];
+    }
+    return originalQuerySelectorAll(css);
+  };
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: {
+        events: [{ eventType: 'NEXT_UP', startTimeMs: 2905250 }],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    type: item.segment_type,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [{ type: 'outro', start: 2905.25, end: 3156 }]);
+});
+
+test('prefers END_CREDITS over NEXT_UP when Prime supplies both outro timecodes', () => {
+  const { document, ids } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document);
+  prime.scanPrimeVideoEpisodeCatalog();
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: {
+        events: [
+          { eventType: 'NEXT_UP', startTimeMs: 2920000, endTimeMs: 3156000 },
+          { eventType: 'END_CREDITS', startTimeMs: 2900000, endTimeMs: 3156000 },
+        ],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    type: item.segment_type,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [{ type: 'outro', start: 2900, end: 3156 }]);
+});
