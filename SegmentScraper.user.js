@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         SegmentScraper v1.4.3 - Multi-Provider Timestamps Extractor
-// @version      1.4.3
+// @name         SegmentScraper v1.5.5 - Multi-Provider Timestamps Extractor
+// @version      1.5.5
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
