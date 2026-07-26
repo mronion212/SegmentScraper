@@ -9,8 +9,8 @@ const path = require('path');
 
 // Userscript header template
 const USERSCRIPT_HEADER = `// ==UserScript==
-// @name         SegmentScraper v1.5.5 - Multi-Provider Timestamps Extractor
-// @version      1.5.5
+// @name         SegmentScraper v1.5.6 - Multi-Provider Timestamps Extractor
+// @version      1.5.6
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
