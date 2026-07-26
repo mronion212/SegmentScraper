@@ -25,7 +25,7 @@ function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
   )
     .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?function\b|const\b|let\b|var\b|class\b)/g, '');
-  source += '\nglobalThis.primeExports = { extractPrimeVideoTitleId, processPrimeVideoMetadata, readPrimeVideoPlayerSnapshot, rememberPrimeVideoEpisodeSelection, scanPrimeVideoEpisodeCatalog };';
+  source += '\nglobalThis.primeExports = { extractPrimeVideoTitleId, processPrimeVideoMetadata, readPrimeVideoPlayerSnapshot, rememberPrimeVideoEpisodeSelection, scanPrimeVideoEpisodeCatalog, preloadPrimeVideoSeasonCatalogs };';
 
   const contextValues = {
     state,
@@ -61,6 +61,7 @@ function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
     clearTimeout(id) {
       timers.delete(id);
     },
+    URL,
   };
   if (deferTimers) contextValues.window = {};
   const context = vm.createContext(contextValues);
@@ -168,6 +169,60 @@ test('caches current Prime episode cards before playback', () => {
     { providerId: ids[1], season: 2, episode: 4, title: 'The Choice' },
   ]);
   assert.deepEqual(plain(prime.detectedShows), [{ title: 'Example Series', showId: 'Example Series' }]);
+});
+
+test('preloads episode titles from every season link with the same card scanner', async () => {
+  const { document } = primeDetailDocument();
+  document.location = {
+    href: 'https://www.primevideo.com/region/eu/detail/0RTZ57DQ6PBHH29UN5JS7U7CW4?ref_=atv_dp_season_select_s1',
+  };
+  const seasonTwoHref = '/-/nl/region/eu/detail/0PW27PB7O60V7NZOIXFYF68ZG8?ref_=atv_dp_season_select_s2';
+  const seasonLink = attributeElement({ href: seasonTwoHref });
+  const originalQuerySelectorAll = document.querySelectorAll.bind(document);
+  document.querySelectorAll = css => css === 'a[href*="atv_dp_season_select_s"]'
+    ? [seasonLink]
+    : originalQuerySelectorAll(css);
+
+  const seasonTwoIds = [
+    'amzn1.dv.gti.061bcbdc-706b-449f-9a7b-cfff8ce622fa',
+    'amzn1.dv.gti.24421417-1dc8-44a7-bcf8-1f3bcbf10b1c',
+  ];
+  const seasonTwoDocument = {
+    title: 'Prime Video: Example Series - Season 2',
+    querySelector(css) {
+      if (css === '#av-droplist-av-atf-season-selector') {
+        return attributeElement({ 'aria-label': 'Season selector. Season 2 is selected' });
+      }
+      if (css === 'main h1') return { textContent: 'Example Series' };
+      return null;
+    },
+    querySelectorAll() {
+      return [
+        episodeCard(1, 'ATM', seasonTwoIds[0]),
+        episodeCard(2, 'What Happens in Atlantic City', seasonTwoIds[1]),
+      ];
+    },
+  };
+  const requests = [];
+  const prime = loadPrimeVideoExtractor(document);
+
+  const found = await prime.preloadPrimeVideoSeasonCatalogs(document, {
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return { ok: true, text: async () => '<html></html>' };
+    },
+    parseHtml: () => seasonTwoDocument,
+  });
+
+  assert.equal(found, 2);
+  assert.deepEqual(plain(requests), [{
+    url: `https://www.primevideo.com${seasonTwoHref}`,
+    options: { credentials: 'same-origin' },
+  }]);
+  assert.deepEqual(plain(seasonTwoIds.map(id => prime.state.primeVideoTitleMap.get(id))), [
+    { season: 2, episode: 1, episodeTitle: 'ATM', showId: 'Example Series' },
+    { season: 2, episode: 2, episodeTitle: 'What Happens in Atlantic City', showId: 'Example Series' },
+  ]);
 });
 
 test('uses a cached GTI to attach playback timestamps to the right episode', () => {
@@ -338,6 +393,154 @@ test('maps a playable GTI through the episode card selected immediately before p
     episode: item.episode,
     title: item._episodeTitle,
   }))), [{ type: 'recap', season: 1, episode: 4, title: 'Aflevering 4' }]);
+});
+
+test('does not reuse stale click or detail metadata when autoplay crosses into a new season', () => {
+  const catalogId = 'amzn1.dv.gti.f86ceb23-af32-4492-a2b7-ca3f7acd56e2';
+  const firstPlaybackId = 'amzn1.dv.gti.b6b20f6f-f428-4a57-a606-e7918dde3bb5';
+  const secondPlaybackId = 'amzn1.dv.gti.20e0d618-3103-492b-81e4-7d5b0995f2a1';
+  const detailId = '0P65LWGA4TQ3YKUU0M0STU09PD';
+  const card = episodeCard(8, 'Season finale', catalogId, detailId);
+  const heading = {
+    textContent: 'Example Series',
+    querySelector() {
+      return null;
+    },
+  };
+  let playerText = 'S1 E8 - Season finale';
+  const player = {
+    offsetWidth: 1280,
+    offsetHeight: 720,
+    get textContent() {
+      return playerText;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    },
+  };
+  const document = {
+    title: 'Prime Video: Example Series - Season 1',
+    location: { href: `https://www.primevideo.com/region/eu/detail/${detailId}` },
+    querySelector(css) {
+      if (css === '#av-droplist-av-atf-season-selector') {
+        return attributeElement({ 'aria-label': 'Season selector. Season 1 is selected' });
+      }
+      if (css === 'main h1') return heading;
+      return null;
+    },
+    querySelectorAll(css) {
+      if (css === '[data-testid="episode-list-item"], li[id^="av-ep-episode-"]') return [card];
+      return [];
+    },
+    getElementById(id) {
+      return id === 'dv-web-player' ? player : null;
+    },
+  };
+  const prime = loadPrimeVideoExtractor(document, { deferTimers: true });
+  const payload = (startTimeMs, endTimeMs) => ({
+    transitionTimecodes: {
+      result: { events: [{ eventType: 'SKIP_INTRO', startTimeMs, endTimeMs }] },
+    },
+  });
+
+  prime.scanPrimeVideoEpisodeCatalog();
+  assert.equal(prime.rememberPrimeVideoEpisodeSelection(card), true);
+  prime.processPrimeVideoMetadata(
+    payload(1000, 11000),
+    '',
+    `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(firstPlaybackId)}`
+  );
+  prime.runTimers();
+
+  prime.processPrimeVideoMetadata(
+    payload(2000, 12000),
+    '',
+    `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(secondPlaybackId)}`
+  );
+  assert.equal(prime.state.allItems.length, 1);
+
+  playerText = 'S2 E1 - A new beginning';
+  document.title = 'Prime Video: Example Series - Season 2';
+  prime.runTimers();
+  prime.runTimers();
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    season: item.season,
+    episode: item.episode,
+    title: item._episodeTitle,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [
+    { season: 1, episode: 8, title: 'Season finale', start: 1, end: 11 },
+    { season: 2, episode: 1, title: '', start: 2, end: 12 },
+  ]);
+  assert.equal(prime.state.primeVideoTitleMap.get(secondPlaybackId).season, 2);
+  assert.equal(prime.state.primeVideoTitleMap.get(secondPlaybackId).episode, 1);
+});
+
+test('infers S02E01 after the last scanned episode and ignores non-segment season resources', () => {
+  const { document, ids } = primeDetailDocument();
+  const lastSeasonOneId = 'amzn1.dv.gti.434853c4-dd86-4b46-a02c-44a443cc5f51';
+  const seasonTwoEpisodeOneId = 'amzn1.dv.gti.061bcbdc-706b-449f-9a7b-cfff8ce622fa';
+  const seasonTwoEpisodeTwoId = 'amzn1.dv.gti.24421417-1dc8-44a7-bcf8-1f3bcbf10b1c';
+  const seasonResourceId = 'amzn1.dv.gti.d62095f9-f33c-429b-a8a6-fd74c0461704';
+  let selectedSeason = 1;
+  let cards = [episodeCard(7, 'Reacher Said Nothing', ids[0]), episodeCard(8, 'Pie', lastSeasonOneId)];
+  const originalQuerySelector = document.querySelector.bind(document);
+  document.querySelector = css => css === '#av-droplist-av-atf-season-selector'
+    ? attributeElement({ 'aria-label': `Season selector. Season ${selectedSeason} is selected` })
+    : originalQuerySelector(css);
+  document.querySelectorAll = css => css === '[data-testid="episode-list-item"], li[id^="av-ep-episode-"]'
+    ? cards
+    : [];
+  const prime = loadPrimeVideoExtractor(document);
+  prime.scanPrimeVideoEpisodeCatalog();
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: { result: { events: [{ eventType: 'END_CREDITS', startTimeMs: 3000000, endTimeMs: 3200000 }] } },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(lastSeasonOneId)}`);
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: { result: { events: [{ eventType: 'END_CREDITS', startTimeMs: 2400000, endTimeMs: 2600000 }] } },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`);
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { type: 'EPISODE', title: 'ATM' } },
+    transitionTimecodes: { result: { events: [] } },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(seasonTwoEpisodeOneId)}`);
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: { result: { events: [{ eventType: 'SKIP_RECAP', startTimeMs: 6000, endTimeMs: 68000 }] } },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(seasonTwoEpisodeOneId)}`);
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { title: 'Reacher Season 1' } },
+    transitionTimecodes: { result: { events: [] } },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(seasonResourceId)}`);
+
+  assert.deepEqual(plain(prime.state.primeVideoTitleMap.get(seasonTwoEpisodeOneId)), {
+    season: 2,
+    episode: 1,
+    episodeTitle: 'ATM',
+    showId: 'Example Series',
+  });
+  assert.equal(prime.state.primeVideoPendingByTitleId.has(seasonResourceId), false);
+  assert.equal(prime.state.primeVideoPollingTitleIds.has(seasonResourceId), false);
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: { result: { events: [{ eventType: 'SKIP_INTRO', startTimeMs: 10000, endTimeMs: 70000 }] } },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(seasonTwoEpisodeTwoId)}`);
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { type: 'EPISODE', title: 'What Happens in Atlantic City' } },
+    transitionTimecodes: { result: { events: [] } },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(seasonTwoEpisodeTwoId)}`);
+  assert.equal(prime.state.primeVideoTitleMap.get(seasonTwoEpisodeTwoId).episodeTitle, 'What Happens in Atlantic City');
+  assert.equal(prime.state.allItems.find(item => item._eid.startsWith(seasonTwoEpisodeTwoId))._episodeTitle, 'What Happens in Atlantic City');
+
+  selectedSeason = 2;
+  cards = [episodeCard(1, 'ATM', 'amzn1.dv.gti.aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')];
+  prime.scanPrimeVideoEpisodeCatalog();
+  assert.equal(prime.state.primeVideoTitleMap.get(seasonTwoEpisodeOneId).episodeTitle, 'ATM');
+  assert.equal(prime.state.allItems.find(item => item._eid.startsWith(seasonTwoEpisodeOneId))._episodeTitle, 'ATM');
 });
 
 test('uses the NEXT_UP response timecode as an outro without playing to the end', () => {
