@@ -4,6 +4,7 @@ import { state } from '../../core/state.js';
 import { createNormalizedSegment } from '../../normalization/segment-mapper.js';
 import { recordProviderEpisode } from '../../core/tvdb.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
+import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 const CRUNCHYROLL_SKIP_EVENTS_BASE = 'https://static.crunchyroll.com/skip-events/production';
 const CRUNCHYROLL_SCAN_INTERVAL_MS = 750;
@@ -169,6 +170,16 @@ export function processCrunchyrollEpisode(metadata, skipEvents = {}) {
   addCrunchyrollSegment(extractedItems, metadata, skipEvents, 'recap', skipEvents.recap);
   addCrunchyrollSegment(extractedItems, metadata, skipEvents, 'intro', skipEvents.intro);
   addCrunchyrollSegment(extractedItems, metadata, skipEvents, 'credits', skipEvents.credits);
+  logCapturedTimestamps({
+    prefix: 'CRE',
+    showTitle: metadata.seriesTitle,
+    season: metadata.season,
+    episode: metadata.episode,
+    episodeTitle: metadata.episodeTitle,
+    providerIdLabel: 'mediaId',
+    providerId: skipEvents.mediaId || metadata.providerId || metadata.watchId,
+    items: extractedItems,
+  });
   recordExtractedSegments(extractedItems);
   return extractedItems.length;
 }

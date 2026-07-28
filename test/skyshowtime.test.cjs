@@ -9,10 +9,11 @@ const plain = value => JSON.parse(JSON.stringify(value));
 function loadSkyShowtimeExtractor(globals = {}) {
   const state = { allItems: [], imdbId: '', imdbIdsByShowId: {}, showTitle: '', providerEpisodes: [] };
   const detectedShows = [];
-  let source = fs.readFileSync(
-    path.join(__dirname, '..', 'src', 'providers', 'skyshowtime', 'extractor.js'),
-    'utf8'
-  )
+  const logs = [];
+  let source = [
+    fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'skyshowtime', 'extractor.js'), 'utf8'),
+  ].join('\n')
     .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?function\b|const\b|let\b|var\b|class\b)/g, '');
   source += '\nglobalThis.skyExports = { findSkyShowtimeEpisodes, isSkyShowtimeCatalogueUrl, processSkyShowtimeMetadata, setupSkyShowtimeInterception };';
@@ -20,7 +21,7 @@ function loadSkyShowtimeExtractor(globals = {}) {
   const context = vm.createContext({
     state,
     detectedShows,
-    console: { info() {}, warn() {}, error() {} },
+    console: { info(...args) { logs.push(args); }, warn() {}, error() {} },
     handleDetectedShow(show) {
       detectedShows.push(show);
       state.showTitle = show.title;
@@ -34,7 +35,7 @@ function loadSkyShowtimeExtractor(globals = {}) {
     ...globals,
   });
   vm.runInContext(source, context, { filename: 'skyshowtime-extractor.js' });
-  return { ...context.skyExports, state, detectedShows };
+  return { ...context.skyExports, state, detectedShows, logs };
 }
 
 function cataloguePayload() {
@@ -129,6 +130,31 @@ test('maps SkyShowtime marker names and inherited season metadata', () => {
     { showId: 'series-123', type: 'outro', season: 2, episode: 3, start: 3500.123, end: 3600 },
     { showId: 'series-123', type: 'outro', season: 2, episode: 4, start: 117, end: 120 },
   ]);
+  assert.deepEqual(plain(sky.logs.slice(0, 2)), [
+    [
+      '[SSE] Captured timestamps · Example Series · S02E03',
+      {
+        title: 'Third Episode',
+        providerVariantId: 'episode-3',
+        segments: [
+          { type: 'recap', start: '00:00.000', end: '00:12.345', start_sec: 0, end_sec: 12.345 },
+          { type: 'intro', start: '00:12.345', end: '01:28.000', start_sec: 12.345, end_sec: 88 },
+          { type: 'outro', start: '58:20.123', end: '01:00:00.000', start_sec: 3500.123, end_sec: 3600 },
+        ],
+      },
+    ],
+    [
+      '[SSE] Captured timestamps · Example Series · S02E04',
+      {
+        title: 'Fourth Episode',
+        providerVariantId: 'episode-4',
+        segments: [
+          { type: 'outro', start: '01:57.000', end: '02:00.000', start_sec: 117, end_sec: 120 },
+        ],
+      },
+    ],
+  ]);
+  assert.deepEqual(plain(sky.logs[2]), ['[SSE] Captured 4 segment(s) from test-response.']);
 });
 
 test('deduplicates repeated catalogue responses per episode and segment type', () => {
@@ -136,6 +162,8 @@ test('deduplicates repeated catalogue responses per episode and segment type', (
   assert.equal(sky.processSkyShowtimeMetadata(cataloguePayload()), 4);
   assert.equal(sky.processSkyShowtimeMetadata(cataloguePayload()), 0);
   assert.equal(sky.state.allItems.length, 4);
+  assert.equal(sky.logs.filter(([message]) => message.includes('Captured timestamps')).length, 2);
+  assert.equal(sky.logs.length, 3);
 });
 
 test('matches only the SkyShowtime provider-series catalogue endpoint', () => {

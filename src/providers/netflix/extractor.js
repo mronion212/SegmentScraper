@@ -4,6 +4,7 @@ import { state } from '../../core/state.js';
 import { createNormalizedSegment } from '../../normalization/segment-mapper.js';
 import { setProviderEpisodeCatalog } from '../../core/tvdb.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
+import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 export const NETFLIX_TITLE_OVERRIDES = {
   '81748089': 'tt2431250',
@@ -86,10 +87,24 @@ export function processNetflixMetadata(data) {
         },
       ].filter(Boolean);
 
+      const episodeItems = [];
       for (const segment of segments) {
         const item = createNormalizedSegment({ ...common, ...segment });
-        if (item) extractedItems.push(item);
+        if (item) {
+          episodeItems.push(item);
+          extractedItems.push(item);
+        }
       }
+      logCapturedTimestamps({
+        prefix: 'NFE',
+        showTitle: video.title,
+        season: season.seq,
+        episode: episode.seq,
+        episodeTitle: common.episodeTitle,
+        providerIdLabel: 'episodeId',
+        providerId: episodeId,
+        items: episodeItems,
+      });
     }
   }
   recordExtractedSegments(extractedItems);

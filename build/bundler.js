@@ -105,6 +105,7 @@ function bundle() {
     'core/tvdb.js',
     'config/provider-config.js',
     'normalization/segment-mapper.js',
+    'providers/timestamp-logger.js',
     'ui/panel.js',
     'ui/button.js',
     'providers/bootstrap.js',

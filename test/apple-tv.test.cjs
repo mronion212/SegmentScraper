@@ -16,10 +16,10 @@ function loadAppleTvExtractor() {
   };
   const detectedShows = [];
   const logs = [];
-  let source = fs.readFileSync(
-    path.join(__dirname, '..', 'src', 'providers', 'apple-tv', 'extractor.js'),
-    'utf8'
-  )
+  let source = [
+    fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'apple-tv', 'extractor.js'), 'utf8'),
+  ].join('\n')
     .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?function\b|const\b|let\b|var\b|class\b)/g, '');
   source += '\nglobalThis.appleTvExports = { parseAppleTvHlsMetadata, extractAppleTvMarkers, processAppleTvMetadata, processAppleTvHlsManifest };';
