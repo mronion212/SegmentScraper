@@ -6,6 +6,7 @@
 import { state } from '../../core/state.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { recordProviderEpisode } from '../../core/tvdb.js';
+import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 const VIDEOLAND_LAYOUT_URL_MATCH = /\/layout(\?|$)/i;
 
@@ -166,6 +167,16 @@ export function processVideolandLayout(json) {
       end_sec: endSec,
     });
   }
+  logCapturedTimestamps({
+    prefix: 'VLE',
+    showTitle: title,
+    season,
+    episode,
+    episodeTitle,
+    providerIdLabel: 'clipId',
+    providerId: clipId,
+    items: extractedItems,
+  });
   recordExtractedSegments(extractedItems);
 }
 

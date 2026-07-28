@@ -16,7 +16,9 @@ SkyShowtime captures catalogue metadata automatically from page or worker networ
 
 Crunchyroll reads the current episode metadata from the watch page and maps its public recap, intro, and credits markers to recap, intro, and outro segments. Episodes are captured as they are opened.
 
-Apple TV requests the complete series catalogue first and reads intro, recap, and up-next markers from Apple HLS session metadata. If entitled playback manifests are not available in the series response, timestamps are captured per episode as playback opens them. Every captured episode is logged with its exact timestamps.
+Apple TV requests the complete series catalogue first and reads intro, recap, and up-next markers from Apple HLS session metadata. If entitled playback manifests are not available in the series response, timestamps are captured per episode as playback opens them.
+
+Every active provider logs each captured episode with readable timestamps and the exact raw start/end seconds.
 
 ## Features
 
@@ -55,6 +57,7 @@ SegmentScraper/
 |   |   `-- segment-mapper.js     # Provider segment normalization
 |   `-- providers/
 |       |-- bootstrap.js          # Shared provider initialization and actions
+|       |-- timestamp-logger.js   # Shared per-episode timestamp logging
 |       |-- netflix/
 |       |   |-- index.js
 |       |   `-- extractor.js

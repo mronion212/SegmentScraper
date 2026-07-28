@@ -1340,6 +1340,53 @@ function getProviderSegmentTypes(providerName) {
 }
 
 
+  // ─── providers/timestamp-logger.js ───
+
+/** Shared, provider-agnostic logging for newly captured episode timestamps. */
+
+/** Format seconds as mm:ss.mmm, adding hours only when needed. */
+function formatCapturedTimestamp(seconds) {
+  const numericSeconds = Number(seconds);
+  if (!Number.isFinite(numericSeconds)) return '';
+
+  const totalMilliseconds = Math.max(0, Math.round(numericSeconds * 1000));
+  const hours = Math.floor(totalMilliseconds / 3600000);
+  const minutes = Math.floor((totalMilliseconds % 3600000) / 60000);
+  const remainingSeconds = Math.floor((totalMilliseconds % 60000) / 1000);
+  const milliseconds = totalMilliseconds % 1000;
+  const clock = `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}.${String(milliseconds).padStart(3, '0')}`;
+  return hours ? `${String(hours).padStart(2, '0')}:${clock}` : clock;
+}
+
+/** Log one episode in the same structured shape for every provider. */
+function logCapturedTimestamps({
+  prefix,
+  showTitle,
+  season,
+  episode,
+  episodeTitle = '',
+  providerIdLabel = 'providerId',
+  providerId = '',
+  items = [],
+}) {
+  if (!items.length) return;
+
+  const episodeLabel = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
+  const details = {
+    title: episodeTitle || '',
+    ...(providerId != null && providerId !== '' ? { [providerIdLabel]: providerId } : {}),
+    segments: items.map(item => ({
+      type: item.segment_type,
+      start: formatCapturedTimestamp(item.start_sec),
+      end: formatCapturedTimestamp(item.end_sec),
+      start_sec: item.start_sec,
+      end_sec: item.end_sec,
+    })),
+  };
+  console.info(`[${prefix}] Captured timestamps · ${showTitle || 'Unknown series'} · ${episodeLabel}`, details);
+}
+
+
   // ─── ui/panel.js ───
 
 /**
@@ -2529,6 +2576,9 @@ function bootstrapProvider({
   // â”€â”€â”€ providers/netflix/extractor.js â”€â”€â”€
 
 /** Netflix-specific metadata interception and segment extraction. */
+
+
+
 const NETFLIX_TITLE_OVERRIDES = {
   '81748089': 'tt2431250',
 };
@@ -2610,10 +2660,24 @@ function processNetflixMetadata(data) {
         },
       ].filter(Boolean);
 
+      const episodeItems = [];
       for (const segment of segments) {
         const item = createNormalizedSegment({ ...common, ...segment });
-        if (item) extractedItems.push(item);
+        if (item) {
+          episodeItems.push(item);
+          extractedItems.push(item);
+        }
       }
+      logCapturedTimestamps({
+        prefix: 'NFE',
+        showTitle: video.title,
+        season: season.seq,
+        episode: episode.seq,
+        episodeTitle: common.episodeTitle,
+        providerIdLabel: 'episodeId',
+        providerId: episodeId,
+        items: episodeItems,
+      });
     }
   }
   recordExtractedSegments(extractedItems);
@@ -2683,6 +2747,9 @@ bootstrapProvider({
   // â”€â”€â”€ providers/prime-video/extractor.js â”€â”€â”€
 
 /** Prime Video catalogue, playback-resource, and timestamp extraction. */
+
+
+
 const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
 const PRIME_VIDEO_ID_PATTERN = /^(?:[A-Z0-9]{9,12}|amzn1\.dv\.gti\.[a-f0-9-]{20,})$/i;
 const PRIME_VIDEO_CARD_SELECTOR = '[data-testid="episode-list-item"], li[id^="av-ep-episode-"]';
@@ -3168,16 +3235,6 @@ function findPrimeVideoEpisodeCollision(titleId, showId, season, episode) {
   return null;
 }
 
-function formatPrimeVideoTimestamp(milliseconds) {
-  const totalMilliseconds = Math.max(0, Math.round(milliseconds));
-  const hours = Math.floor(totalMilliseconds / 3600000);
-  const minutes = Math.floor((totalMilliseconds % 3600000) / 60000);
-  const seconds = Math.floor((totalMilliseconds % 60000) / 1000);
-  const millis = totalMilliseconds % 1000;
-  const clock = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
-  return hours ? `${String(hours).padStart(2, '0')}:${clock}` : clock;
-}
-
 function coercePrimeVideoMilliseconds(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
@@ -3257,18 +3314,15 @@ function readPrimeVideoMediaDurationMs() {
 }
 
 function logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, items) {
-  if (!items.length) return;
-  const episodeLabel = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
-  console.info(`[PVE] Captured timestamps · ${showId || 'Unknown series'} · ${episodeLabel}`, {
-    title: episodeTitle || '',
-    titleId,
-    segments: items.map(item => ({
-      type: item.segment_type,
-      start: formatPrimeVideoTimestamp(item.start_sec * 1000),
-      end: formatPrimeVideoTimestamp(item.end_sec * 1000),
-      start_sec: item.start_sec,
-      end_sec: item.end_sec,
-    })),
+  logCapturedTimestamps({
+    prefix: 'PVE',
+    showTitle: showId,
+    season,
+    episode,
+    episodeTitle,
+    providerIdLabel: 'titleId',
+    providerId: titleId,
+    items,
   });
 }
 
@@ -3611,6 +3665,9 @@ bootstrapProvider({
   // â”€â”€â”€ providers/apple-tv/extractor.js â”€â”€â”€
 
 /** Apple TV catalogue, HLS metadata, and timestamp extraction. */
+
+
+
 const APPLE_TV_ID_PATTERN = /^umc\.cmc\.[a-z0-9]+$/i;
 const APPLE_TV_CATALOG_PAGE_SIZE = 50;
 const APPLE_TV_MAX_CATALOG_PAGES = 100;
@@ -3784,29 +3841,16 @@ function extractAppleTvMarkers(manifestText, durationSeconds = null) {
   });
 }
 
-function formatAppleTvTimestamp(seconds) {
-  const totalMilliseconds = Math.max(0, Math.round(Number(seconds) * 1000));
-  const hours = Math.floor(totalMilliseconds / 3600000);
-  const minutes = Math.floor((totalMilliseconds % 3600000) / 60000);
-  const remainingSeconds = Math.floor((totalMilliseconds % 60000) / 1000);
-  const milliseconds = totalMilliseconds % 1000;
-  const clock = `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}.${String(milliseconds).padStart(3, '0')}`;
-  return hours ? `${String(hours).padStart(2, '0')}:${clock}` : clock;
-}
-
 function logAppleTvTimestamps(episode, items) {
-  if (!items.length) return;
-  const episodeLabel = `S${String(episode.season).padStart(2, '0')}E${String(episode.episode).padStart(2, '0')}`;
-  console.info(`[ATVE] Captured timestamps · ${episode.showTitle || state.showTitle || 'Unknown series'} · ${episodeLabel}`, {
-    title: episode.episodeTitle || '',
-    canonicalId: episode.canonicalId,
-    segments: items.map(item => ({
-      type: item.segment_type,
-      start: formatAppleTvTimestamp(item.start_sec),
-      end: formatAppleTvTimestamp(item.end_sec),
-      start_sec: item.start_sec,
-      end_sec: item.end_sec,
-    })),
+  logCapturedTimestamps({
+    prefix: 'ATVE',
+    showTitle: episode.showTitle || state.showTitle,
+    season: episode.season,
+    episode: episode.episode,
+    episodeTitle: episode.episodeTitle,
+    providerIdLabel: 'canonicalId',
+    providerId: episode.canonicalId,
+    items,
   });
 }
 
@@ -4235,6 +4279,9 @@ bootstrapProvider({
  * Videoland-specific extraction logic.
  * Captures /layout responses and joins root episode metadata to video chapters.
  */
+
+
+
 const VIDEOLAND_LAYOUT_URL_MATCH = /\/layout(\?|$)/i;
 
 function ensureVideolandState() {
@@ -4394,6 +4441,16 @@ function processVideolandLayout(json) {
       end_sec: endSec,
     });
   }
+  logCapturedTimestamps({
+    prefix: 'VLE',
+    showTitle: title,
+    season,
+    episode,
+    episodeTitle,
+    providerIdLabel: 'clipId',
+    providerId: clipId,
+    items: extractedItems,
+  });
   recordExtractedSegments(extractedItems);
 }
 
@@ -4463,6 +4520,9 @@ bootstrapProvider({
  * worker. Both paths are observed, with a Resource Timing + GM request as a
  * fallback when only the exact catalogue URL is visible to the userscript.
  */
+
+
+
 const SKYSHOWTIME_WORKER_MESSAGE = '__segmentScraperSkyShowtime';
 const SKYSHOWTIME_CATALOGUE_HOST = 'atom.skyshowtime.com';
 const SKYSHOWTIME_CATALOGUE_PATH = '/adapter-calypso/';
@@ -4597,9 +4657,12 @@ function processSkyShowtimeMetadata(data, sourceUrl = '') {
   const showId = showEpisode
     ? showEpisode.providerSeriesId || showEpisode.seriesId || showEpisode.seriesUuid || null
     : null;
+  const showTitle = showEpisode
+    ? showEpisode.seriesName || showEpisode.titleLong || showEpisode.titleMedium || showEpisode.title
+    : '';
   if (showEpisode) {
     handleDetectedShow({
-      title: showEpisode.seriesName || showEpisode.titleLong || showEpisode.titleMedium || showEpisode.title,
+      title: showTitle,
       showId,
       year: showEpisode.year || '',
     });
@@ -4636,27 +4699,39 @@ function processSkyShowtimeMetadata(data, sourceUrl = '') {
       season,
       episode: episodeNumber,
     };
+    const episodeItems = [];
     addSkyShowtimeSegment(
-      extractedItems,
+      episodeItems,
       common,
       'recap',
       coerceSkyShowtimeNumber(markers.SOR),
       coerceSkyShowtimeNumber(markers.EOR)
     );
     addSkyShowtimeSegment(
-      extractedItems,
+      episodeItems,
       common,
       'intro',
       coerceSkyShowtimeNumber(markers.SOI),
       coerceSkyShowtimeNumber(markers.EOI)
     );
     addSkyShowtimeSegment(
-      extractedItems,
+      episodeItems,
       common,
       'outro',
       coerceSkyShowtimeNumber(markers.SOCR) ?? coerceSkyShowtimeNumber(format.startOfCredits),
       durationMs
     );
+    extractedItems.push(...episodeItems);
+    logCapturedTimestamps({
+      prefix: 'SSE',
+      showTitle: episode.seriesName || showTitle || state.showTitle,
+      season,
+      episode: episodeNumber,
+      episodeTitle: common.episodeTitle,
+      providerIdLabel: 'providerVariantId',
+      providerId: episode.providerVariantId || episode.programmeUuid || episode.id || common.episodeId,
+      items: episodeItems,
+    });
   }
 
   if (extractedItems.length) {
@@ -4904,6 +4979,7 @@ bootstrapProvider({
 
 
 
+
 const CRUNCHYROLL_SKIP_EVENTS_BASE = 'https://static.crunchyroll.com/skip-events/production';
 const CRUNCHYROLL_SCAN_INTERVAL_MS = 750;
 
@@ -5068,6 +5144,16 @@ function processCrunchyrollEpisode(metadata, skipEvents = {}) {
   addCrunchyrollSegment(extractedItems, metadata, skipEvents, 'recap', skipEvents.recap);
   addCrunchyrollSegment(extractedItems, metadata, skipEvents, 'intro', skipEvents.intro);
   addCrunchyrollSegment(extractedItems, metadata, skipEvents, 'credits', skipEvents.credits);
+  logCapturedTimestamps({
+    prefix: 'CRE',
+    showTitle: metadata.seriesTitle,
+    season: metadata.season,
+    episode: metadata.episode,
+    episodeTitle: metadata.episodeTitle,
+    providerIdLabel: 'mediaId',
+    providerId: skipEvents.mediaId || metadata.providerId || metadata.watchId,
+    items: extractedItems,
+  });
   recordExtractedSegments(extractedItems);
   return extractedItems.length;
 }

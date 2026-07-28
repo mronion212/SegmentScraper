@@ -15,17 +15,18 @@ function loadCrunchyrollExtractor(globals = {}) {
   };
   const detectedShows = [];
   const catalogs = [];
-  let source = fs.readFileSync(
-    path.join(__dirname, '..', 'src', 'providers', 'crunchyroll', 'extractor.js'),
-    'utf8'
-  )
+  const logs = [];
+  let source = [
+    fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'crunchyroll', 'extractor.js'), 'utf8'),
+  ].join('\n')
     .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?function\b|const\b|let\b|var\b|class\b)/g, '');
   source += '\nglobalThis.crunchyrollExports = { getCrunchyrollWatchId, readCrunchyrollPageMetadata, processCrunchyrollEpisode, isCrunchyrollPlayerPage, setupCrunchyrollInterception };';
 
   const context = vm.createContext({
     state,
-    console: { info() {}, warn() {}, error() {} },
+    console: { info(...args) { logs.push(args); }, warn() {}, error() {} },
     handleDetectedShow(show) {
       detectedShows.push(show);
       state.showId = show.showId;
@@ -57,7 +58,7 @@ function loadCrunchyrollExtractor(globals = {}) {
     ...globals,
   });
   vm.runInContext(source, context, { filename: 'crunchyroll-extractor.js' });
-  return { ...context.crunchyrollExports, state, detectedShows, catalogs, context };
+  return { ...context.crunchyrollExports, state, detectedShows, catalogs, logs, context };
 }
 
 function crunchyrollDocument() {
@@ -194,9 +195,22 @@ test('maps Crunchyroll intro and credits to normalized intro and outro segments'
     },
   ]);
 
+  assert.deepEqual(plain(crunchyroll.logs), [[
+    '[CRE] Captured timestamps · Golden Kamuy · S01E02',
+    {
+      title: 'Nopperabo',
+      mediaId: 'G4GFQZWG9',
+      segments: [
+        { type: 'intro', start: '01:49.000', end: '03:18.000', start_sec: 109, end_sec: 198 },
+        { type: 'outro', start: '22:29.000', end: '24:04.000', start_sec: 1349, end_sec: 1444 },
+      ],
+    },
+  ]]);
+
   assert.equal(crunchyroll.processCrunchyrollEpisode(metadata, skipEventsPayload()), 0);
   assert.equal(crunchyroll.catalogs.length, 1);
   assert.equal(crunchyroll.state.allItems.length, 2);
+  assert.equal(crunchyroll.logs.length, 1);
 });
 
 test('requests the public skip-event JSON for the active watch id', () => {

@@ -9,6 +9,7 @@
 import { state } from '../../core/state.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { setProviderEpisodeCatalog } from '../../core/tvdb.js';
+import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 const SKYSHOWTIME_WORKER_MESSAGE = '__segmentScraperSkyShowtime';
 const SKYSHOWTIME_CATALOGUE_HOST = 'atom.skyshowtime.com';
@@ -144,9 +145,12 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
   const showId = showEpisode
     ? showEpisode.providerSeriesId || showEpisode.seriesId || showEpisode.seriesUuid || null
     : null;
+  const showTitle = showEpisode
+    ? showEpisode.seriesName || showEpisode.titleLong || showEpisode.titleMedium || showEpisode.title
+    : '';
   if (showEpisode) {
     handleDetectedShow({
-      title: showEpisode.seriesName || showEpisode.titleLong || showEpisode.titleMedium || showEpisode.title,
+      title: showTitle,
       showId,
       year: showEpisode.year || '',
     });
@@ -183,27 +187,39 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
       season,
       episode: episodeNumber,
     };
+    const episodeItems = [];
     addSkyShowtimeSegment(
-      extractedItems,
+      episodeItems,
       common,
       'recap',
       coerceSkyShowtimeNumber(markers.SOR),
       coerceSkyShowtimeNumber(markers.EOR)
     );
     addSkyShowtimeSegment(
-      extractedItems,
+      episodeItems,
       common,
       'intro',
       coerceSkyShowtimeNumber(markers.SOI),
       coerceSkyShowtimeNumber(markers.EOI)
     );
     addSkyShowtimeSegment(
-      extractedItems,
+      episodeItems,
       common,
       'outro',
       coerceSkyShowtimeNumber(markers.SOCR) ?? coerceSkyShowtimeNumber(format.startOfCredits),
       durationMs
     );
+    extractedItems.push(...episodeItems);
+    logCapturedTimestamps({
+      prefix: 'SSE',
+      showTitle: episode.seriesName || showTitle || state.showTitle,
+      season,
+      episode: episodeNumber,
+      episodeTitle: common.episodeTitle,
+      providerIdLabel: 'providerVariantId',
+      providerId: episode.providerVariantId || episode.programmeUuid || episode.id || common.episodeId,
+      items: episodeItems,
+    });
   }
 
   if (extractedItems.length) {

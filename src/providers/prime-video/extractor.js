@@ -3,6 +3,7 @@
 import { state } from '../../core/state.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { recordProviderEpisode } from '../../core/tvdb.js';
+import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
 const PRIME_VIDEO_ID_PATTERN = /^(?:[A-Z0-9]{9,12}|amzn1\.dv\.gti\.[a-f0-9-]{20,})$/i;
@@ -489,16 +490,6 @@ function findPrimeVideoEpisodeCollision(titleId, showId, season, episode) {
   return null;
 }
 
-function formatPrimeVideoTimestamp(milliseconds) {
-  const totalMilliseconds = Math.max(0, Math.round(milliseconds));
-  const hours = Math.floor(totalMilliseconds / 3600000);
-  const minutes = Math.floor((totalMilliseconds % 3600000) / 60000);
-  const seconds = Math.floor((totalMilliseconds % 60000) / 1000);
-  const millis = totalMilliseconds % 1000;
-  const clock = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
-  return hours ? `${String(hours).padStart(2, '0')}:${clock}` : clock;
-}
-
 function coercePrimeVideoMilliseconds(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : null;
@@ -578,18 +569,15 @@ function readPrimeVideoMediaDurationMs() {
 }
 
 function logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, items) {
-  if (!items.length) return;
-  const episodeLabel = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
-  console.info(`[PVE] Captured timestamps · ${showId || 'Unknown series'} · ${episodeLabel}`, {
-    title: episodeTitle || '',
-    titleId,
-    segments: items.map(item => ({
-      type: item.segment_type,
-      start: formatPrimeVideoTimestamp(item.start_sec * 1000),
-      end: formatPrimeVideoTimestamp(item.end_sec * 1000),
-      start_sec: item.start_sec,
-      end_sec: item.end_sec,
-    })),
+  logCapturedTimestamps({
+    prefix: 'PVE',
+    showTitle: showId,
+    season,
+    episode,
+    episodeTitle,
+    providerIdLabel: 'titleId',
+    providerId: titleId,
+    items,
   });
 }
 

@@ -3,6 +3,7 @@
 import { state } from '../../core/state.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { recordProviderEpisode } from '../../core/tvdb.js';
+import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 const APPLE_TV_ID_PATTERN = /^umc\.cmc\.[a-z0-9]+$/i;
 const APPLE_TV_CATALOG_PAGE_SIZE = 50;
@@ -177,29 +178,16 @@ export function extractAppleTvMarkers(manifestText, durationSeconds = null) {
   });
 }
 
-function formatAppleTvTimestamp(seconds) {
-  const totalMilliseconds = Math.max(0, Math.round(Number(seconds) * 1000));
-  const hours = Math.floor(totalMilliseconds / 3600000);
-  const minutes = Math.floor((totalMilliseconds % 3600000) / 60000);
-  const remainingSeconds = Math.floor((totalMilliseconds % 60000) / 1000);
-  const milliseconds = totalMilliseconds % 1000;
-  const clock = `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}.${String(milliseconds).padStart(3, '0')}`;
-  return hours ? `${String(hours).padStart(2, '0')}:${clock}` : clock;
-}
-
 function logAppleTvTimestamps(episode, items) {
-  if (!items.length) return;
-  const episodeLabel = `S${String(episode.season).padStart(2, '0')}E${String(episode.episode).padStart(2, '0')}`;
-  console.info(`[ATVE] Captured timestamps · ${episode.showTitle || state.showTitle || 'Unknown series'} · ${episodeLabel}`, {
-    title: episode.episodeTitle || '',
-    canonicalId: episode.canonicalId,
-    segments: items.map(item => ({
-      type: item.segment_type,
-      start: formatAppleTvTimestamp(item.start_sec),
-      end: formatAppleTvTimestamp(item.end_sec),
-      start_sec: item.start_sec,
-      end_sec: item.end_sec,
-    })),
+  logCapturedTimestamps({
+    prefix: 'ATVE',
+    showTitle: episode.showTitle || state.showTitle,
+    season: episode.season,
+    episode: episode.episode,
+    episodeTitle: episode.episodeTitle,
+    providerIdLabel: 'canonicalId',
+    providerId: episode.canonicalId,
+    items,
   });
 }
 

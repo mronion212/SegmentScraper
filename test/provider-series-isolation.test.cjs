@@ -16,14 +16,18 @@ function loadExtractor(relativePath, exportName, globals = {}) {
   };
   const detectedShows = [];
   const catalogs = [];
-  let source = fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8')
+  const logs = [];
+  let source = [
+    fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8'),
+  ].join('\n')
     .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?function\b|const\b|let\b|var\b|class\b)/g, '');
   source += `\nglobalThis.extractorExports = { ${exportName} };`;
 
   const context = vm.createContext({
     state,
-    console: { info() {}, warn() {}, error() {} },
+    console: { info(...args) { logs.push(args); }, warn() {}, error() {} },
     handleDetectedShow(show) {
       detectedShows.push(show);
       state.showId = show.showId != null ? String(show.showId) : null;
@@ -56,7 +60,7 @@ function loadExtractor(relativePath, exportName, globals = {}) {
     ...globals,
   });
   vm.runInContext(source, context, { filename: relativePath });
-  return { process: context.extractorExports[exportName], state, detectedShows, catalogs, context };
+  return { process: context.extractorExports[exportName], state, detectedShows, catalogs, logs, context };
 }
 
 function netflixPayload(id, title, episodeId) {
@@ -90,6 +94,63 @@ test('Netflix tags timestamps and catalogs with their own series id', () => {
     ['200', 'tt200'],
   ]);
   assert.deepEqual(plain(netflix.catalogs.map(catalog => catalog.showId)), ['100', '200']);
+  assert.deepEqual(plain(netflix.logs), [
+    [
+      '[NFE] Captured timestamps · Alpha · S01E01',
+      {
+        title: 'Alpha episode',
+        episodeId: 'alpha-1',
+        segments: [{ type: 'intro', start: '00:01.000', end: '00:11.000', start_sec: 1, end_sec: 11 }],
+      },
+    ],
+    [
+      '[NFE] Captured timestamps · Beta · S01E01',
+      {
+        title: 'Beta episode',
+        episodeId: 'beta-1',
+        segments: [{ type: 'intro', start: '00:01.000', end: '00:11.000', start_sec: 1, end_sec: 11 }],
+      },
+    ],
+  ]);
+});
+
+test('Netflix logs multi-episode metadata as one timestamp entry per episode', () => {
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata');
+  const payload = netflixPayload(100, 'Alpha', 'alpha-1');
+  payload.video.seasons[0].episodes.push({
+    episodeId: 'alpha-2',
+    seq: 2,
+    title: 'Second episode',
+    skipMarkers: {
+      recap: { start: 0, end: 12500 },
+      intro: { start: 12500, end: 88000 },
+    },
+  });
+
+  netflix.process(payload);
+
+  assert.deepEqual(plain(netflix.logs.map(([message, details]) => ({
+    message,
+    title: details.title,
+    episodeId: details.episodeId,
+    segments: details.segments,
+  }))), [
+    {
+      message: '[NFE] Captured timestamps · Alpha · S01E01',
+      title: 'Alpha episode',
+      episodeId: 'alpha-1',
+      segments: [{ type: 'intro', start: '00:01.000', end: '00:11.000', start_sec: 1, end_sec: 11 }],
+    },
+    {
+      message: '[NFE] Captured timestamps · Alpha · S01E02',
+      title: 'Second episode',
+      episodeId: 'alpha-2',
+      segments: [
+        { type: 'recap', start: '00:00.000', end: '00:12.500', start_sec: 0, end_sec: 12.5 },
+        { type: 'intro', start: '00:12.500', end: '01:28.000', start_sec: 12.5, end_sec: 88 },
+      ],
+    },
+  ]);
 });
 
 function videolandPayload(programId, programTitle, clipId, {
@@ -133,6 +194,24 @@ test('Videoland tags timestamps and incremental catalogs with their own program 
   assert.deepEqual(plain(videoland.state.allItems[0]._tvdbEpisodeLanguages), ['eng', 'nld']);
   assert.equal(videoland.state.allItems[0]._tvdbRequireTitleMatch, true);
   assert.deepEqual(plain(videoland.catalogs.map(catalog => catalog.showId)), ['program-a', 'program-b']);
+  assert.deepEqual(plain(videoland.logs), [
+    [
+      '[VLE] Captured timestamps · Alpha · S01E01',
+      {
+        title: 'Alpha episode',
+        clipId: 'clip-a',
+        segments: [{ type: 'intro', start: '00:01.000', end: '00:11.000', start_sec: 1, end_sec: 11 }],
+      },
+    ],
+    [
+      '[VLE] Captured timestamps · Beta · S01E01',
+      {
+        title: 'Beta episode',
+        clipId: 'clip-b',
+        segments: [{ type: 'intro', start: '00:01.000', end: '00:11.000', start_sec: 1, end_sec: 11 }],
+      },
+    ],
+  ]);
 });
 
 test('Videoland prefers unique active episode titles over repeated SEO series titles', () => {
