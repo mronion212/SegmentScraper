@@ -141,15 +141,17 @@ export function setupNetflixInterception() {
   win.XMLHttpRequest = NetflixInterceptedXHR;
 
   const originalFetch = win.fetch.bind(win);
-  win.fetch = async function (input, init) {
+  win.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
-    const response = await originalFetch(input, init);
-    if (url.includes('memberapi') && url.includes('metadata')) {
+    if (!url.includes('memberapi') || !url.includes('metadata')) return originalFetch(input, init);
+
+    return (async () => {
+      const response = await originalFetch(input, init);
       try {
         const data = await response.clone().json();
         if (data?.video) processNetflixMetadata(data);
       } catch (_) {}
-    }
-    return response;
+      return response;
+    })();
   };
 }

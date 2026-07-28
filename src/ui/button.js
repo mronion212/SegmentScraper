@@ -36,8 +36,7 @@ export function injectBtn(providerName, getNextBtn) {
     console.error('[NFE] No config found for provider:', providerName);
     return;
   }
-  const { colors } = config;
-  
+
   const nextBtn = getNextBtn ? getNextBtn() : getNextEpBtn(providerName);
   console.log('[NFE] nextBtn found:', !!nextBtn);
 

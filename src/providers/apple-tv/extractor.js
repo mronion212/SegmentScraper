@@ -313,13 +313,24 @@ function ingestAppleTvPlayable(playable, episodeRoot = null, showId = state.show
   return episode;
 }
 
-function findAppleTvCatalogNodes(root) {
-  const found = [];
+function discoverAppleTvMetadataNodes(root) {
+  const catalogs = [];
+  const standalonePlayables = [];
   const visited = new WeakSet();
   function walk(node, depth = 0) {
-    if (!node || typeof node !== 'object' || depth > 9 || visited.has(node)) return;
+    const maxDepth = catalogs.length ? 9 : 10;
+    if (!node || typeof node !== 'object' || depth > maxDepth || visited.has(node)) return;
     visited.add(node);
-    if (Array.isArray(node.episodes) && node.playables && typeof node.playables === 'object') found.push(node);
+    if (depth <= 9 && Array.isArray(node.episodes) && node.playables && typeof node.playables === 'object') {
+      catalogs.push(node);
+      standalonePlayables.length = 0;
+    } else if (
+      !catalogs.length &&
+      APPLE_TV_ID_PATTERN.test(String(node.canonicalId || '')) &&
+      (node.assets?.hlsUrl || node.hlsUrl)
+    ) {
+      standalonePlayables.push(node);
+    }
     if (Array.isArray(node)) {
       node.forEach(value => walk(value, depth + 1));
       return;
@@ -327,56 +338,60 @@ function findAppleTvCatalogNodes(root) {
     Object.values(node).forEach(value => walk(value, depth + 1));
   }
   walk(root);
-  return found;
+  return { catalogs, standalonePlayables };
 }
 
-function processAppleTvCatalogNode(catalog, showId) {
+function processAppleTvCatalogNode(catalog, showId, catalogEpisodeIds = null) {
   const playables = catalog.playables || {};
   const episodePlayableMap = catalog.episodesPlayables || {};
+  let playablesByCanonicalId = null;
   let manifestCount = 0;
 
   for (const episodeRoot of catalog.episodes || []) {
+    const catalogEpisodeId = String(episodeRoot?.id || '');
+    if (catalogEpisodeId && catalogEpisodeIds) catalogEpisodeIds.add(catalogEpisodeId);
     const playableId = episodePlayableMap[episodeRoot.id]?.playableId || episodePlayableMap[episodeRoot.id]?.[0]?.playableId;
-    const playable = playables[playableId] || Object.values(playables).find(item => item?.canonicalId === episodeRoot.id) || {};
+    let playable = playables[playableId];
+    if (!playable) {
+      if (!playablesByCanonicalId) {
+        playablesByCanonicalId = new Map();
+        for (const item of Object.values(playables)) {
+          if (!playablesByCanonicalId.has(item?.canonicalId)) {
+            playablesByCanonicalId.set(item?.canonicalId, item);
+          }
+        }
+      }
+      playable = playablesByCanonicalId.get(episodeRoot.id);
+    }
+    playable ||= {};
     const episode = ingestAppleTvPlayable({ ...playable, canonicalId: playable.canonicalId || episodeRoot.id }, episodeRoot, showId);
     if (episode && (playable.assets?.hlsUrl || playable.hlsUrl)) manifestCount++;
   }
   return { episodeCount: catalog.episodes?.length || 0, manifestCount };
 }
 
-function scanAppleTvPlayableObjects(root, showId) {
-  const visited = new WeakSet();
+function processAppleTvPlayableObjects(playables, showId) {
   let manifestCount = 0;
-  function walk(node, depth = 0) {
-    if (!node || typeof node !== 'object' || depth > 10 || visited.has(node)) return;
-    visited.add(node);
-    if (APPLE_TV_ID_PATTERN.test(String(node.canonicalId || '')) && (node.assets?.hlsUrl || node.hlsUrl)) {
-      if (ingestAppleTvPlayable(node, null, showId)) manifestCount++;
-    }
-    if (Array.isArray(node)) {
-      node.forEach(value => walk(value, depth + 1));
-      return;
-    }
-    Object.values(node).forEach(value => walk(value, depth + 1));
+  for (const playable of playables) {
+    if (ingestAppleTvPlayable(playable, null, showId)) manifestCount++;
   }
-  walk(root);
   return manifestCount;
 }
 
-export function processAppleTvMetadata(payload, url = '', explicitShowId = null) {
+export function processAppleTvMetadata(payload, url = '', explicitShowId = null, catalogEpisodeIds = null) {
   ensureAppleTvState();
   if (!payload || typeof payload !== 'object') return { episodeCount: 0, manifestCount: 0 };
   const root = payload.data && typeof payload.data === 'object' ? payload.data : payload;
   const showId = explicitShowId || readAppleTvShowId(url) || readAppleTvShowId() || state.showId;
   let episodeCount = 0;
   let manifestCount = 0;
-  const catalogs = findAppleTvCatalogNodes(root);
+  const { catalogs, standalonePlayables } = discoverAppleTvMetadataNodes(root);
   for (const catalog of catalogs) {
-    const result = processAppleTvCatalogNode(catalog, showId);
+    const result = processAppleTvCatalogNode(catalog, showId, catalogEpisodeIds);
     episodeCount += result.episodeCount;
     manifestCount += result.manifestCount;
   }
-  if (!catalogs.length) manifestCount += scanAppleTvPlayableObjects(root, showId);
+  if (!catalogs.length) manifestCount += processAppleTvPlayableObjects(standalonePlayables, showId);
   return { episodeCount, manifestCount };
 }
 
@@ -473,12 +488,9 @@ export async function fetchAppleTvSeriesCatalog(showId) {
     });
     if (!response.ok) throw new Error(`Apple TV catalogue returned HTTP ${response.status}`);
     const payload = await response.json();
-    const result = processAppleTvMetadata(payload, request.url, normalizedShowId);
-    const pageEpisodeIds = findAppleTvCatalogNodes(payload?.data || payload)
-      .flatMap(catalog => catalog.episodes || [])
-      .map(episode => String(episode?.id || ''))
-      .filter(Boolean);
-    if (pageEpisodeIds.length) {
+    const pageEpisodeIds = new Set();
+    const result = processAppleTvMetadata(payload, request.url, normalizedShowId, pageEpisodeIds);
+    if (pageEpisodeIds.size) {
       pageEpisodeIds.forEach(id => seenEpisodeIds.add(id));
       episodeCount = seenEpisodeIds.size;
     } else {

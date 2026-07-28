@@ -6,6 +6,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 // Userscript header template
 const USERSCRIPT_HEADER = `// ==UserScript==
@@ -43,7 +44,6 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const _unsafeWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
 `;
 
@@ -51,43 +51,28 @@ const USERSCRIPT_HEADER = `// ==UserScript==
  * Read a source file and return its content
  */
 function readFile(filePath) {
-  return fs.readFileSync(filePath, 'utf8');
+  return fs.readFileSync(filePath, 'utf8').replace(/\r\n?/g, '\n');
 }
 
 /**
  * Transform ES module code to userscript-compatible code
  * - Removes import statements
- * * Converts export statements to regular declarations
+ * - Converts export statements to regular declarations
  */
 function transformCode(content) {
-  // Remove import statements (entire line)
-  content = content.replace(/^\s*import\s+[^;]+;?\s*$/gm, '');
-  
-  // Convert "export async function" to "async function" (must be before export function)
-  content = content.replace(/^(\s*)export\s+async\s+function\s+/gm, '$1async function ');
-  
-  // Convert "export function" to "function"
-  content = content.replace(/^(\s*)export\s+function\s+/gm, '$1function ');
-  
-  // Convert "export const" to "const"
-  content = content.replace(/^(\s*)export\s+const\s+/gm, '$1const ');
-  
-  // Convert "export let" to "let"
-  content = content.replace(/^(\s*)export\s+let\s+/gm, '$1let ');
-  
-  // Convert "export var" to "var"
-  content = content.replace(/^(\s*)export\s+var\s+/gm, '$1var ');
-  
-  // Convert "export class" to "class"
-  content = content.replace(/^(\s*)export\s+class\s+/gm, '$1class ');
-  
-  // Remove "export {" lines
-  content = content.replace(/^\s*export\s+\{[^}]+\}\s*$/gm, '');
-  
-  // Remove "export default" 
-  content = content.replace(/^(\s*)export\s+default\s+/gm, '$1const defaultExport = ');
-  
-  return content;
+  const transformed = content
+    .replace(/^[ \t]*import[ \t]+[^\n]*;[ \t]*(?:\n|$)/gm, '')
+    .replace(/^([ \t]*)export[ \t]+(?=(?:async[ \t]+)?(?:function|const|let|var|class)\b)/gm, '$1')
+    .replace(/^[ \t]*export[ \t]*\{[^}\n]+\};?[ \t]*\n?/gm, '')
+    .replace(/^([ \t]*)export[ \t]+default[ \t]+/gm, '$1const defaultExport = ')
+    .trim();
+
+  return transformed;
+}
+
+function transformSource(srcDir, relativePath) {
+  console.log(`Bundling: ${relativePath}`);
+  return transformCode(readFile(path.join(srcDir, relativePath)));
 }
 
 /**
@@ -113,32 +98,26 @@ function bundle() {
 
   const providerBundles = [
     {
-      name: 'netflix',
       condition: "location.hostname === 'www.netflix.com' || location.hostname === 'netflix.com'",
       files: ['providers/netflix/extractor.js', 'providers/netflix/index.js'],
     },
     {
-      name: 'prime-video',
       condition: "location.hostname === 'primevideo.com' || location.hostname.endsWith('.primevideo.com') || (/^www\\.amazon\\./i.test(location.hostname) && location.pathname.startsWith('/gp/video/'))",
       files: ['providers/prime-video/extractor.js', 'providers/prime-video/index.js'],
     },
     {
-      name: 'apple-tv',
       condition: "location.hostname === 'tv.apple.com'",
       files: ['providers/apple-tv/extractor.js', 'providers/apple-tv/index.js'],
     },
     {
-      name: 'videoland',
       condition: "location.hostname === 'videoland.com' || location.hostname.endsWith('.videoland.com')",
       files: ['providers/videoland/extractor.js', 'providers/videoland/index.js'],
     },
     {
-      name: 'skyshowtime',
       condition: "location.hostname === 'skyshowtime.com' || location.hostname.endsWith('.skyshowtime.com')",
       files: ['providers/skyshowtime/extractor.js', 'providers/skyshowtime/index.js'],
     },
     {
-      name: 'crunchyroll',
       condition: "location.hostname === 'crunchyroll.com' || location.hostname.endsWith('.crunchyroll.com')",
       files: ['providers/crunchyroll/extractor.js', 'providers/crunchyroll/index.js'],
     },
@@ -148,39 +127,26 @@ function bundle() {
   let bundledCode = USERSCRIPT_HEADER;
   
   for (const relativePath of commonFileOrder) {
-    const file = path.join(srcDir, relativePath);
-    if (fs.existsSync(file)) {
-      console.log(`Bundling: ${relativePath}`);
-      const content = readFile(file);
-      const transformed = transformCode(content);
-      
-      bundledCode += `\n  // ─── ${relativePath} ───\n\n`;
-      bundledCode += transformed;
-      bundledCode += '\n';
-    }
+    bundledCode += `\n${transformSource(srcDir, relativePath)}\n`;
   }
 
   for (const provider of providerBundles) {
-    bundledCode += `\n  // Provider registration: ${provider.name}\n`;
-    bundledCode += `  if (${provider.condition}) {\n`;
+    bundledCode += `\n  if (${provider.condition}) {\n`;
     for (const relativePath of provider.files) {
-      const file = path.join(srcDir, relativePath);
-      if (!fs.existsSync(file)) continue;
-      console.log(`Bundling: ${relativePath}`);
-      bundledCode += `\n  // â”€â”€â”€ ${relativePath} â”€â”€â”€\n\n`;
-      bundledCode += transformCode(readFile(file));
-      bundledCode += '\n';
+      bundledCode += `\n${transformSource(srcDir, relativePath)}\n`;
     }
     bundledCode += '  }\n';
   }
   
   // Close the IIFE
   bundledCode += '})();\n';
-  
+
+  new vm.Script(bundledCode, { filename: path.basename(outputFile) });
+
   // Write output
   fs.writeFileSync(outputFile, bundledCode, 'utf8');
   console.log(`\nBundled userscript written to: ${outputFile}`);
-  console.log(`Total size: ${bundledCode.length} bytes`);
+  console.log(`Total size: ${Buffer.byteLength(bundledCode, 'utf8')} bytes`);
 }
 
 // Run bundler
