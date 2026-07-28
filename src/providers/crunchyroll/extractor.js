@@ -8,6 +8,7 @@ import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 const CRUNCHYROLL_SKIP_EVENTS_BASE = 'https://static.crunchyroll.com/skip-events/production';
 const CRUNCHYROLL_SCAN_INTERVAL_MS = 750;
+const crunchyrollStructuredDataCache = new WeakMap();
 
 function ensureCrunchyrollState() {
   if (!(state.crunchyrollRegisteredEpisodes instanceof Set)) state.crunchyrollRegisteredEpisodes = new Set();
@@ -34,6 +35,18 @@ function flattenStructuredData(value, output = []) {
   output.push(value);
   if (Array.isArray(value['@graph'])) flattenStructuredData(value['@graph'], output);
   return output;
+}
+
+function readCrunchyrollStructuredData(script) {
+  const serialized = script.textContent || '';
+  const cached = crunchyrollStructuredDataCache.get(script);
+  if (cached?.serialized === serialized) return cached.items;
+
+  const items = [];
+  try { flattenStructuredData(JSON.parse(serialized), items); }
+  catch (_) {}
+  crunchyrollStructuredDataCache.set(script, { serialized, items });
+  return items;
 }
 
 function extractCrunchyrollSeriesId(value) {
@@ -67,8 +80,7 @@ export function readCrunchyrollPageMetadata(doc = document, pathname = location.
 
   const structuredData = [];
   for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
-    try { flattenStructuredData(JSON.parse(script.textContent || ''), structuredData); }
-    catch (_) {}
+    structuredData.push(...readCrunchyrollStructuredData(script));
   }
 
   const episodeData = structuredData.find(item => {
@@ -232,6 +244,8 @@ export function setupCrunchyrollInterception() {
   const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
 
   const scanCurrentEpisode = () => {
+    const watchId = getCrunchyrollWatchId(location.pathname);
+    if (!watchId || state.crunchyrollRequestedWatchIds?.has(watchId)) return;
     const metadata = readCrunchyrollPageMetadata(document, location.pathname);
     if (!metadata) return;
     processCrunchyrollEpisode(metadata);

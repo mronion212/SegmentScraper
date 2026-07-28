@@ -423,14 +423,34 @@ export function scanPrimeVideoEpisodeCatalog(root = document) {
     seen.add(titleId);
 
     const snapshot = { season, ...cardEpisode, showId };
-    const collision = findPrimeVideoEpisodeCollision(titleId, showId, season, cardEpisode.episode);
-    state.primeVideoTitleMap.set(titleId, snapshot);
-    seasonCatalog.set(cardEpisode.episode, snapshot);
-    refreshPrimeVideoEpisodeTitle(showId, season, cardEpisode.episode, cardEpisode.episodeTitle);
+    const previous = state.primeVideoTitleMap.get(titleId);
+    const unchanged = previous?.showId === showId &&
+      previous.season === season &&
+      previous.episode === cardEpisode.episode &&
+      previous.episodeTitle === cardEpisode.episodeTitle;
+    if (!unchanged) {
+      const collision = findPrimeVideoEpisodeCollision(titleId, showId, season, cardEpisode.episode);
+      state.primeVideoTitleMap.set(titleId, snapshot);
+      seasonCatalog.set(cardEpisode.episode, snapshot);
+      refreshPrimeVideoEpisodeTitle(showId, season, cardEpisode.episode, cardEpisode.episodeTitle);
+      if (!collision) {
+        recordProviderEpisode({ providerId: titleId, season, episode: cardEpisode.episode, title: cardEpisode.episodeTitle }, showId);
+      }
+    } else if (!seasonCatalog.has(cardEpisode.episode)) {
+      seasonCatalog.set(cardEpisode.episode, previous);
+    }
     const detailId = readPrimeVideoCardDetailId(card);
-    if (detailId) state.primeVideoDetailMap.set(detailId, { ...snapshot, seriesTitle });
-    if (!collision) {
-      recordProviderEpisode({ providerId: titleId, season, episode: cardEpisode.episode, title: cardEpisode.episodeTitle }, showId);
+    if (detailId) {
+      const previousDetail = state.primeVideoDetailMap.get(detailId);
+      const detailSnapshot = { ...(unchanged ? previous : snapshot), seriesTitle };
+      if (!previousDetail ||
+          previousDetail.showId !== detailSnapshot.showId ||
+          previousDetail.season !== detailSnapshot.season ||
+          previousDetail.episode !== detailSnapshot.episode ||
+          previousDetail.episodeTitle !== detailSnapshot.episodeTitle ||
+          previousDetail.seriesTitle !== detailSnapshot.seriesTitle) {
+        state.primeVideoDetailMap.set(detailId, detailSnapshot);
+      }
     }
     found++;
   }
@@ -883,20 +903,20 @@ export function setupPrimeVideoInterception() {
   win.XMLHttpRequest = PrimeVideoInterceptedXHR;
 
   const originalFetch = win.fetch.bind(win);
-  win.fetch = async function (input, init) {
+  win.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input?.url ? String(input.url) : String(input || ''));
-    let bodyText = '';
-    if (url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+    if (!url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) return originalFetch(input, init);
+
+    return (async () => {
+      let bodyText = '';
       try {
         if (init && typeof init.body === 'string') bodyText = init.body;
         else if (input && typeof input === 'object' && input.clone) bodyText = await input.clone().text().catch(() => '');
       } catch (_) {}
-    }
-    const response = await originalFetch(input, init);
-    if (url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+      const response = await originalFetch(input, init);
       try { processPrimeVideoMetadata(await response.clone().json(), bodyText, url); }
       catch (error) { console.error('[PVE] Failed to process fetch response:', error); }
-    }
-    return response;
+      return response;
+    })();
   };
 }

@@ -22,7 +22,17 @@ function loadAppleTvExtractor() {
   ].join('\n')
     .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?function\b|const\b|let\b|var\b|class\b)/g, '');
-  source += '\nglobalThis.appleTvExports = { parseAppleTvHlsMetadata, extractAppleTvMarkers, processAppleTvMetadata, processAppleTvHlsManifest };';
+  source += `
+    globalThis.appleTvExports = {
+      parseAppleTvHlsMetadata,
+      extractAppleTvMarkers,
+      processAppleTvMetadata,
+      processAppleTvHlsManifest,
+      fetchAppleTvSeriesCatalog,
+      setNativeFetchForTest(fetch) { appleTvNativeFetch = fetch; },
+      setUtsSessionForTest(session) { appleTvUtsSession = session; },
+    };
+  `;
 
   const document = {
     title: 'Lucky - Apple TV',
@@ -139,6 +149,127 @@ test('captures a whole Apple TV episode catalogue from one response', () => {
     { providerId: 'umc.cmc.episode2', season: 1, episode: 2, title: 'Laat ze dansen' },
   ]);
   assert.deepEqual(plain(apple.detectedShows), [{ title: 'Lucky', showId: 'umc.cmc.show123' }]);
+});
+
+test('walks standalone playable metadata once', () => {
+  const apple = loadAppleTvExtractor();
+  let rootEnumerations = 0;
+  const payload = new Proxy({
+    playback: {
+      id: 'playable-1',
+      canonicalId: 'umc.cmc.episode1',
+      assets: { hlsUrl: 'https://example.test/episode1.m3u8' },
+      canonicalMetadata: {
+        showTitle: 'Lucky',
+        seasonNumber: 1,
+        episodeNumber: 1,
+        episodeTitle: 'Geen half werk',
+      },
+    },
+  }, {
+    ownKeys(target) {
+      rootEnumerations++;
+      return Reflect.ownKeys(target);
+    },
+  });
+
+  assert.deepEqual(plain(apple.processAppleTvMetadata(payload, '', 'umc.cmc.show123')), {
+    episodeCount: 0,
+    manifestCount: 1,
+  });
+  assert.equal(rootEnumerations, 1);
+  assert.deepEqual(plain(apple.state.providerEpisodes), [
+    { providerId: 'umc.cmc.episode1', season: 1, episode: 1, title: 'Geen half werk' },
+  ]);
+});
+
+test('builds one canonical-id index for catalogue fallback matching', () => {
+  const apple = loadAppleTvExtractor();
+  let playableEnumerations = 0;
+  const playables = new Proxy({
+    'playable-1': {
+      id: 'playable-1',
+      canonicalId: 'umc.cmc.episode1',
+      canonicalMetadata: { showTitle: 'Lucky', seasonNumber: 1, episodeNumber: 1, episodeTitle: 'One' },
+    },
+    'playable-2': {
+      id: 'playable-2',
+      canonicalId: 'umc.cmc.episode2',
+      canonicalMetadata: { showTitle: 'Lucky', seasonNumber: 1, episodeNumber: 2, episodeTitle: 'Two' },
+    },
+    'playable-3': {
+      id: 'playable-3',
+      canonicalId: 'umc.cmc.episode3',
+      canonicalMetadata: { showTitle: 'Lucky', seasonNumber: 1, episodeNumber: 3, episodeTitle: 'Three' },
+    },
+  }, {
+    ownKeys(target) {
+      playableEnumerations++;
+      return Reflect.ownKeys(target);
+    },
+  });
+
+  const result = apple.processAppleTvMetadata({
+    data: {
+      episodes: [
+        { id: 'umc.cmc.episode1', seasonNumber: 1, episodeNumber: 1, title: 'One' },
+        { id: 'umc.cmc.episode2', seasonNumber: 1, episodeNumber: 2, title: 'Two' },
+        { id: 'umc.cmc.episode3', seasonNumber: 1, episodeNumber: 3, title: 'Three' },
+      ],
+      episodesPlayables: {},
+      playables,
+    },
+  }, '', 'umc.cmc.show123');
+
+  assert.deepEqual(plain(result), { episodeCount: 3, manifestCount: 0 });
+  assert.equal(playableEnumerations, 2);
+  assert.deepEqual(plain(apple.state.providerEpisodes.map(episode => episode.providerId)), [
+    'umc.cmc.episode1',
+    'umc.cmc.episode2',
+    'umc.cmc.episode3',
+  ]);
+});
+
+test('reuses catalogue discovery IDs during series pagination', async () => {
+  const apple = loadAppleTvExtractor();
+  let catalogueEnumerations = 0;
+  const data = new Proxy({
+    episodes: [
+      { id: 'umc.cmc.episode1', seasonNumber: 1, episodeNumber: 1, title: 'One' },
+      { id: 'umc.cmc.episode2', seasonNumber: 1, episodeNumber: 2, title: 'Two' },
+    ],
+    episodesPlayables: {},
+    playables: {},
+  }, {
+    ownKeys(target) {
+      catalogueEnumerations++;
+      return Reflect.ownKeys(target);
+    },
+  });
+  apple.setUtsSessionForTest({
+    configureParams: {
+      baseUrl: 'https://uts.example.test',
+      developerToken: 'developer-token',
+    },
+    configuration: {
+      applicationProps: {
+        routes: {
+          getShowEpisodes: { path: '/shows/{showId}/episodes', requiredParamsType: 'showEpisodes' },
+        },
+        requiredParamsMap: { showEpisodes: { locale: 'en-US' } },
+      },
+    },
+  });
+  apple.setNativeFetchForTest(async () => ({
+    ok: true,
+    json: async () => ({ data }),
+  }));
+
+  assert.deepEqual(plain(await apple.fetchAppleTvSeriesCatalog('umc.cmc.show123')), {
+    episodeCount: 2,
+    manifestCount: 0,
+  });
+  assert.equal(catalogueEnumerations, 1);
 });
 
 test('logs exact Apple TV timestamps in the same per-episode shape as Prime Video', () => {

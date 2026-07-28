@@ -537,36 +537,59 @@ function setupPanelHandler() {
 }
 
 function syncVisibility() {
+  if (!state.panelVisible) return;
   const controls =
     document.querySelector('[data-uia="controls-standard"]') ||
     document.querySelector('[class*="PlayerControls"]') ||
     document.querySelector('.watch-video--bottom-controls-container');
-  if (!controls || !state.panelVisible) return;
+  if (!controls) return;
   const panel = document.getElementById('nfe-panel');
   if (!panel) return;
   const visible = parseFloat(getComputedStyle(controls).opacity) > 0.05;
-  panel.style.opacity = visible ? '1' : '0';
-  panel.style.pointerEvents = visible ? 'auto' : 'none';
+  const opacity = visible ? '1' : '0';
+  const pointerEvents = visible ? 'auto' : 'none';
+  if (panel.style.opacity !== opacity) panel.style.opacity = opacity;
+  if (panel.style.pointerEvents !== pointerEvents) panel.style.pointerEvents = pointerEvents;
 }
 
 function setButtonVisibility(visible) {
   const button = document.getElementById('nfe-btn');
   if (!button) return;
-  button.style.opacity = visible ? '0.85' : '0';
-  button.style.pointerEvents = visible ? 'auto' : 'none';
+  const opacity = visible ? '0.85' : '0';
+  const pointerEvents = visible ? 'auto' : 'none';
+  if (button.style.opacity !== opacity) button.style.opacity = opacity;
+  if (button.style.pointerEvents !== pointerEvents) button.style.pointerEvents = pointerEvents;
 }
 
 function resetButtonIdleTimer() {
   clearTimeout(buttonHideTimer);
   setButtonVisibility(true);
-  buttonHideTimer = setTimeout(() => setButtonVisibility(false), BUTTON_IDLE_DELAY_MS);
+  buttonHideTimer = setTimeout(() => {
+    buttonHideTimer = null;
+    setButtonVisibility(false);
+  }, BUTTON_IDLE_DELAY_MS);
 }
 
 function setupControlVisibilityHandler() {
+  let framePending = false;
+  let trailingSyncTimer = null;
+  const scheduleFrame = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame
+    : callback => setTimeout(callback, 0);
+
   document.addEventListener('mousemove', () => {
-    resetButtonIdleTimer();
-    syncVisibility();
-    setTimeout(syncVisibility, 250);
+    if (framePending) return;
+    framePending = true;
+    scheduleFrame(() => {
+      framePending = false;
+      resetButtonIdleTimer();
+      syncVisibility();
+      if (trailingSyncTimer != null) clearTimeout(trailingSyncTimer);
+      trailingSyncTimer = setTimeout(() => {
+        trailingSyncTimer = null;
+        syncVisibility();
+      }, 250);
+    });
   }, true);
 }
 
@@ -598,8 +621,10 @@ export function bootstrapProvider({
     }
     if (inPlayer) {
       const buttonMissing = !document.getElementById('nfe-btn');
-      injectBtn(providerName, getNextEpBtn);
-      if (buttonMissing) resetButtonIdleTimer();
+      if (buttonMissing) {
+        injectBtn(providerName, getNextEpBtn);
+        resetButtonIdleTimer();
+      }
       syncVisibility();
     }
   }, 1000);

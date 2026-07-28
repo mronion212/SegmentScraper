@@ -16,6 +16,53 @@ export function setProviderName(name) {
   currentProvider = name;
 }
 
+function bindPanelCallback(element, callbackName, logMessage) {
+  if (!element) return;
+  element.addEventListener('click', () => {
+    if (logMessage) console.log(logMessage);
+    if (window.nfePanelCallbacks && window.nfePanelCallbacks[callbackName]) {
+      window.nfePanelCallbacks[callbackName]();
+    }
+  });
+}
+
+function bindButtonClickOnEnter(input, getButton) {
+  if (!input) return;
+  input.addEventListener('keydown', event => {
+    if (event.key !== 'Enter') return;
+    const button = getButton();
+    if (button) button.click();
+  });
+}
+
+function setupPanelEventListeners() {
+  const closeBtn = document.getElementById('nfe-close');
+  const exportBtn = document.getElementById('nfe-export');
+  const submitBtn = document.getElementById('nfe-submit');
+  const clearBtn = document.getElementById('nfe-clear');
+  const imdbSetBtn = document.getElementById('nfe-imdb-set');
+  const imdbSearchBtn = document.getElementById('nfe-imdb-search');
+  const imdbInput = document.getElementById('nfe-imdb-input');
+  const apikeySetBtn = document.getElementById('nfe-apikey-set');
+  const apikeyInput = document.getElementById('nfe-apikey-input');
+  const tvdbSetBtn = document.getElementById('nfe-tvdb-set');
+  const tvdbInputs = [document.getElementById('nfe-tvdb-apikey-input'), document.getElementById('nfe-tvdb-pin-input')];
+
+  bindPanelCallback(closeBtn, 'onClose', '[NFE] Close button clicked');
+  bindPanelCallback(exportBtn, 'onExport', '[NFE] Export button clicked');
+  bindPanelCallback(submitBtn, 'onSubmit', '[NFE] Submit button clicked');
+  bindPanelCallback(clearBtn, 'onClear', '[NFE] Clear button clicked');
+  bindPanelCallback(imdbSetBtn, 'onImdbSet', '[NFE] IMDB set button clicked');
+  bindPanelCallback(imdbSearchBtn, 'onImdbSearch', '[NFE] IMDB search button clicked');
+  bindButtonClickOnEnter(imdbInput, () => document.getElementById('nfe-imdb-set'));
+
+  bindPanelCallback(apikeySetBtn, 'onApikeySet', '[NFE] API key set button clicked');
+  bindButtonClickOnEnter(apikeyInput, () => document.getElementById('nfe-apikey-set'));
+
+  bindPanelCallback(tvdbSetBtn, 'onTvdbSet');
+  tvdbInputs.filter(Boolean).forEach(input => bindButtonClickOnEnter(input, () => tvdbSetBtn));
+}
+
 /**
  * Create the UI panel with provider-specific styling
  * This function creates the panel and attaches all event handlers
@@ -182,83 +229,7 @@ export function createPanel() {
   document.body.appendChild(panel);
   console.log('[NFE] Panel created and appended to body');
 
-  // Attach event listeners - use window.nfePanelCallbacks
-  const setupEventListeners = () => {
-    const closeBtn = document.getElementById('nfe-close');
-    const exportBtn = document.getElementById('nfe-export');
-    const submitBtn = document.getElementById('nfe-submit');
-    const clearBtn = document.getElementById('nfe-clear');
-    const imdbSetBtn = document.getElementById('nfe-imdb-set');
-    const imdbSearchBtn = document.getElementById('nfe-imdb-search');
-    const imdbInput = document.getElementById('nfe-imdb-input');
-    const apikeySetBtn = document.getElementById('nfe-apikey-set');
-    const apikeyInput = document.getElementById('nfe-apikey-input');
-    const tvdbSetBtn = document.getElementById('nfe-tvdb-set');
-    const tvdbInputs = [document.getElementById('nfe-tvdb-apikey-input'), document.getElementById('nfe-tvdb-pin-input')];
-    
-    if (closeBtn) closeBtn.addEventListener('click', () => {
-      console.log('[NFE] Close button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onClose) {
-        window.nfePanelCallbacks.onClose();
-      }
-    });
-    if (exportBtn) exportBtn.addEventListener('click', () => {
-      console.log('[NFE] Export button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onExport) {
-        window.nfePanelCallbacks.onExport();
-      }
-    });
-    if (submitBtn) submitBtn.addEventListener('click', () => {
-      console.log('[NFE] Submit button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onSubmit) {
-        window.nfePanelCallbacks.onSubmit();
-      }
-    });
-    if (clearBtn) clearBtn.addEventListener('click', () => {
-      console.log('[NFE] Clear button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onClear) {
-        window.nfePanelCallbacks.onClear();
-      }
-    });
-    if (imdbSetBtn) imdbSetBtn.addEventListener('click', () => {
-      console.log('[NFE] IMDB set button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onImdbSet) {
-        window.nfePanelCallbacks.onImdbSet();
-      }
-    });
-    if (imdbSearchBtn) imdbSearchBtn.addEventListener('click', () => {
-      console.log('[NFE] IMDB search button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onImdbSearch) {
-        window.nfePanelCallbacks.onImdbSearch();
-      }
-    });
-    if (imdbInput) imdbInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        const imdbSetBtn = document.getElementById('nfe-imdb-set');
-        if (imdbSetBtn) imdbSetBtn.click();
-      }
-    });
-    if (apikeySetBtn) apikeySetBtn.addEventListener('click', () => {
-      console.log('[NFE] API key set button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onApikeySet) {
-        window.nfePanelCallbacks.onApikeySet();
-      }
-    });
-    if (apikeyInput) apikeyInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        const apikeySetBtn = document.getElementById('nfe-apikey-set');
-        if (apikeySetBtn) apikeySetBtn.click();
-      }
-    });
-    if (tvdbSetBtn) tvdbSetBtn.addEventListener('click', () => {
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onTvdbSet) window.nfePanelCallbacks.onTvdbSet();
-    });
-    tvdbInputs.filter(Boolean).forEach(input => input.addEventListener('keydown', event => {
-      if (event.key === 'Enter') tvdbSetBtn?.click();
-    }));
-  };
-  
-  setupEventListeners();
+  setupPanelEventListeners();
 
   panel.addEventListener('click', e => e.stopPropagation());
   panel.addEventListener('mousedown', e => e.stopPropagation());

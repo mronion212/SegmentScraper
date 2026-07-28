@@ -335,10 +335,14 @@ export function isSkyShowtimePlayerPage() {
 export function setupSkyShowtimeInterception() {
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
   const fetchedUrls = new Set();
+  const inFlightUrls = new Set();
   const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
 
   const processCapturedMetadata = (data, url, via) => {
-    if (url) fetchedUrls.add(url);
+    if (url) {
+      inFlightUrls.delete(url);
+      fetchedUrls.add(url);
+    }
     try {
       processSkyShowtimeMetadata(data, `${via}: ${url}`);
     } catch (error) {
@@ -347,15 +351,24 @@ export function setupSkyShowtimeInterception() {
   };
 
   if (originalFetch) {
-    win.fetch = async function (input, init) {
+    win.fetch = function (input, init) {
       const url = getSkyShowtimeRequestUrl(input);
-      const response = await originalFetch(input, init);
-      if (isSkyShowtimeCatalogueUrl(url)) {
+      if (!isSkyShowtimeCatalogueUrl(url)) return originalFetch(input, init);
+
+      inFlightUrls.add(url);
+      return originalFetch(input, init).then(response => {
         response.clone().json()
           .then(data => processCapturedMetadata(data, url, 'page-fetch'))
-          .catch(error => console.warn('[SSE] Failed to read page fetch response:', error));
-      }
-      return response;
+          .catch(error => {
+            inFlightUrls.delete(url);
+            console.warn('[SSE] Failed to read page fetch response:', error);
+            refetchCatalogue(url);
+          });
+        return response;
+      }, error => {
+        inFlightUrls.delete(url);
+        throw error;
+      });
     };
   }
 
@@ -372,9 +385,14 @@ export function setupSkyShowtimeInterception() {
       };
       xhr.send = function (...args) {
         if (isSkyShowtimeCatalogueUrl(url)) {
+          inFlightUrls.add(url);
           xhr.addEventListener('load', () => {
             try { processCapturedMetadata(JSON.parse(xhr.responseText), url, 'page-xhr'); }
-            catch (error) { console.warn('[SSE] Failed to read page XHR response:', error); }
+            catch (error) {
+              inFlightUrls.delete(url);
+              console.warn('[SSE] Failed to read page XHR response:', error);
+              refetchCatalogue(url);
+            }
           });
         }
         return originalSend(...args);
@@ -388,8 +406,8 @@ export function setupSkyShowtimeInterception() {
 
   installSkyShowtimeWorkerBridge(win, processCapturedMetadata);
 
-  const refetchCatalogue = url => {
-    if (!isSkyShowtimeCatalogueUrl(url) || fetchedUrls.has(url)) return;
+  function refetchCatalogue(url) {
+    if (!isSkyShowtimeCatalogueUrl(url) || fetchedUrls.has(url) || inFlightUrls.has(url)) return;
     fetchedUrls.add(url);
     const gmRequest = getGmRequest();
     if (gmRequest) {
@@ -427,7 +445,7 @@ export function setupSkyShowtimeInterception() {
           console.warn('[SSE] Catalogue refetch failed:', error);
         });
     }
-  };
+  }
 
   const scanResourceEntries = entries => {
     for (const entry of entries || []) refetchCatalogue(entry?.name || '');

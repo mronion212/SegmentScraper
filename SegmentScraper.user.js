@@ -33,10 +33,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const _unsafeWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
-
-  // ─── core/state.js ───
 
 /**
  * Shared state management for SegmentScraper
@@ -90,13 +87,12 @@ const createState = (providerName) => ({
 
 const state = createState('Streaming Service');
 
-
-  // ─── core/network.js ───
-
 /**
  * Shared network utilities for SegmentScraper
  * Handles API requests, IMDb lookups, and IntroDB integration
  */
+
+
 const INTRODB_BASE = 'https://api.introdb.app';
 
 /**
@@ -421,10 +417,8 @@ async function lookupImdbTitle(imdbId) {
   }
 }
 
-
-  // ─── core/introdb-settings.js ───
-
 /** Local IntroDB credential storage. The key is never returned to UI code. */
+
 
 const INTRODB_API_KEY_STORAGE = 'segmentScraper.introdb.apikey';
 
@@ -454,10 +448,9 @@ function saveIntrodbSettings(apiKey) {
   return { configured: Boolean(nextApiKey) };
 }
 
-
-  // ─── core/tvdb.js ───
-
 /** TVDB v4 authentication, local settings, and conservative episode mapping. */
+
+
 const TVDB_BASE = 'https://api4.thetvdb.com/v4';
 const TVDB_STORAGE = {
   apiKey: 'segmentScraper.tvdb.apikey',
@@ -1039,9 +1032,6 @@ function recordProviderEpisode(episode, showId = state.showId) {
   }
 }
 
-
-  // ─── config/provider-config.js ───
-
 /**
  * Provider configuration layer
  * Defines shared Netflix panel styling and provider-specific settings
@@ -1223,9 +1213,6 @@ function getProviderNames() {
   return Object.keys(PROVIDER_CONFIGS);
 }
 
-
-  // ─── normalization/segment-mapper.js ───
-
 /**
  * Segment type normalization layer
  * Maps provider-specific segment names to shared internal format
@@ -1339,9 +1326,6 @@ function getProviderSegmentTypes(providerName) {
   return [...new Set(Object.values(mappings))];
 }
 
-
-  // ─── providers/timestamp-logger.js ───
-
 /** Shared, provider-agnostic logging for newly captured episode timestamps. */
 
 /** Format seconds as mm:ss.mmm, adding hours only when needed. */
@@ -1386,13 +1370,12 @@ function logCapturedTimestamps({
   console.info(`[${prefix}] Captured timestamps · ${showTitle || 'Unknown series'} · ${episodeLabel}`, details);
 }
 
-
-  // ─── ui/panel.js ───
-
 /**
  * Shared UI panel component
  * Creates a reusable panel with provider-configurable styling
  */
+
+
 // Default provider name
 let currentProvider = 'netflix';
 
@@ -1401,6 +1384,53 @@ let currentProvider = 'netflix';
  */
 function setProviderName(name) {
   currentProvider = name;
+}
+
+function bindPanelCallback(element, callbackName, logMessage) {
+  if (!element) return;
+  element.addEventListener('click', () => {
+    if (logMessage) console.log(logMessage);
+    if (window.nfePanelCallbacks && window.nfePanelCallbacks[callbackName]) {
+      window.nfePanelCallbacks[callbackName]();
+    }
+  });
+}
+
+function bindButtonClickOnEnter(input, getButton) {
+  if (!input) return;
+  input.addEventListener('keydown', event => {
+    if (event.key !== 'Enter') return;
+    const button = getButton();
+    if (button) button.click();
+  });
+}
+
+function setupPanelEventListeners() {
+  const closeBtn = document.getElementById('nfe-close');
+  const exportBtn = document.getElementById('nfe-export');
+  const submitBtn = document.getElementById('nfe-submit');
+  const clearBtn = document.getElementById('nfe-clear');
+  const imdbSetBtn = document.getElementById('nfe-imdb-set');
+  const imdbSearchBtn = document.getElementById('nfe-imdb-search');
+  const imdbInput = document.getElementById('nfe-imdb-input');
+  const apikeySetBtn = document.getElementById('nfe-apikey-set');
+  const apikeyInput = document.getElementById('nfe-apikey-input');
+  const tvdbSetBtn = document.getElementById('nfe-tvdb-set');
+  const tvdbInputs = [document.getElementById('nfe-tvdb-apikey-input'), document.getElementById('nfe-tvdb-pin-input')];
+
+  bindPanelCallback(closeBtn, 'onClose', '[NFE] Close button clicked');
+  bindPanelCallback(exportBtn, 'onExport', '[NFE] Export button clicked');
+  bindPanelCallback(submitBtn, 'onSubmit', '[NFE] Submit button clicked');
+  bindPanelCallback(clearBtn, 'onClear', '[NFE] Clear button clicked');
+  bindPanelCallback(imdbSetBtn, 'onImdbSet', '[NFE] IMDB set button clicked');
+  bindPanelCallback(imdbSearchBtn, 'onImdbSearch', '[NFE] IMDB search button clicked');
+  bindButtonClickOnEnter(imdbInput, () => document.getElementById('nfe-imdb-set'));
+
+  bindPanelCallback(apikeySetBtn, 'onApikeySet', '[NFE] API key set button clicked');
+  bindButtonClickOnEnter(apikeyInput, () => document.getElementById('nfe-apikey-set'));
+
+  bindPanelCallback(tvdbSetBtn, 'onTvdbSet');
+  tvdbInputs.filter(Boolean).forEach(input => bindButtonClickOnEnter(input, () => tvdbSetBtn));
 }
 
 /**
@@ -1569,83 +1599,7 @@ function createPanel() {
   document.body.appendChild(panel);
   console.log('[NFE] Panel created and appended to body');
 
-  // Attach event listeners - use window.nfePanelCallbacks
-  const setupEventListeners = () => {
-    const closeBtn = document.getElementById('nfe-close');
-    const exportBtn = document.getElementById('nfe-export');
-    const submitBtn = document.getElementById('nfe-submit');
-    const clearBtn = document.getElementById('nfe-clear');
-    const imdbSetBtn = document.getElementById('nfe-imdb-set');
-    const imdbSearchBtn = document.getElementById('nfe-imdb-search');
-    const imdbInput = document.getElementById('nfe-imdb-input');
-    const apikeySetBtn = document.getElementById('nfe-apikey-set');
-    const apikeyInput = document.getElementById('nfe-apikey-input');
-    const tvdbSetBtn = document.getElementById('nfe-tvdb-set');
-    const tvdbInputs = [document.getElementById('nfe-tvdb-apikey-input'), document.getElementById('nfe-tvdb-pin-input')];
-    
-    if (closeBtn) closeBtn.addEventListener('click', () => {
-      console.log('[NFE] Close button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onClose) {
-        window.nfePanelCallbacks.onClose();
-      }
-    });
-    if (exportBtn) exportBtn.addEventListener('click', () => {
-      console.log('[NFE] Export button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onExport) {
-        window.nfePanelCallbacks.onExport();
-      }
-    });
-    if (submitBtn) submitBtn.addEventListener('click', () => {
-      console.log('[NFE] Submit button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onSubmit) {
-        window.nfePanelCallbacks.onSubmit();
-      }
-    });
-    if (clearBtn) clearBtn.addEventListener('click', () => {
-      console.log('[NFE] Clear button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onClear) {
-        window.nfePanelCallbacks.onClear();
-      }
-    });
-    if (imdbSetBtn) imdbSetBtn.addEventListener('click', () => {
-      console.log('[NFE] IMDB set button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onImdbSet) {
-        window.nfePanelCallbacks.onImdbSet();
-      }
-    });
-    if (imdbSearchBtn) imdbSearchBtn.addEventListener('click', () => {
-      console.log('[NFE] IMDB search button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onImdbSearch) {
-        window.nfePanelCallbacks.onImdbSearch();
-      }
-    });
-    if (imdbInput) imdbInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        const imdbSetBtn = document.getElementById('nfe-imdb-set');
-        if (imdbSetBtn) imdbSetBtn.click();
-      }
-    });
-    if (apikeySetBtn) apikeySetBtn.addEventListener('click', () => {
-      console.log('[NFE] API key set button clicked');
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onApikeySet) {
-        window.nfePanelCallbacks.onApikeySet();
-      }
-    });
-    if (apikeyInput) apikeyInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter') {
-        const apikeySetBtn = document.getElementById('nfe-apikey-set');
-        if (apikeySetBtn) apikeySetBtn.click();
-      }
-    });
-    if (tvdbSetBtn) tvdbSetBtn.addEventListener('click', () => {
-      if (window.nfePanelCallbacks && window.nfePanelCallbacks.onTvdbSet) window.nfePanelCallbacks.onTvdbSet();
-    });
-    tvdbInputs.filter(Boolean).forEach(input => input.addEventListener('keydown', event => {
-      if (event.key === 'Enter') tvdbSetBtn?.click();
-    }));
-  };
-  
-  setupEventListeners();
+  setupPanelEventListeners();
 
   panel.addEventListener('click', e => e.stopPropagation());
   panel.addEventListener('mousedown', e => e.stopPropagation());
@@ -1853,13 +1807,12 @@ function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   confirm.focus();
 }
 
-
-  // ─── ui/button.js ───
-
 /**
  * Shared button component
  * Injects a trigger button into the player UI
  */
+
+
 /**
  * Get the "next episode" button element (provider-specific)
  * @param {string} providerName - The provider name
@@ -1890,8 +1843,7 @@ function injectBtn(providerName, getNextBtn) {
     console.error('[NFE] No config found for provider:', providerName);
     return;
   }
-  const { colors } = config;
-  
+
   const nextBtn = getNextBtn ? getNextBtn() : getNextEpBtn(providerName);
   console.log('[NFE] nextBtn found:', !!nextBtn);
 
@@ -1960,12 +1912,12 @@ function injectBtn(providerName, getNextBtn) {
   console.log('[NFE] Button click handler attached');
 }
 
-  // ─── providers/bootstrap.js ───
-
 /**
  * Shared provider bootstrap and control flow.
  * The Netflix UI/controls are the single source of truth for every provider.
  */
+
+
 const BUTTON_IDLE_DELAY_MS = 3000;
 let activeProviderConfig = getProviderConfig('netflix');
 let buttonHideTimer;
@@ -2492,36 +2444,59 @@ function setupPanelHandler() {
 }
 
 function syncVisibility() {
+  if (!state.panelVisible) return;
   const controls =
     document.querySelector('[data-uia="controls-standard"]') ||
     document.querySelector('[class*="PlayerControls"]') ||
     document.querySelector('.watch-video--bottom-controls-container');
-  if (!controls || !state.panelVisible) return;
+  if (!controls) return;
   const panel = document.getElementById('nfe-panel');
   if (!panel) return;
   const visible = parseFloat(getComputedStyle(controls).opacity) > 0.05;
-  panel.style.opacity = visible ? '1' : '0';
-  panel.style.pointerEvents = visible ? 'auto' : 'none';
+  const opacity = visible ? '1' : '0';
+  const pointerEvents = visible ? 'auto' : 'none';
+  if (panel.style.opacity !== opacity) panel.style.opacity = opacity;
+  if (panel.style.pointerEvents !== pointerEvents) panel.style.pointerEvents = pointerEvents;
 }
 
 function setButtonVisibility(visible) {
   const button = document.getElementById('nfe-btn');
   if (!button) return;
-  button.style.opacity = visible ? '0.85' : '0';
-  button.style.pointerEvents = visible ? 'auto' : 'none';
+  const opacity = visible ? '0.85' : '0';
+  const pointerEvents = visible ? 'auto' : 'none';
+  if (button.style.opacity !== opacity) button.style.opacity = opacity;
+  if (button.style.pointerEvents !== pointerEvents) button.style.pointerEvents = pointerEvents;
 }
 
 function resetButtonIdleTimer() {
   clearTimeout(buttonHideTimer);
   setButtonVisibility(true);
-  buttonHideTimer = setTimeout(() => setButtonVisibility(false), BUTTON_IDLE_DELAY_MS);
+  buttonHideTimer = setTimeout(() => {
+    buttonHideTimer = null;
+    setButtonVisibility(false);
+  }, BUTTON_IDLE_DELAY_MS);
 }
 
 function setupControlVisibilityHandler() {
+  let framePending = false;
+  let trailingSyncTimer = null;
+  const scheduleFrame = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame
+    : callback => setTimeout(callback, 0);
+
   document.addEventListener('mousemove', () => {
-    resetButtonIdleTimer();
-    syncVisibility();
-    setTimeout(syncVisibility, 250);
+    if (framePending) return;
+    framePending = true;
+    scheduleFrame(() => {
+      framePending = false;
+      resetButtonIdleTimer();
+      syncVisibility();
+      if (trailingSyncTimer != null) clearTimeout(trailingSyncTimer);
+      trailingSyncTimer = setTimeout(() => {
+        trailingSyncTimer = null;
+        syncVisibility();
+      }, 250);
+    });
   }, true);
 }
 
@@ -2553,8 +2528,10 @@ function bootstrapProvider({
     }
     if (inPlayer) {
       const buttonMissing = !document.getElementById('nfe-btn');
-      injectBtn(providerName, getNextEpBtn);
-      if (buttonMissing) resetButtonIdleTimer();
+      if (buttonMissing) {
+        injectBtn(providerName, getNextEpBtn);
+        resetButtonIdleTimer();
+      }
       syncVisibility();
     }
   }, 1000);
@@ -2569,14 +2546,9 @@ function bootstrapProvider({
   };
 }
 
-
-  // Provider registration: netflix
   if (location.hostname === 'www.netflix.com' || location.hostname === 'netflix.com') {
 
-  // â”€â”€â”€ providers/netflix/extractor.js â”€â”€â”€
-
 /** Netflix-specific metadata interception and segment extraction. */
-
 
 
 const NETFLIX_TITLE_OVERRIDES = {
@@ -2714,21 +2686,20 @@ function setupNetflixInterception() {
   win.XMLHttpRequest = NetflixInterceptedXHR;
 
   const originalFetch = win.fetch.bind(win);
-  win.fetch = async function (input, init) {
+  win.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
-    const response = await originalFetch(input, init);
-    if (url.includes('memberapi') && url.includes('metadata')) {
+    if (!url.includes('memberapi') || !url.includes('metadata')) return originalFetch(input, init);
+
+    return (async () => {
+      const response = await originalFetch(input, init);
       try {
         const data = await response.clone().json();
         if (data?.video) processNetflixMetadata(data);
       } catch (_) {}
-    }
-    return response;
+      return response;
+    })();
   };
 }
-
-
-  // â”€â”€â”€ providers/netflix/index.js â”€â”€â”€
 
 /** Netflix provider registration. */
 
@@ -2738,16 +2709,11 @@ bootstrapProvider({
   setupInterception: setupNetflixInterception,
   isPlayerPage: () => location.pathname.startsWith('/watch'),
 });
-
   }
 
-  // Provider registration: prime-video
   if (location.hostname === 'primevideo.com' || location.hostname.endsWith('.primevideo.com') || (/^www\.amazon\./i.test(location.hostname) && location.pathname.startsWith('/gp/video/'))) {
 
-  // â”€â”€â”€ providers/prime-video/extractor.js â”€â”€â”€
-
 /** Prime Video catalogue, playback-resource, and timestamp extraction. */
-
 
 
 const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
@@ -3168,14 +3134,34 @@ function scanPrimeVideoEpisodeCatalog(root = document) {
     seen.add(titleId);
 
     const snapshot = { season, ...cardEpisode, showId };
-    const collision = findPrimeVideoEpisodeCollision(titleId, showId, season, cardEpisode.episode);
-    state.primeVideoTitleMap.set(titleId, snapshot);
-    seasonCatalog.set(cardEpisode.episode, snapshot);
-    refreshPrimeVideoEpisodeTitle(showId, season, cardEpisode.episode, cardEpisode.episodeTitle);
+    const previous = state.primeVideoTitleMap.get(titleId);
+    const unchanged = previous?.showId === showId &&
+      previous.season === season &&
+      previous.episode === cardEpisode.episode &&
+      previous.episodeTitle === cardEpisode.episodeTitle;
+    if (!unchanged) {
+      const collision = findPrimeVideoEpisodeCollision(titleId, showId, season, cardEpisode.episode);
+      state.primeVideoTitleMap.set(titleId, snapshot);
+      seasonCatalog.set(cardEpisode.episode, snapshot);
+      refreshPrimeVideoEpisodeTitle(showId, season, cardEpisode.episode, cardEpisode.episodeTitle);
+      if (!collision) {
+        recordProviderEpisode({ providerId: titleId, season, episode: cardEpisode.episode, title: cardEpisode.episodeTitle }, showId);
+      }
+    } else if (!seasonCatalog.has(cardEpisode.episode)) {
+      seasonCatalog.set(cardEpisode.episode, previous);
+    }
     const detailId = readPrimeVideoCardDetailId(card);
-    if (detailId) state.primeVideoDetailMap.set(detailId, { ...snapshot, seriesTitle });
-    if (!collision) {
-      recordProviderEpisode({ providerId: titleId, season, episode: cardEpisode.episode, title: cardEpisode.episodeTitle }, showId);
+    if (detailId) {
+      const previousDetail = state.primeVideoDetailMap.get(detailId);
+      const detailSnapshot = { ...(unchanged ? previous : snapshot), seriesTitle };
+      if (!previousDetail ||
+          previousDetail.showId !== detailSnapshot.showId ||
+          previousDetail.season !== detailSnapshot.season ||
+          previousDetail.episode !== detailSnapshot.episode ||
+          previousDetail.episodeTitle !== detailSnapshot.episodeTitle ||
+          previousDetail.seriesTitle !== detailSnapshot.seriesTitle) {
+        state.primeVideoDetailMap.set(detailId, detailSnapshot);
+      }
     }
     found++;
   }
@@ -3628,26 +3614,23 @@ function setupPrimeVideoInterception() {
   win.XMLHttpRequest = PrimeVideoInterceptedXHR;
 
   const originalFetch = win.fetch.bind(win);
-  win.fetch = async function (input, init) {
+  win.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input?.url ? String(input.url) : String(input || ''));
-    let bodyText = '';
-    if (url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+    if (!url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) return originalFetch(input, init);
+
+    return (async () => {
+      let bodyText = '';
       try {
         if (init && typeof init.body === 'string') bodyText = init.body;
         else if (input && typeof input === 'object' && input.clone) bodyText = await input.clone().text().catch(() => '');
       } catch (_) {}
-    }
-    const response = await originalFetch(input, init);
-    if (url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+      const response = await originalFetch(input, init);
       try { processPrimeVideoMetadata(await response.clone().json(), bodyText, url); }
       catch (error) { console.error('[PVE] Failed to process fetch response:', error); }
-    }
-    return response;
+      return response;
+    })();
   };
 }
-
-
-  // â”€â”€â”€ providers/prime-video/index.js â”€â”€â”€
 
 /** Prime Video provider registration. */
 
@@ -3656,16 +3639,11 @@ bootstrapProvider({
   providerName: 'prime-video',
   setupInterception: setupPrimeVideoInterception,
 });
-
   }
 
-  // Provider registration: apple-tv
   if (location.hostname === 'tv.apple.com') {
 
-  // â”€â”€â”€ providers/apple-tv/extractor.js â”€â”€â”€
-
 /** Apple TV catalogue, HLS metadata, and timestamp extraction. */
-
 
 
 const APPLE_TV_ID_PATTERN = /^umc\.cmc\.[a-z0-9]+$/i;
@@ -3976,13 +3954,24 @@ function ingestAppleTvPlayable(playable, episodeRoot = null, showId = state.show
   return episode;
 }
 
-function findAppleTvCatalogNodes(root) {
-  const found = [];
+function discoverAppleTvMetadataNodes(root) {
+  const catalogs = [];
+  const standalonePlayables = [];
   const visited = new WeakSet();
   function walk(node, depth = 0) {
-    if (!node || typeof node !== 'object' || depth > 9 || visited.has(node)) return;
+    const maxDepth = catalogs.length ? 9 : 10;
+    if (!node || typeof node !== 'object' || depth > maxDepth || visited.has(node)) return;
     visited.add(node);
-    if (Array.isArray(node.episodes) && node.playables && typeof node.playables === 'object') found.push(node);
+    if (depth <= 9 && Array.isArray(node.episodes) && node.playables && typeof node.playables === 'object') {
+      catalogs.push(node);
+      standalonePlayables.length = 0;
+    } else if (
+      !catalogs.length &&
+      APPLE_TV_ID_PATTERN.test(String(node.canonicalId || '')) &&
+      (node.assets?.hlsUrl || node.hlsUrl)
+    ) {
+      standalonePlayables.push(node);
+    }
     if (Array.isArray(node)) {
       node.forEach(value => walk(value, depth + 1));
       return;
@@ -3990,56 +3979,60 @@ function findAppleTvCatalogNodes(root) {
     Object.values(node).forEach(value => walk(value, depth + 1));
   }
   walk(root);
-  return found;
+  return { catalogs, standalonePlayables };
 }
 
-function processAppleTvCatalogNode(catalog, showId) {
+function processAppleTvCatalogNode(catalog, showId, catalogEpisodeIds = null) {
   const playables = catalog.playables || {};
   const episodePlayableMap = catalog.episodesPlayables || {};
+  let playablesByCanonicalId = null;
   let manifestCount = 0;
 
   for (const episodeRoot of catalog.episodes || []) {
+    const catalogEpisodeId = String(episodeRoot?.id || '');
+    if (catalogEpisodeId && catalogEpisodeIds) catalogEpisodeIds.add(catalogEpisodeId);
     const playableId = episodePlayableMap[episodeRoot.id]?.playableId || episodePlayableMap[episodeRoot.id]?.[0]?.playableId;
-    const playable = playables[playableId] || Object.values(playables).find(item => item?.canonicalId === episodeRoot.id) || {};
+    let playable = playables[playableId];
+    if (!playable) {
+      if (!playablesByCanonicalId) {
+        playablesByCanonicalId = new Map();
+        for (const item of Object.values(playables)) {
+          if (!playablesByCanonicalId.has(item?.canonicalId)) {
+            playablesByCanonicalId.set(item?.canonicalId, item);
+          }
+        }
+      }
+      playable = playablesByCanonicalId.get(episodeRoot.id);
+    }
+    playable ||= {};
     const episode = ingestAppleTvPlayable({ ...playable, canonicalId: playable.canonicalId || episodeRoot.id }, episodeRoot, showId);
     if (episode && (playable.assets?.hlsUrl || playable.hlsUrl)) manifestCount++;
   }
   return { episodeCount: catalog.episodes?.length || 0, manifestCount };
 }
 
-function scanAppleTvPlayableObjects(root, showId) {
-  const visited = new WeakSet();
+function processAppleTvPlayableObjects(playables, showId) {
   let manifestCount = 0;
-  function walk(node, depth = 0) {
-    if (!node || typeof node !== 'object' || depth > 10 || visited.has(node)) return;
-    visited.add(node);
-    if (APPLE_TV_ID_PATTERN.test(String(node.canonicalId || '')) && (node.assets?.hlsUrl || node.hlsUrl)) {
-      if (ingestAppleTvPlayable(node, null, showId)) manifestCount++;
-    }
-    if (Array.isArray(node)) {
-      node.forEach(value => walk(value, depth + 1));
-      return;
-    }
-    Object.values(node).forEach(value => walk(value, depth + 1));
+  for (const playable of playables) {
+    if (ingestAppleTvPlayable(playable, null, showId)) manifestCount++;
   }
-  walk(root);
   return manifestCount;
 }
 
-function processAppleTvMetadata(payload, url = '', explicitShowId = null) {
+function processAppleTvMetadata(payload, url = '', explicitShowId = null, catalogEpisodeIds = null) {
   ensureAppleTvState();
   if (!payload || typeof payload !== 'object') return { episodeCount: 0, manifestCount: 0 };
   const root = payload.data && typeof payload.data === 'object' ? payload.data : payload;
   const showId = explicitShowId || readAppleTvShowId(url) || readAppleTvShowId() || state.showId;
   let episodeCount = 0;
   let manifestCount = 0;
-  const catalogs = findAppleTvCatalogNodes(root);
+  const { catalogs, standalonePlayables } = discoverAppleTvMetadataNodes(root);
   for (const catalog of catalogs) {
-    const result = processAppleTvCatalogNode(catalog, showId);
+    const result = processAppleTvCatalogNode(catalog, showId, catalogEpisodeIds);
     episodeCount += result.episodeCount;
     manifestCount += result.manifestCount;
   }
-  if (!catalogs.length) manifestCount += scanAppleTvPlayableObjects(root, showId);
+  if (!catalogs.length) manifestCount += processAppleTvPlayableObjects(standalonePlayables, showId);
   return { episodeCount, manifestCount };
 }
 
@@ -4136,12 +4129,9 @@ async function fetchAppleTvSeriesCatalog(showId) {
     });
     if (!response.ok) throw new Error(`Apple TV catalogue returned HTTP ${response.status}`);
     const payload = await response.json();
-    const result = processAppleTvMetadata(payload, request.url, normalizedShowId);
-    const pageEpisodeIds = findAppleTvCatalogNodes(payload?.data || payload)
-      .flatMap(catalog => catalog.episodes || [])
-      .map(episode => String(episode?.id || ''))
-      .filter(Boolean);
-    if (pageEpisodeIds.length) {
+    const pageEpisodeIds = new Set();
+    const result = processAppleTvMetadata(payload, request.url, normalizedShowId, pageEpisodeIds);
+    if (pageEpisodeIds.size) {
       pageEpisodeIds.forEach(id => seenEpisodeIds.add(id));
       episodeCount = seenEpisodeIds.size;
     } else {
@@ -4259,27 +4249,21 @@ function setupAppleTvInterception() {
   }, { once: true });
 }
 
-
-  // â”€â”€â”€ providers/apple-tv/index.js â”€â”€â”€
-
 /** Apple TV provider registration. */
+
+
 bootstrapProvider({
   providerName: 'apple-tv',
   setupInterception: setupAppleTvInterception,
 });
-
   }
 
-  // Provider registration: videoland
   if (location.hostname === 'videoland.com' || location.hostname.endsWith('.videoland.com')) {
-
-  // â”€â”€â”€ providers/videoland/extractor.js â”€â”€â”€
 
 /**
  * Videoland-specific extraction logic.
  * Captures /layout responses and joins root episode metadata to video chapters.
  */
-
 
 
 const VIDEOLAND_LAYOUT_URL_MATCH = /\/layout(\?|$)/i;
@@ -4495,9 +4479,6 @@ function setupVideolandInterception() {
   win.XMLHttpRequest = VideolandInterceptedXHR;
 }
 
-
-  // â”€â”€â”€ providers/videoland/index.js â”€â”€â”€
-
 /** Videoland provider registration. */
 
 
@@ -4505,13 +4486,9 @@ bootstrapProvider({
   providerName: 'videoland',
   setupInterception: setupVideolandInterception,
 });
-
   }
 
-  // Provider registration: skyshowtime
   if (location.hostname === 'skyshowtime.com' || location.hostname.endsWith('.skyshowtime.com')) {
-
-  // â”€â”€â”€ providers/skyshowtime/extractor.js â”€â”€â”€
 
 /**
  * SkyShowtime-specific catalogue interception and segment extraction.
@@ -4520,7 +4497,6 @@ bootstrapProvider({
  * worker. Both paths are observed, with a Resource Timing + GM request as a
  * fallback when only the exact catalogue URL is visible to the userscript.
  */
-
 
 
 const SKYSHOWTIME_WORKER_MESSAGE = '__segmentScraperSkyShowtime';
@@ -4847,10 +4823,14 @@ function isSkyShowtimePlayerPage() {
 function setupSkyShowtimeInterception() {
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
   const fetchedUrls = new Set();
+  const inFlightUrls = new Set();
   const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
 
   const processCapturedMetadata = (data, url, via) => {
-    if (url) fetchedUrls.add(url);
+    if (url) {
+      inFlightUrls.delete(url);
+      fetchedUrls.add(url);
+    }
     try {
       processSkyShowtimeMetadata(data, `${via}: ${url}`);
     } catch (error) {
@@ -4859,15 +4839,24 @@ function setupSkyShowtimeInterception() {
   };
 
   if (originalFetch) {
-    win.fetch = async function (input, init) {
+    win.fetch = function (input, init) {
       const url = getSkyShowtimeRequestUrl(input);
-      const response = await originalFetch(input, init);
-      if (isSkyShowtimeCatalogueUrl(url)) {
+      if (!isSkyShowtimeCatalogueUrl(url)) return originalFetch(input, init);
+
+      inFlightUrls.add(url);
+      return originalFetch(input, init).then(response => {
         response.clone().json()
           .then(data => processCapturedMetadata(data, url, 'page-fetch'))
-          .catch(error => console.warn('[SSE] Failed to read page fetch response:', error));
-      }
-      return response;
+          .catch(error => {
+            inFlightUrls.delete(url);
+            console.warn('[SSE] Failed to read page fetch response:', error);
+            refetchCatalogue(url);
+          });
+        return response;
+      }, error => {
+        inFlightUrls.delete(url);
+        throw error;
+      });
     };
   }
 
@@ -4884,9 +4873,14 @@ function setupSkyShowtimeInterception() {
       };
       xhr.send = function (...args) {
         if (isSkyShowtimeCatalogueUrl(url)) {
+          inFlightUrls.add(url);
           xhr.addEventListener('load', () => {
             try { processCapturedMetadata(JSON.parse(xhr.responseText), url, 'page-xhr'); }
-            catch (error) { console.warn('[SSE] Failed to read page XHR response:', error); }
+            catch (error) {
+              inFlightUrls.delete(url);
+              console.warn('[SSE] Failed to read page XHR response:', error);
+              refetchCatalogue(url);
+            }
           });
         }
         return originalSend(...args);
@@ -4900,8 +4894,8 @@ function setupSkyShowtimeInterception() {
 
   installSkyShowtimeWorkerBridge(win, processCapturedMetadata);
 
-  const refetchCatalogue = url => {
-    if (!isSkyShowtimeCatalogueUrl(url) || fetchedUrls.has(url)) return;
+  function refetchCatalogue(url) {
+    if (!isSkyShowtimeCatalogueUrl(url) || fetchedUrls.has(url) || inFlightUrls.has(url)) return;
     fetchedUrls.add(url);
     const gmRequest = getGmRequest();
     if (gmRequest) {
@@ -4939,7 +4933,7 @@ function setupSkyShowtimeInterception() {
           console.warn('[SSE] Catalogue refetch failed:', error);
         });
     }
-  };
+  }
 
   const scanResourceEntries = entries => {
     for (const entry of entries || []) refetchCatalogue(entry?.name || '');
@@ -4955,9 +4949,6 @@ function setupSkyShowtimeInterception() {
   }
 }
 
-
-  // â”€â”€â”€ providers/skyshowtime/index.js â”€â”€â”€
-
 /** SkyShowtime provider registration. */
 
 
@@ -4966,22 +4957,16 @@ bootstrapProvider({
   setupInterception: setupSkyShowtimeInterception,
   isPlayerPage: isSkyShowtimePlayerPage,
 });
-
   }
 
-  // Provider registration: crunchyroll
   if (location.hostname === 'crunchyroll.com' || location.hostname.endsWith('.crunchyroll.com')) {
-
-  // â”€â”€â”€ providers/crunchyroll/extractor.js â”€â”€â”€
 
 /** Crunchyroll page metadata and skip-event extraction. */
 
 
-
-
-
 const CRUNCHYROLL_SKIP_EVENTS_BASE = 'https://static.crunchyroll.com/skip-events/production';
 const CRUNCHYROLL_SCAN_INTERVAL_MS = 750;
+const crunchyrollStructuredDataCache = new WeakMap();
 
 function ensureCrunchyrollState() {
   if (!(state.crunchyrollRegisteredEpisodes instanceof Set)) state.crunchyrollRegisteredEpisodes = new Set();
@@ -5008,6 +4993,18 @@ function flattenStructuredData(value, output = []) {
   output.push(value);
   if (Array.isArray(value['@graph'])) flattenStructuredData(value['@graph'], output);
   return output;
+}
+
+function readCrunchyrollStructuredData(script) {
+  const serialized = script.textContent || '';
+  const cached = crunchyrollStructuredDataCache.get(script);
+  if (cached?.serialized === serialized) return cached.items;
+
+  const items = [];
+  try { flattenStructuredData(JSON.parse(serialized), items); }
+  catch (_) {}
+  crunchyrollStructuredDataCache.set(script, { serialized, items });
+  return items;
 }
 
 function extractCrunchyrollSeriesId(value) {
@@ -5041,8 +5038,7 @@ function readCrunchyrollPageMetadata(doc = document, pathname = location.pathnam
 
   const structuredData = [];
   for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
-    try { flattenStructuredData(JSON.parse(script.textContent || ''), structuredData); }
-    catch (_) {}
+    structuredData.push(...readCrunchyrollStructuredData(script));
   }
 
   const episodeData = structuredData.find(item => {
@@ -5206,6 +5202,8 @@ function setupCrunchyrollInterception() {
   const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
 
   const scanCurrentEpisode = () => {
+    const watchId = getCrunchyrollWatchId(location.pathname);
+    if (!watchId || state.crunchyrollRequestedWatchIds?.has(watchId)) return;
     const metadata = readCrunchyrollPageMetadata(document, location.pathname);
     if (!metadata) return;
     processCrunchyrollEpisode(metadata);
@@ -5219,9 +5217,6 @@ function setupCrunchyrollInterception() {
   setInterval(scanCurrentEpisode, CRUNCHYROLL_SCAN_INTERVAL_MS);
 }
 
-
-  // â”€â”€â”€ providers/crunchyroll/index.js â”€â”€â”€
-
 /** Crunchyroll provider registration. */
 
 
@@ -5230,6 +5225,5 @@ bootstrapProvider({
   setupInterception: setupCrunchyrollInterception,
   isPlayerPage: isCrunchyrollPlayerPage,
 });
-
   }
 })();
