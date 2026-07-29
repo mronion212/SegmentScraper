@@ -8,6 +8,15 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
+// Temporarily keep incomplete providers out of the distributed userscript while
+// retaining their source and tests for continued development.
+const PROVIDER_AVAILABILITY = {
+  appleTv: false,
+};
+const APPLE_TV_MATCH = PROVIDER_AVAILABILITY.appleTv
+  ? '// @match        https://tv.apple.com/*\n'
+  : '';
+
 // Userscript header template
 const USERSCRIPT_HEADER = `// ==UserScript==
 // @name         SegmentScraper v1.5.6 - Multi-Provider Timestamps Extractor
@@ -20,8 +29,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @match        https://www.primevideo.com/*
 // @match        https://www.amazon.*/gp/video/*
 // @match        https://*.primevideo.com/*
-// @match        https://tv.apple.com/*
-// @match        https://www.videoland.com/*
+${APPLE_TV_MATCH}// @match        https://www.videoland.com/*
 // @match        https://videoland.com/*
 // @match        https://v2.videoland.com/*
 // @match        https://*.videoland.com/*
@@ -106,6 +114,7 @@ function bundle() {
       files: ['providers/prime-video/extractor.js', 'providers/prime-video/index.js'],
     },
     {
+      enabled: PROVIDER_AVAILABILITY.appleTv,
       condition: "location.hostname === 'tv.apple.com'",
       files: ['providers/apple-tv/extractor.js', 'providers/apple-tv/index.js'],
     },
@@ -130,7 +139,7 @@ function bundle() {
     bundledCode += `\n${transformSource(srcDir, relativePath)}\n`;
   }
 
-  for (const provider of providerBundles) {
+  for (const provider of providerBundles.filter(provider => provider.enabled !== false)) {
     bundledCode += `\n  if (${provider.condition}) {\n`;
     for (const relativePath of provider.files) {
       bundledCode += `\n${transformSource(srcDir, relativePath)}\n`;

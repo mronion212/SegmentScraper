@@ -66,3 +66,11 @@ test('module transformation preserves code immediately following imports', () =>
     'const matcher = /https?:\\/\\//;',
   ].join('\n'));
 });
+
+test('temporarily excludes Apple TV from the distributed userscript', () => {
+  const { content } = generateInMemory();
+
+  assert.doesNotMatch(content, /@match\s+https:\/\/tv\.apple\.com\/\*/);
+  assert.doesNotMatch(content, /Apple TV provider registration/);
+  assert.doesNotMatch(content, /function setupAppleTvInterception\b/);
+});
