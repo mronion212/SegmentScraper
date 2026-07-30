@@ -1,9 +1,12 @@
 // ==UserScript==
-// @name         SegmentScraper v1.5.6 - Multi-Provider Timestamps Extractor
-// @version      1.5.6
+// @name         SegmentScraper - Multi-Provider Timestamps Extractor
+// @version      1.5.7
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
+// @homepageURL  https://github.com/mronion212/SegmentScraper
+// @updateURL    https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js
+// @downloadURL  https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js
 // @match        https://www.netflix.com/*
 // @match        https://www.disneyplus.com/*
 // @match        https://www.primevideo.com/*
@@ -26,12 +29,15 @@
 // @connect      api4.thetvdb.com
 // @connect      atom.skyshowtime.com
 // @connect      static.crunchyroll.com
+// @connect      raw.githubusercontent.com
 // @run-at       document-start
 // ==/UserScript==
 
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
+  const SEGMENTSCRAPER_VERSION = "1.5.7";
+  const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
 /**
@@ -82,9 +88,127 @@ const createState = (providerName) => ({
   tvdbPin: '',
   providerEpisodes: [],
   providerEpisodesByShowId: {},
+  updateStatus: 'idle',
+  updateRequired: false,
+  currentVersion: '',
+  latestVersion: '',
+  updateUrl: '',
 });
 
 const state = createState('Streaming Service');
+
+/**
+ * Required-update check for the generated userscript.
+ * The version and install URL are injected by the bundler from package.json.
+ */
+
+
+const VERSION_CHECK_TIMEOUT_MS = 8000;
+let updateCheckPromise = null;
+
+function parseVersion(version) {
+  const match = String(version || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/);
+  if (!match) return null;
+  return {
+    numbers: match.slice(1, 4).map(Number),
+    prerelease: match[4] ? match[4].split('.') : [],
+  };
+}
+
+function comparePrerelease(left, right) {
+  if (!left.length && !right.length) return 0;
+  if (!left.length) return 1;
+  if (!right.length) return -1;
+
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index++) {
+    if (left[index] === undefined) return -1;
+    if (right[index] === undefined) return 1;
+    if (left[index] === right[index]) continue;
+
+    const leftNumeric = /^\d+$/.test(left[index]);
+    const rightNumeric = /^\d+$/.test(right[index]);
+    if (leftNumeric && rightNumeric) return Number(left[index]) > Number(right[index]) ? 1 : -1;
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return left[index] > right[index] ? 1 : -1;
+  }
+  return 0;
+}
+
+/** Compare two semantic versions. Returns 1 when left is newer, -1 when older. */
+function compareVersions(leftVersion, rightVersion) {
+  const left = parseVersion(leftVersion);
+  const right = parseVersion(rightVersion);
+  if (!left || !right) return null;
+
+  for (let index = 0; index < 3; index++) {
+    if (left.numbers[index] === right.numbers[index]) continue;
+    return left.numbers[index] > right.numbers[index] ? 1 : -1;
+  }
+  return comparePrerelease(left.prerelease, right.prerelease);
+}
+
+/** Read the userscript version from its metadata header. */
+function extractUserscriptVersion(source) {
+  return String(source || '').match(/^\s*\/\/\s*@version\s+([^\s]+)\s*$/m)?.[1] || null;
+}
+
+function requestRemoteUserscript(request) {
+  return new Promise((resolve, reject) => {
+    request({
+      method: 'GET',
+      url: `${SEGMENTSCRAPER_UPDATE_URL}?update-check=${Date.now()}`,
+      timeout: VERSION_CHECK_TIMEOUT_MS,
+      headers: { 'Cache-Control': 'no-cache' },
+      onload: response => {
+        if (response.status < 200 || response.status >= 300) {
+          reject(new Error(`GitHub returned HTTP ${response.status}`));
+          return;
+        }
+        resolve(response.responseText);
+      },
+      onerror: () => reject(new Error('GitHub request failed')),
+      ontimeout: () => reject(new Error('GitHub request timed out')),
+    });
+  });
+}
+
+/**
+ * Check GitHub once per page load. A failed check is fail-open; a confirmed newer
+ * version is fail-closed and must be installed before normal use continues.
+ */
+function checkForRequiredUpdate(request = _GM_xmlhttpRequest) {
+  if (updateCheckPromise) return updateCheckPromise;
+
+  state.updateStatus = 'checking';
+  state.currentVersion = SEGMENTSCRAPER_VERSION;
+  state.updateUrl = SEGMENTSCRAPER_UPDATE_URL;
+
+  updateCheckPromise = (async () => {
+    if (typeof request !== 'function') {
+      state.updateStatus = 'unavailable';
+      return { required: false, status: state.updateStatus };
+    }
+
+    try {
+      const source = await requestRemoteUserscript(request);
+      const latestVersion = extractUserscriptVersion(source);
+      const comparison = compareVersions(latestVersion, SEGMENTSCRAPER_VERSION);
+      if (!latestVersion || comparison === null) throw new Error('GitHub version is invalid');
+
+      state.latestVersion = latestVersion;
+      state.updateRequired = comparison > 0;
+      state.updateStatus = state.updateRequired ? 'required' : 'current';
+      return { required: state.updateRequired, status: state.updateStatus, latestVersion };
+    } catch (error) {
+      state.updateStatus = 'unavailable';
+      console.warn('[NFE] Update check unavailable; continuing with the installed version.', error);
+      return { required: false, status: state.updateStatus, error };
+    }
+  })();
+
+  return updateCheckPromise;
+}
 
 /**
  * Shared network utilities for SegmentScraper
@@ -1445,6 +1569,32 @@ function createPanel() {
     transition:opacity 0.18s; user-select:none; display:none; opacity:0;
   `;
 
+  if (state.updateRequired) {
+    panel.innerHTML = `
+      <style>
+        #nfe-panel, #nfe-panel * { box-sizing:border-box; font-family:-apple-system,Arial,sans-serif; text-shadow:none; }
+      </style>
+      <div style="font-size:15px;font-weight:800;color:#ff6b6b;margin-bottom:10px">Update required</div>
+      <div style="background:${colors.panelBg};border:1px solid #7f3030;border-radius:9px;padding:12px;margin-bottom:10px;color:${colors.textSecondary};font-size:12px;line-height:1.5">
+        A newer SegmentScraper version is available. Version <strong style="color:${colors.text}">${state.latestVersion}</strong>
+        must be installed before you can continue.
+      </div>
+      <a id="nfe-update-link" href="${state.updateUrl}" target="_blank" rel="noopener noreferrer"
+        style="display:block;width:100%;background:#d83b3b;border-radius:8px;color:#fff;padding:11px;text-align:center;text-decoration:none;font-size:13px;font-weight:800">
+        Update to v${state.latestVersion}
+      </a>
+      <div style="font-size:10px;color:${colors.textMuted};margin-top:9px;line-height:1.4;text-align:center">
+        Installed: v${state.currentVersion}. Confirm the installation and then reload this page.
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    panel.addEventListener('click', event => event.stopPropagation());
+    panel.addEventListener('mousedown', event => event.stopPropagation());
+    console.warn(`[NFE] Update required: v${state.currentVersion} -> v${state.latestVersion}`);
+    return;
+  }
+
   panel.innerHTML = `
     <style>
       #nfe-panel, #nfe-panel * {
@@ -1635,6 +1785,7 @@ function openPanel() {
  * Close the panel
  */
 function closePanel() {
+  if (state.updateRequired) return;
   const panel = document.getElementById('nfe-panel');
   if (!panel) return;
   state.panelVisible = false;
@@ -1646,6 +1797,13 @@ function closePanel() {
       panel.style.pointerEvents = 'auto';
     }
   }, 200);
+}
+
+/** Replace an existing panel with the non-dismissible required-update screen. */
+function showRequiredUpdate() {
+  document.getElementById('nfe-panel')?.remove();
+  state.panelVisible = false;
+  openPanel();
 }
 
 /**
@@ -1947,6 +2105,7 @@ function setTvdbStatus(msg) {
 
 /** Apply the shared IMDb flow after an extractor discovers a show. */
 function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null }) {
+  if (state.updateRequired) return;
   const normalizedShowId = showId != null ? String(showId) : null;
   const showChanged = Boolean(title) && (
     title !== state.showTitle ||
@@ -2016,6 +2175,7 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
 
 /** Store extractor output and update the shared counters/toast identically. */
 function recordExtractedSegments(items) {
+  if (state.updateRequired) return;
   if (!items.length) return;
   state.allItems.push(...items);
   state.interceptedCount++;
@@ -2428,6 +2588,14 @@ function setupPanelHandler() {
 
 function syncVisibility() {
   if (!state.panelVisible) return;
+  if (state.updateRequired) {
+    const panel = document.getElementById('nfe-panel');
+    if (panel) {
+      panel.style.opacity = '1';
+      panel.style.pointerEvents = 'auto';
+    }
+    return;
+  }
   const controls =
     document.querySelector('[data-uia="controls-standard"]') ||
     document.querySelector('[class*="PlayerControls"]') ||
@@ -2497,9 +2665,25 @@ function bootstrapProvider({
   setupInterception();
   setupPanelHandler();
   setupControlVisibilityHandler();
+  checkForRequiredUpdate().then(result => {
+    if (!result.required) return;
+    state.allItems = [];
+    state.interceptedCount = 0;
+    const showNotice = () => {
+      if (document.body) showRequiredUpdate();
+      else setTimeout(showNotice, 50);
+    };
+    showNotice();
+  });
 
   let lastPath = location.pathname;
   setInterval(() => {
+    if (state.updateRequired) {
+      if (!document.getElementById('nfe-panel') && document.body) showRequiredUpdate();
+      syncVisibility();
+      return;
+    }
+
     const inPlayer = isPlayerPage();
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;

@@ -4,9 +4,10 @@
  */
 
 import { state, createState, createEpisodeCacheKey } from '../core/state.js';
+import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
 import { injectBtn, getNextEpBtn } from '../ui/button.js';
-import { setProviderName, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput, showExportPreview } from '../ui/panel.js';
+import { setProviderName, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput, showExportPreview, showRequiredUpdate } from '../ui/panel.js';
 import { getProviderConfig } from '../config/provider-config.js';
 import { loadIntrodbSettings, saveIntrodbSettings } from '../core/introdb-settings.js';
 import { loadTvdbSettings, saveTvdbSettings, mapSeriesItemsToTvdb } from '../core/tvdb.js';
@@ -57,6 +58,7 @@ export function setTvdbStatus(msg) {
 
 /** Apply the shared IMDb flow after an extractor discovers a show. */
 export function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null }) {
+  if (state.updateRequired) return;
   const normalizedShowId = showId != null ? String(showId) : null;
   const showChanged = Boolean(title) && (
     title !== state.showTitle ||
@@ -126,6 +128,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
 
 /** Store extractor output and update the shared counters/toast identically. */
 export function recordExtractedSegments(items) {
+  if (state.updateRequired) return;
   if (!items.length) return;
   state.allItems.push(...items);
   state.interceptedCount++;
@@ -538,6 +541,14 @@ function setupPanelHandler() {
 
 function syncVisibility() {
   if (!state.panelVisible) return;
+  if (state.updateRequired) {
+    const panel = document.getElementById('nfe-panel');
+    if (panel) {
+      panel.style.opacity = '1';
+      panel.style.pointerEvents = 'auto';
+    }
+    return;
+  }
   const controls =
     document.querySelector('[data-uia="controls-standard"]') ||
     document.querySelector('[class*="PlayerControls"]') ||
@@ -607,9 +618,25 @@ export function bootstrapProvider({
   setupInterception();
   setupPanelHandler();
   setupControlVisibilityHandler();
+  checkForRequiredUpdate().then(result => {
+    if (!result.required) return;
+    state.allItems = [];
+    state.interceptedCount = 0;
+    const showNotice = () => {
+      if (document.body) showRequiredUpdate();
+      else setTimeout(showNotice, 50);
+    };
+    showNotice();
+  });
 
   let lastPath = location.pathname;
   setInterval(() => {
+    if (state.updateRequired) {
+      if (!document.getElementById('nfe-panel') && document.body) showRequiredUpdate();
+      syncVisibility();
+      return;
+    }
+
     const inPlayer = isPlayerPage();
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;

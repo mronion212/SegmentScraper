@@ -8,13 +8,21 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-// Userscript header template
+const packageMetadata = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+const SCRIPT_VERSION = packageMetadata.version;
+const UPDATE_URL = 'https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js';
+
+// Userscript header template. Keep @name and @namespace stable across releases;
+// only @version should change.
 const USERSCRIPT_HEADER = `// ==UserScript==
-// @name         SegmentScraper v1.5.6 - Multi-Provider Timestamps Extractor
-// @version      1.5.6
+// @name         SegmentScraper - Multi-Provider Timestamps Extractor
+// @version      ${SCRIPT_VERSION}
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
+// @homepageURL  https://github.com/mronion212/SegmentScraper
+// @updateURL    ${UPDATE_URL}
+// @downloadURL  ${UPDATE_URL}
 // @match        https://www.netflix.com/*
 // @match        https://www.disneyplus.com/*
 // @match        https://www.primevideo.com/*
@@ -37,12 +45,15 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @connect      api4.thetvdb.com
 // @connect      atom.skyshowtime.com
 // @connect      static.crunchyroll.com
+// @connect      raw.githubusercontent.com
 // @run-at       document-start
 // ==/UserScript==
 
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
+  const SEGMENTSCRAPER_VERSION = ${JSON.stringify(SCRIPT_VERSION)};
+  const SEGMENTSCRAPER_UPDATE_URL = ${JSON.stringify(UPDATE_URL)};
 
 `;
 
@@ -84,6 +95,7 @@ function bundle() {
   // Define file order for proper dependency resolution
   const commonFileOrder = [
     'core/state.js',
+    'core/update-check.js',
     'core/network.js',
     'core/introdb-settings.js',
     'core/tvdb.js',

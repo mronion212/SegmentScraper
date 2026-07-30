@@ -92,6 +92,32 @@ export function createPanel() {
     transition:opacity 0.18s; user-select:none; display:none; opacity:0;
   `;
 
+  if (state.updateRequired) {
+    panel.innerHTML = `
+      <style>
+        #nfe-panel, #nfe-panel * { box-sizing:border-box; font-family:-apple-system,Arial,sans-serif; text-shadow:none; }
+      </style>
+      <div style="font-size:15px;font-weight:800;color:#ff6b6b;margin-bottom:10px">Update required</div>
+      <div style="background:${colors.panelBg};border:1px solid #7f3030;border-radius:9px;padding:12px;margin-bottom:10px;color:${colors.textSecondary};font-size:12px;line-height:1.5">
+        A newer SegmentScraper version is available. Version <strong style="color:${colors.text}">${state.latestVersion}</strong>
+        must be installed before you can continue.
+      </div>
+      <a id="nfe-update-link" href="${state.updateUrl}" target="_blank" rel="noopener noreferrer"
+        style="display:block;width:100%;background:#d83b3b;border-radius:8px;color:#fff;padding:11px;text-align:center;text-decoration:none;font-size:13px;font-weight:800">
+        Update to v${state.latestVersion}
+      </a>
+      <div style="font-size:10px;color:${colors.textMuted};margin-top:9px;line-height:1.4;text-align:center">
+        Installed: v${state.currentVersion}. Confirm the installation and then reload this page.
+      </div>
+    `;
+
+    document.body.appendChild(panel);
+    panel.addEventListener('click', event => event.stopPropagation());
+    panel.addEventListener('mousedown', event => event.stopPropagation());
+    console.warn(`[NFE] Update required: v${state.currentVersion} -> v${state.latestVersion}`);
+    return;
+  }
+
   panel.innerHTML = `
     <style>
       #nfe-panel, #nfe-panel * {
@@ -282,6 +308,7 @@ export function openPanel() {
  * Close the panel
  */
 export function closePanel() {
+  if (state.updateRequired) return;
   const panel = document.getElementById('nfe-panel');
   if (!panel) return;
   state.panelVisible = false;
@@ -293,6 +320,13 @@ export function closePanel() {
       panel.style.pointerEvents = 'auto';
     }
   }, 200);
+}
+
+/** Replace an existing panel with the non-dismissible required-update screen. */
+export function showRequiredUpdate() {
+  document.getElementById('nfe-panel')?.remove();
+  state.panelVisible = false;
+  openPanel();
 }
 
 /**

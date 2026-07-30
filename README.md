@@ -28,6 +28,8 @@ Every active provider logs each captured episode with readable timestamps and th
 - Maps regular provider episodes to canonical TheTVDB season/episode numbers before JSON export or submission
 - Excludes provider specials and TheTVDB Season 0 from count checks and normal submission mapping
 - Uses one shared provider panel based on the Netflix layout
+- Checks GitHub for a newer release and blocks normal use until a confirmed update is installed
+- Lets compatible userscript managers update automatically through `@updateURL` and `@downloadURL`
 
 The panel layout, dimensions, typography, controls, counters, backgrounds, borders, and spacing are identical for every provider. A provider may only customize:
 
@@ -102,6 +104,20 @@ npm run build
 
 The generated userscript is written to `SegmentScraper.user.js`.
 
+## Releasing an Update
+
+Every published change must have a higher semantic version in `package.json`. The bundler uses that single value for `@version` and the runtime version check. Never put the version in `@name` and do not change `@name` or `@namespace` between releases: Tampermonkey uses that stable identity to recognize existing installations.
+
+Version 1.5.7 changes the legacy versioned name to the permanent name `SegmentScraper - Multi-Provider Timestamps Extractor`. Existing users may need to remove the old versioned installation once and install 1.5.7 manually. Releases after that use the stable name and update in place.
+
+```bash
+npm version patch --no-git-tag-version
+npm run build
+npm test
+```
+
+Use `minor` or `major` instead of `patch` when appropriate. Commit and push both `package.json` and the generated `SegmentScraper.user.js` to `main`; users only see the required-update screen after the newer generated userscript is available there.
+
 ## Usage
 
 1. Install [Tampermonkey](https://www.tampermonkey.net/) or another compatible userscript manager.
@@ -111,6 +127,8 @@ The generated userscript is written to `SegmentScraper.user.js`.
 5. Set the IMDb ID if automatic lookup did not resolve it.
 6. Enter your own TheTVDB v4 API key and, when required, your optional subscriber PIN. These credentials and the reusable bearer token are stored locally by the userscript manager.
 7. Download the JSON export, or save an IntroDB API key locally and submit directly. The stored key is not rendered back into the panel or written to logs.
+
+At startup, SegmentScraper compares its installed semantic version with the `@version` in the userscript on the `main` branch. If GitHub confirms that a newer version exists, a non-dismissible update screen replaces the normal panel. The update link opens the raw userscript so Tampermonkey or Violentmonkey can install it. After installation, reload the streaming page. If GitHub is temporarily unreachable, the check fails open and the installed version remains usable.
 
 Before a JSON export or IntroDB submission, SegmentScraper compares regular-episode counts against TheTVDB. Equal counts map by order. When counts differ, every regular provider episode is checked for an exact normalized, one-to-one, non-generic title match. Reliable matches are retained and unmatched episodes are skipped; the series is skipped only when no reliable mappings exist. Specials remain outside this normal mapping, export, and submission flow.
 

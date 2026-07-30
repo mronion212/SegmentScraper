@@ -46,6 +46,11 @@ export const createState = (providerName) => ({
   tvdbPin: '',
   providerEpisodes: [],
   providerEpisodesByShowId: {},
+  updateStatus: 'idle',
+  updateRequired: false,
+  currentVersion: '',
+  latestVersion: '',
+  updateUrl: '',
 });
 
 export const state = createState('Streaming Service');
