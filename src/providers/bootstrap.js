@@ -164,6 +164,10 @@ async function mapCapturedItemsWithTvdb(action) {
     noExactMatch: 'no exact normalized TVDB match',
     ambiguousTvdbTitle: 'ambiguous TVDB title',
     reusedTvdbEpisode: 'TVDB episode already matched',
+    missingAbsoluteNumber: 'title without an absolute episode number',
+    absoluteEpisodeNotFound: 'absolute TVDB episode not found',
+    ambiguousAbsoluteEpisode: 'ambiguous absolute TVDB episode',
+    invalidCanonicalEpisode: 'TVDB episode without canonical default numbering',
   };
   const describeReasons = reasons => Object.entries(reasons || {})
     .map(([reason, count]) => `${reasonLabels[reason] || reason}: ${count}`)
@@ -189,6 +193,8 @@ async function mapCapturedItemsWithTvdb(action) {
       console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts match (${stats.providerRegular}); mapped by TVDB order. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
     } else if (mapped.method === 'title') {
       console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts differ (provider ${stats.providerRegular}, TVDB ${stats.tvdbRegular}); retained reliable exact normalized one-to-one title mappings. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
+    } else if (mapped.method === 'absolute-title') {
+      console.info(`[NFE-TVDB] ${action} series ${imdbId}: GTST episodes mapped by absolute episode number and verified by exact normalized TVDB title. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}.`);
     } else {
       console.info(`[NFE-TVDB] ${action} series ${imdbId}: no regular segments included (${mapped.reason}); captured special segments omitted: ${stats?.capturedSpecialsExcluded || 0}.`);
     }

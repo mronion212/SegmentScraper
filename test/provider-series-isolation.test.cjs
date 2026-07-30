@@ -283,6 +283,26 @@ test('Videoland uses extraTitle and removes its episode-number prefix for TVDB m
   assert.equal(videoland.state.allItems[0]._episodeTitle, 'Green Birds');
 });
 
+test('Videoland enables absolute-title TVDB matching only for GTST', () => {
+  const videoland = loadExtractor('src/providers/videoland/extractor.js', 'processVideolandLayout');
+
+  videoland.process(videolandPayload('61', 'Goede Tijden, Slechte Tijden', 'gtst-7295', {
+    episode: 7295,
+    seoEpisodeTitle: 'Goede Tijden, Slechte Tijden',
+    activeTitle: 'Goede Tijden, Slechte Tijden',
+    extraTitle: '7295. Aflevering 7295',
+  }));
+  videoland.process(videolandPayload('other', 'Andere serie', 'other-7295', {
+    episode: 7295,
+    seoEpisodeTitle: 'Andere serie',
+    activeTitle: 'Andere serie',
+    extraTitle: '7295. Aflevering 7295',
+  }));
+
+  assert.equal(videoland.state.allItems[0]._tvdbAbsoluteTitleMatch, true);
+  assert.equal('_tvdbAbsoluteTitleMatch' in videoland.state.allItems[1], false);
+});
+
 test('Prime Video keeps the series id in its title cache and on extracted timestamps', () => {
   const player = {
     offsetWidth: 100,

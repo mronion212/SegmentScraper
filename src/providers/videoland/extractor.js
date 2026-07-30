@@ -72,6 +72,15 @@ function normalizeVideolandEpisodeTitle(value) {
   return String(value || '').trim().replace(/^\d+\s*\.\s*/, '').trim();
 }
 
+function isVideolandGtstSeries(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim() === 'goede tijden slechte tijden';
+}
+
 function chooseVideolandEpisodeTitle(rootMeta, activeItem, programTitle) {
   const candidates = [
     rootMeta?.entity?.extraTitle,
@@ -135,6 +144,7 @@ export function processVideolandLayout(json) {
     });
   }
   const showId = updateVideolandTitle(title, rootMeta.programId);
+  const useGtstAbsoluteTitleMatch = isVideolandGtstSeries(title);
   state.clipMap.set(clipId, { season, episode, title, showId });
 
   if (season != null && episode != null) {
@@ -159,6 +169,7 @@ export function processVideolandLayout(json) {
       _showId: showId,
       _tvdbEpisodeLanguages: ['eng', 'nld'],
       _tvdbRequireTitleMatch: true,
+      ...(useGtstAbsoluteTitleMatch ? { _tvdbAbsoluteTitleMatch: true } : {}),
       imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
       segment_type: segmentType,
       season,
