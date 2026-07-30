@@ -6,7 +6,6 @@ SegmentScraper extracts intro, recap, and outro timestamps from supported stream
 
 - Netflix
 - Prime Video
-- Apple TV (temporarily disabled while the provider integration is being corrected)
 - Videoland
 - SkyShowtime
 - Crunchyroll
@@ -15,8 +14,6 @@ Disney+ and HBO Max are present in the provider configuration but do not yet hav
 SkyShowtime captures catalogue metadata automatically from page or worker network requests and maps SOI/EOI, SOR/EOR, and SOCR/runtime to intro, recap, and outro segments. When loading a series, wait until the UI icon has finished loading (that is, until the banner starts playing).
 
 Crunchyroll reads the current episode metadata from the watch page and maps its public recap, intro, and credits markers to recap, intro, and outro segments. Episodes are captured as they are opened.
-
-Apple TV support is temporarily excluded from the distributed userscript while its integration is being corrected. Its source and tests remain available for continued development.
 
 Every active provider logs each captured episode with readable timestamps and the exact raw start/end seconds.
 
@@ -62,9 +59,6 @@ SegmentScraper/
 |       |   |-- index.js
 |       |   `-- extractor.js
 |       |-- prime-video/
-|       |   |-- index.js
-|       |   `-- extractor.js
-|       |-- apple-tv/
 |       |   |-- index.js
 |       |   `-- extractor.js
 |       |-- videoland/

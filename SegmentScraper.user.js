@@ -1177,22 +1177,6 @@ const PROVIDER_CONFIGS = {
     },
     captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
   },
-  'apple-tv': {
-    name: 'Apple TV',
-    match: 'https://tv.apple.com/*',
-    colors: {
-      primary: '#0071e3',
-      primaryDark: '#005bb5',
-      secondary: '#1565c0',
-      secondaryDark: '#0d47a1',
-    },
-    nameColor: '#f5f5f7',
-    infoAccent: '#0071e3',
-    branding: {
-      title: 'SegmentScraper',
-    },
-    captureHint: 'All episodes are attempted automatically; unavailable timestamps fall back to per-episode playback.',
-  },
 };
 
 /**
