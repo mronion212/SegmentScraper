@@ -15,6 +15,16 @@ export function createEpisodeCacheKey(imdbId, season, episode) {
 }
 
 /**
+ * Create a cache key for either a TV episode or a movie.
+ * Movies intentionally omit season/episode because they do not use TVDB.
+ */
+export function createMediaCacheKey(imdbId, mediaType = 'tv', season, episode) {
+  return String(mediaType).toLowerCase() === 'movie'
+    ? `${String(imdbId)}|movie`
+    : createEpisodeCacheKey(imdbId, season, episode);
+}
+
+/**
  * Create a cache key for a segment (includes segment type)
  * @param {string} imdbId - IMDb ID
  * @param {string|number} season - Season number
@@ -32,6 +42,7 @@ export const createState = (providerName) => ({
   dbSearchDone: false,
   dbStatusMsg: `Waiting for ${providerName} metadata...`,
   showTitle: '',
+  mediaType: 'tv',
   showId: null,
   showYear: '',
   showIds: new Set(),

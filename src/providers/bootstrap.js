@@ -3,7 +3,7 @@
  * The Netflix UI/controls are the single source of truth for every provider.
  */
 
-import { state, createState, createEpisodeCacheKey } from '../core/state.js';
+import { state, createState, createMediaCacheKey } from '../core/state.js';
 import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
 import { injectBtn, getNextEpBtn } from '../ui/button.js';
@@ -18,6 +18,41 @@ let buttonHideTimer;
 
 function getItemShowId(item) {
   return item?._showId != null ? String(item._showId) : '';
+}
+
+function getItemMediaType(item) {
+  return String(item?.media_type || item?.mediaType || item?._mediaType || 'tv').toLowerCase() === 'movie'
+    ? 'movie'
+    : 'tv';
+}
+
+function isMovieItem(item) {
+  return getItemMediaType(item) === 'movie';
+}
+
+function getItemCacheKey(item) {
+  return createMediaCacheKey(item.imdb_id, getItemMediaType(item), item.season, item.episode);
+}
+
+function hasTvItems(items) {
+  return items.some(item => !isMovieItem(item));
+}
+
+function hasExistingSegment(existing, item) {
+  if (!existing) return false;
+  const ranges = existing.rangesByType?.get(item.segment_type);
+  if (ranges?.length) {
+    const start = Number(item.start_sec);
+    const end = Number(item.end_sec);
+    return ranges.some(range => {
+      const sameRange = Number.isFinite(start) && Number.isFinite(end) &&
+        Math.abs(Number(range.startSec) - start) < 0.01 &&
+        Math.abs(Number(range.endSec) - end) < 0.01;
+      if (!sameRange) return false;
+      return !item.credit_part || !range.creditPart || item.credit_part === range.creditPart;
+    });
+  }
+  return existing.has?.(item.segment_type) ?? false;
 }
 
 function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
@@ -39,7 +74,7 @@ function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
 export function setDbStatus(msg) {
   state.dbStatusMsg = msg;
   const el = document.getElementById('nfe-imdb-status');
-  if (el) el.textContent = `IMDb ID: ${state.imdbId || 'Not set'}`;
+  if (el) el.textContent = `${state.mediaType === 'movie' ? 'Movie' : 'TV'} · IMDb ID: ${state.imdbId || 'Not set'}`;
 }
 
 export function setIntrodbStatus(msg) {
@@ -57,15 +92,18 @@ export function setTvdbStatus(msg) {
 }
 
 /** Apply the shared IMDb flow after an extractor discovers a show. */
-export function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null }) {
+export function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null, mediaType = 'tv' }) {
   if (state.updateRequired) return;
   const normalizedShowId = showId != null ? String(showId) : null;
+  const normalizedMediaType = String(mediaType).toLowerCase() === 'movie' ? 'movie' : 'tv';
   const showChanged = Boolean(title) && (
     title !== state.showTitle ||
-    (normalizedShowId && normalizedShowId !== state.showId)
+    (normalizedShowId && normalizedShowId !== state.showId) ||
+    normalizedMediaType !== (state.mediaType || 'tv')
   );
   if (showChanged) {
     state.showTitle = title;
+    state.mediaType = normalizedMediaType;
     state.showId = normalizedShowId;
     if (state.showId) state.showIds.add(state.showId);
     state.showYear = year ? String(year) : '';
@@ -73,6 +111,11 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     state.imdbId = '';
     state.dedupCacheV2 = {};
     state.providerEpisodes = [];
+    updateImdbInput();
+    setDbStatus(`Detected ${normalizedMediaType === 'movie' ? 'movie' : 'TV series'}; looking up IMDb...`);
+    setTvdbStatus(normalizedMediaType === 'movie'
+      ? 'TVDB is not needed for movies'
+      : (state.tvdbApiKey ? 'TVDB credentials saved locally' : ''));
     updatePanelTitle();
   }
 
@@ -82,9 +125,10 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
   const lookupTitle = state.showTitle;
   const lookupYear = state.showYear;
   const lookupShowId = state.showId;
+  const lookupMediaType = state.mediaType || 'tv';
   const isCurrentShow = () => lookupShowId
-    ? state.showId === lookupShowId
-    : state.showTitle === lookupTitle;
+    ? state.showId === lookupShowId && (state.mediaType || 'tv') === lookupMediaType
+    : state.showTitle === lookupTitle && (state.mediaType || 'tv') === lookupMediaType;
 
   const cachedImdbId = lookupShowId && state.imdbIdsByShowId?.[lookupShowId];
   if (!imdbOverride && cachedImdbId) {
@@ -106,8 +150,13 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     return;
   }
 
-  searchImdbByTitle(lookupTitle, lookupYear).then(result => {
+  searchImdbByTitle(lookupTitle, lookupYear, { mediaType: lookupMediaType }).then(result => {
     if (result.success) {
+      console.info('[NFE] IMDb media resolved:', {
+        mediaType: lookupMediaType,
+        title: lookupTitle,
+        imdbId: result.imdbId,
+      });
       applyImdbIdToShow(result.imdbId, lookupShowId);
       if (!isCurrentShow()) return;
       state.imdbId = result.imdbId;
@@ -137,8 +186,8 @@ export function recordExtractedSegments(items) {
 }
 
 export function isAlreadyInIntroDB(item) {
-  const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-  return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
+  const key = getItemCacheKey(item);
+  return hasExistingSegment(state.dedupCacheV2[key], item);
 }
 
 async function mapCapturedItemsWithTvdb(action) {
@@ -148,13 +197,16 @@ async function mapCapturedItemsWithTvdb(action) {
     toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
   }
 
+  const validItems = capturedItems.filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING');
+  const movieItems = validItems.filter(isMovieItem);
   const seriesGroups = new Map();
-  for (const item of capturedItems.filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')) {
+  for (const item of validItems.filter(item => !isMovieItem(item))) {
     if (!seriesGroups.has(item.imdb_id)) seriesGroups.set(item.imdb_id, []);
     seriesGroups.get(item.imdb_id).push(item);
   }
 
-  const items = [];
+  // Movies have no season/episode pair and deliberately bypass TVDB mapping.
+  const items = movieItems.slice();
   let unreliableSkipped = 0;
   let specialSegmentsExcluded = 0;
   const reasonLabels = {
@@ -230,7 +282,8 @@ export async function exportJSON() {
     toast('No timestamps yet.');
     return;
   }
-  if (!state.tvdbApiKey) {
+  const requiresTvdb = hasTvItems(state.allItems);
+  if (requiresTvdb && !state.tvdbApiKey) {
     toast('Please enter your own TVDB API key before exporting JSON.');
     setTvdbStatus('No TVDB API key configured');
     return;
@@ -240,7 +293,7 @@ export async function exportJSON() {
     return;
   }
 
-  toast('Validating JSON export against TVDB...');
+  toast(requiresTvdb ? 'Validating JSON export against TVDB...' : 'Preparing movie JSON export...');
   const mapped = await mapCapturedItemsWithTvdb('JSON export');
   const mappedItems = mapped.items;
   let items = filterShortOutputSegments(mappedItems);
@@ -254,24 +307,27 @@ export async function exportJSON() {
       return;
     }
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
-    toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : 'No series has a reliable TVDB episode mapping; nothing was exported.');
+    const noMappingMessage = hasTvItems(mapped.capturedItems)
+      ? 'No series has a reliable TVDB episode mapping; nothing was exported.'
+      : 'No movie has a usable IMDb ID; nothing was exported.';
+    toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
     return;
   }
 
-  const episodeKeys = [...new Set(
+  const mediaKeys = [...new Set(
     items
-      .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
+      .map(getItemCacheKey)
   )];
-  toast(`Checking IntroDB for existing segments (${episodeKeys.length} canonical episode(s))...`);
-  const canonicalExisting = new Map(await Promise.all(episodeKeys.map(async key => [
+  toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
+  const canonicalExisting = new Map(await Promise.all(mediaKeys.map(async key => [
     key,
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
   const beforeCount = items.length;
   items = items.filter(item => {
-    const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-    return !canonicalExisting.get(key)?.has(item.segment_type);
+    const key = getItemCacheKey(item);
+    return !hasExistingSegment(canonicalExisting.get(key), item);
   });
   const duplicateCount = beforeCount - items.length;
   if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
@@ -344,7 +400,8 @@ export async function submitToIntroDB() {
     setIntrodbStatus('No API key configured');
     return;
   }
-  if (!state.tvdbApiKey) {
+  const requiresTvdb = hasTvItems(state.allItems);
+  if (requiresTvdb && !state.tvdbApiKey) {
     toast('Please enter your own TVDB API key in the panel above.');
     setTvdbStatus('No TVDB API key configured');
     return;
@@ -355,7 +412,7 @@ export async function submitToIntroDB() {
   }
 
   state.submitInProgress = true;
-  updateSubmitBtn('Checking TVDB...');
+  updateSubmitBtn(requiresTvdb ? 'Checking TVDB...' : 'Preparing submission...');
   const stopSubmission = () => {
     state.submitInProgress = false;
     updateSubmitBtn('Submit to IntroDB');
@@ -377,26 +434,29 @@ export async function submitToIntroDB() {
       return;
     }
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
-    toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : 'No series has a reliable TVDB episode mapping; nothing was submitted.');
-    setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : 'Submission blocked: TVDB mapping unavailable or unreliable');
+    const noMappingMessage = hasTvItems(mapped.capturedItems)
+      ? 'No series has a reliable TVDB episode mapping; nothing was submitted.'
+      : 'No movie has a usable IMDb ID; nothing was submitted.';
+    toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : noMappingMessage);
+    setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : noMappingMessage);
     stopSubmission();
     return;
   }
 
-  const episodeKeys = [...new Set(
+  const mediaKeys = [...new Set(
     allMapped
       .filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')
-      .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
+      .map(getItemCacheKey)
   )];
-  toast(`Checking IntroDB for existing segments (${episodeKeys.length} canonical episode(s))...`);
-  const canonicalExisting = new Map(await Promise.all(episodeKeys.map(async key => [
+  toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
+  const canonicalExisting = new Map(await Promise.all(mediaKeys.map(async key => [
     key,
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
   const items = allMapped.filter(item => {
-    const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-    return !canonicalExisting.get(key)?.has(item.segment_type);
+    const key = getItemCacheKey(item);
+    return !hasExistingSegment(canonicalExisting.get(key), item);
   });
   const skipped = capturedItems.length - items.length;
   if (!items.length) {
@@ -492,7 +552,7 @@ function configurePanelCallbacks() {
       state.dbSearchDone = false;
       state.dedupCacheV2 = {};
       const searchShowId = state.showId;
-      searchImdbByTitle(query, state.showYear).then(result => {
+      searchImdbByTitle(query, state.showYear, { mediaType: state.mediaType || 'tv' }).then(result => {
         if (result.success) {
           applyImdbIdToShow(result.imdbId, searchShowId);
           if (searchShowId && state.showId !== searchShowId) return;

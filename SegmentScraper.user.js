@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
-// @version      1.5.8
+// @version      1.7.0
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -36,7 +36,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const SEGMENTSCRAPER_VERSION = "1.5.8";
+  const SEGMENTSCRAPER_VERSION = "1.7.0";
   const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
@@ -57,6 +57,16 @@ function createEpisodeCacheKey(imdbId, season, episode) {
 }
 
 /**
+ * Create a cache key for either a TV episode or a movie.
+ * Movies intentionally omit season/episode because they do not use TVDB.
+ */
+function createMediaCacheKey(imdbId, mediaType = 'tv', season, episode) {
+  return String(mediaType).toLowerCase() === 'movie'
+    ? `${String(imdbId)}|movie`
+    : createEpisodeCacheKey(imdbId, season, episode);
+}
+
+/**
  * Create a cache key for a segment (includes segment type)
  * @param {string} imdbId - IMDb ID
  * @param {string|number} season - Season number
@@ -74,6 +84,7 @@ const createState = (providerName) => ({
   dbSearchDone: false,
   dbStatusMsg: `Waiting for ${providerName} metadata...`,
   showTitle: '',
+  mediaType: 'tv',
   showId: null,
   showYear: '',
   showIds: new Set(),
@@ -227,11 +238,56 @@ function getGmXhr() {
          (typeof GM !== 'undefined' && GM.xmlHttpRequest ? GM.xmlHttpRequest : null);
 }
 
+function filterImdbTitleResults(results, mediaType = 'tv') {
+  const movieQids = new Set(['movie', 'tvmovie', 'videomovie', 'featurefilm', 'film', 'short', 'tvshort']);
+  const allowedQids = String(mediaType).toLowerCase() === 'movie'
+    ? movieQids
+    : new Set(['tvseries', 'tvminiseries', 'tvshort', 'tvspecial']);
+  return (results || []).filter(result => allowedQids.has(String(result?.qid || '').toLowerCase()));
+}
+
+function chooseImdbTitleResult(results, title, year) {
+  const normalizedTitle = String(title || '').trim().toLowerCase();
+  const normalizedYear = year == null ? '' : String(year);
+  let best = results[0];
+  if (normalizedYear) {
+    const byYearAndTitle = results.find(result =>
+      String(result?.y || '') === normalizedYear && String(result?.l || '').trim().toLowerCase() === normalizedTitle
+    );
+    const byYear = results.find(result => String(result?.y || '') === normalizedYear);
+    if (byYearAndTitle) best = byYearAndTitle;
+    else if (byYear) best = byYear;
+  } else {
+    const exact = results.find(result => String(result?.l || '').trim().toLowerCase() === normalizedTitle);
+    if (exact) best = exact;
+  }
+  return best;
+}
+
+function resolveImdbSearchResponse(data, title, year, mediaType) {
+  const results = filterImdbTitleResults(data?.d, mediaType);
+  console.log(`[NFE] Filtered ${mediaType === 'movie' ? 'movie' : 'TV series'} results:`, results.length);
+  if (!results.length) return { success: false, error: 'Not found on IMDb' };
+
+  const best = chooseImdbTitleResult(results, title, year);
+  const imdbId = best?.id;
+  if (!imdbId || !String(imdbId).startsWith('tt')) {
+    return { success: false, error: 'Could not obtain a valid IMDb ID' };
+  }
+
+  return {
+    success: true,
+    imdbId,
+    title: best?.l || title,
+    year: best?.y,
+  };
+}
+
 /**
- * Search IMDb by title and return the best matching series ID
+ * Search IMDb by title and return the best matching media ID.
  */
-async function searchImdbByTitle(title, year, apiKey) {
-  const query = encodeURIComponent(title.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim());
+async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
+  const query = encodeURIComponent(String(title || '').toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').trim());
   const url = `https://v3.sg.media-imdb.com/suggestion/x/${query}.json`;
   console.log('[NFE] IMDb search request URL:', url, 'for title:', title, 'year:', year);
   
@@ -253,37 +309,7 @@ async function searchImdbByTitle(title, year, apiKey) {
           try {
             const data = JSON.parse(response.responseText);
             console.log('[NFE] IMDb search response data:', data);
-            const results = (data.d || []).filter(r => r.qid === 'tvSeries' || r.qid === 'tvMiniSeries');
-            console.log('[NFE] Filtered TV series results:', results.length);
-          
-            if (!results.length) {
-              resolve({ success: false, error: 'Not found on IMDb' });
-              return;
-            }
-            
-            let best = results[0];
-            if (year) {
-              const byYear = results.find(r => String(r.y) === year && r.l.toLowerCase() === title.toLowerCase());
-              const byYearApprox = results.find(r => String(r.y) === year);
-              if (byYear) best = byYear;
-              else if (byYearApprox) best = byYearApprox;
-            } else {
-              const exact = results.find(r => r.l.toLowerCase() === title.toLowerCase());
-              if (exact) best = exact;
-            }
-            
-            const imdbId = best.id;
-            if (!imdbId || !imdbId.startsWith('tt')) {
-              resolve({ success: false, error: 'Could not obtain a valid IMDb ID' });
-              return;
-            }
-            
-            resolve({ 
-              success: true, 
-              imdbId, 
-              title: best.l, 
-              year: best.y 
-            });
+            resolve(resolveImdbSearchResponse(data, title, year, mediaType));
           } catch (parseError) {
             console.error('[NFE] IMDb response parse error:', parseError);
             resolve({ success: false, error: 'Failed to parse IMDb response' });
@@ -306,35 +332,7 @@ async function searchImdbByTitle(title, year, apiKey) {
     const response = await fetch(url);
     const data = await response.json();
     console.log('[NFE] IMDb search response data:', data);
-    const results = (data.d || []).filter(r => r.qid === 'tvSeries' || r.qid === 'tvMiniSeries');
-    console.log('[NFE] Filtered TV series results:', results.length);
-    
-    if (!results.length) {
-      return { success: false, error: 'Not found on IMDb' };
-    }
-    
-    let best = results[0];
-    if (year) {
-      const byYear = results.find(r => String(r.y) === year && r.l.toLowerCase() === title.toLowerCase());
-      const byYearApprox = results.find(r => String(r.y) === year);
-      if (byYear) best = byYear;
-      else if (byYearApprox) best = byYearApprox;
-    } else {
-      const exact = results.find(r => r.l.toLowerCase() === title.toLowerCase());
-      if (exact) best = exact;
-    }
-    
-    const imdbId = best.id;
-    if (!imdbId || !imdbId.startsWith('tt')) {
-      return { success: false, error: 'Could not obtain a valid IMDb ID' };
-    }
-    
-    return { 
-      success: true, 
-      imdbId, 
-      title: best.l, 
-      year: best.y 
-    };
+    return resolveImdbSearchResponse(data, title, year, mediaType);
   } catch (error) {
     console.error('[NFE] Fetch fallback error:', error);
     return { success: false, error: 'Network error connecting to IMDb (CORS or network issue)' };
@@ -356,23 +354,23 @@ async function loadExistingSegments(imdbId, apiKey) {
   console.log('[NFE-DEDUP] loadExistingSegments called for imdbId:', imdbId);
 
   // Collect unique episode keys from currently captured items for this imdb_id
-  const episodeKeys = [...new Set(
+  const mediaKeys = [...new Set(
     state.allItems
       .filter(i => i.imdb_id === imdbId)
-      .map(i => createEpisodeCacheKey(imdbId, i.season, i.episode))
+      .map(i => createMediaCacheKey(imdbId, i.media_type || i.mediaType || i._mediaType, i.season, i.episode))
   )];
 
-  console.log('[NFE-DEDUP] loadExistingSegments: unique episode keys collected:', episodeKeys);
+  console.log('[NFE-DEDUP] loadExistingSegments: unique media keys collected:', mediaKeys);
 
   // Load each episode's segments via /segments endpoint
   const results = await Promise.all(
-    episodeKeys.map(key => loadExistingSegmentsForEpisode(key, apiKey))
+    mediaKeys.map(key => loadExistingSegmentsForEpisode(key, apiKey))
   );
 
   // Return all segment types found
   const allSegments = [];
-  for (let i = 0; i < episodeKeys.length; i++) {
-    const key = episodeKeys[i];
+  for (let i = 0; i < mediaKeys.length; i++) {
+    const key = mediaKeys[i];
     const set = results[i];
     for (const segType of set) {
       allSegments.push({ key, segmentType: segType });
@@ -392,10 +390,60 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
     return state.dedupCacheV2[key];
   }
   
-  const [imdbId, season, episode] = key.split('|');
-  const url = `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(season)}&episode=${encodeURIComponent(episode)}`;
+  const [imdbId, seasonOrMediaType, episode] = key.split('|');
+  const isMovie = seasonOrMediaType === 'movie';
+  const url = isMovie
+    ? `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}`
+    : `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(seasonOrMediaType)}&episode=${encodeURIComponent(episode)}`;
   
   const gmXhr = getGmXhr();
+
+  const parseExistingSegments = json => {
+    const set = new Set();
+    const rangesByType = new Map();
+    const coerceExistingSeconds = value => {
+      const number = Number(value);
+      if (Number.isFinite(number)) return number;
+      const parts = String(value || '').trim().split(':').map(Number);
+      if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
+      if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      return null;
+    };
+    const readRangeValue = (source, secondsKeys, millisecondsKey) => {
+      for (const key of secondsKeys) {
+        if (source?.[key] != null) return coerceExistingSeconds(source[key]);
+      }
+      if (source?.[millisecondsKey] != null) return Number(source[millisecondsKey]) / 1000;
+      return null;
+    };
+    const add = (segmentType, value) => {
+      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType;
+      if (!['intro', 'recap', 'outro'].includes(normalizedType) || value == null) return;
+      set.add(normalizedType);
+      const entries = Array.isArray(value) ? value : [value];
+      const ranges = entries.map(entry => {
+        const source = entry?.segment && typeof entry.segment === 'object' ? entry.segment : entry;
+        const start = readRangeValue(source, ['start_sec', 'startSec', 'start'], 'start_ms');
+        const end = readRangeValue(source, ['end_sec', 'endSec', 'end'], 'end_ms');
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+        return {
+          startSec: start,
+          endSec: end,
+          creditPart: source?.credit_part ?? source?.creditPart ?? null,
+        };
+      }).filter(Boolean);
+      if (ranges.length) rangesByType.set(normalizedType, [...(rangesByType.get(normalizedType) || []), ...ranges]);
+    };
+
+    if (Array.isArray(json)) {
+      json.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+    } else if (Array.isArray(json?.segments)) {
+      json.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+    }
+    for (const type of ['intro', 'recap', 'outro', 'credits']) add(type, json?.[type]);
+    Object.defineProperty(set, 'rangesByType', { value: rangesByType, enumerable: false });
+    return set;
+  };
   
   return new Promise((resolve) => {
     if (gmXhr) {
@@ -407,10 +455,7 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
           try {
             if (response.status === 200) {
               const json = JSON.parse(response.responseText);
-              const set = new Set();
-              for (const t of ['intro', 'recap', 'outro']) {
-                if (json && json[t] != null) set.add(t);
-              }
+              const set = parseExistingSegments(json);
               if (writeCache) state.dedupCacheV2[key] = set;
               resolve(set);
             } else {
@@ -432,10 +477,7 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
       fetch(url)
         .then(response => response.json())
         .then(json => {
-          const set = new Set();
-          for (const t of ['intro', 'recap', 'outro']) {
-            if (json && json[t] != null) set.add(t);
-          }
+          const set = parseExistingSegments(json);
           if (writeCache) state.dedupCacheV2[key] = set;
           resolve(set);
         })
@@ -454,6 +496,19 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
 async function submitSegment(item, apiKey) {
   const url = `${INTRODB_BASE}/submit`;
   const gmXhr = getGmXhr();
+  const isMovie = String(item.media_type || item.mediaType || item._mediaType || '').toLowerCase() === 'movie';
+  const data = {
+    imdb_id: item.imdb_id,
+    segment_type: item.segment_type,
+    start_sec: item.start_sec,
+    end_sec: item.end_sec,
+  };
+  if (isMovie) {
+    data.media_type = 'movie';
+  } else {
+    data.season = item.season;
+    data.episode = item.episode;
+  }
   
   if (gmXhr) {
     return new Promise((resolve) => {
@@ -464,14 +519,7 @@ async function submitSegment(item, apiKey) {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
         },
-        data: JSON.stringify({
-          imdb_id: item.imdb_id,
-          segment_type: item.segment_type,
-          season: item.season,
-          episode: item.episode,
-          start_sec: item.start_sec,
-          end_sec: item.end_sec,
-        }),
+        data: JSON.stringify(data),
         onload: (response) => {
           resolve({
             success: response.status >= 200 && response.status < 300,
@@ -493,14 +541,7 @@ async function submitSegment(item, apiKey) {
         'Content-Type': 'application/json',
         'X-API-Key': apiKey,
       },
-      body: JSON.stringify({
-        imdb_id: item.imdb_id,
-        segment_type: item.segment_type,
-        season: item.season,
-        episode: item.episode,
-        start_sec: item.start_sec,
-        end_sec: item.end_sec,
-      }),
+      body: JSON.stringify(data),
     });
     
     return {
@@ -1553,6 +1594,65 @@ const SEGMENT_TYPES = {
   OUTRO: 'outro',
 };
 
+/** Labels used when a movie's credits are split around an after-credits scene. */
+const CREDIT_PARTS = {
+  BEFORE_AFTER_CREDITS_SCENE: 'before_after_credits_scene',
+  AFTER_AFTER_CREDITS_SCENE: 'after_after_credits_scene',
+};
+
+/**
+ * Split a movie credit range around a provider-reported after-credits scene.
+ *
+ * The scene itself is deliberately omitted. If its end is unknown, only the
+ * safe part before the scene is returned; guessing the post-scene start would
+ * risk including the scene in the credits segment.
+ */
+function splitCreditRange({
+  startSec,
+  endSec,
+  afterCreditsStartSec = null,
+  afterCreditsEndSec = null,
+  afterCreditsDetected = false,
+}) {
+  const start = Number(startSec);
+  const end = Number(endSec);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) return [];
+
+  const sceneStart = afterCreditsStartSec == null ? null : Number(afterCreditsStartSec);
+  const sceneEnd = afterCreditsEndSec == null ? null : Number(afterCreditsEndSec);
+  const hasScene = afterCreditsDetected || Number.isFinite(sceneStart) || Number.isFinite(sceneEnd);
+
+  if (!hasScene) return [{ startSec: start, endSec: end, creditPart: null }];
+  if (!Number.isFinite(sceneStart)) return [];
+
+  // If all credits finish before the scene, they are still the pre-scene
+  // portion and should remain clearly labelled as such.
+  if (sceneStart >= end) return [{
+    startSec: start,
+    endSec: end,
+    creditPart: CREDIT_PARTS.BEFORE_AFTER_CREDITS_SCENE,
+  }];
+  if (sceneStart <= start) return [];
+
+  const parts = [{
+    startSec: start,
+    endSec: sceneStart,
+    creditPart: CREDIT_PARTS.BEFORE_AFTER_CREDITS_SCENE,
+  }];
+
+  // Without a trustworthy scene end there is no safe post-scene range.
+  if (!Number.isFinite(sceneEnd) || sceneEnd <= sceneStart) return parts;
+  const postSceneStart = Math.min(sceneEnd, end);
+  if (postSceneStart < end) {
+    parts.push({
+      startSec: postSceneStart,
+      endSec: end,
+      creditPart: CREDIT_PARTS.AFTER_AFTER_CREDITS_SCENE,
+    });
+  }
+  return parts;
+}
+
 /**
  * Provider-specific segment name mappings
  * Each provider can have different names for the same segment types
@@ -1612,6 +1712,8 @@ function normalizeSegmentType(providerSegmentType, providerName) {
  * @param {string} [params.imdbId] - IMDb ID (optional, defaults to IMDB_PENDING)
  * @param {string} [params.showId] - Provider series identifier used to isolate multiple series
  * @param {string} [params.episodeTitle] - Provider episode title used only for TVDB mapping
+ * @param {string} [params.mediaType] - Media type, currently `tv` or `movie`
+ * @param {string} [params.creditPart] - Movie credit part around an after-credits scene
  * @returns {Object|null} - Normalized segment item or null if type not recognized
  */
 function createNormalizedSegment({
@@ -1624,7 +1726,9 @@ function createNormalizedSegment({
   endSec,
   imdbId = 'IMDB_PENDING',
   showId = '',
-  episodeTitle = ''
+  episodeTitle = '',
+  mediaType = 'tv',
+  creditPart = null,
 }) {
   const segmentType = normalizeSegmentType(providerSegmentType, providerName);
   if (!segmentType) return null;
@@ -1633,6 +1737,8 @@ function createNormalizedSegment({
     _eid: episodeId,
     _episodeTitle: episodeTitle,
     ...(showId ? { _showId: String(showId) } : {}),
+    ...(String(mediaType).toLowerCase() === 'movie' ? { media_type: 'movie' } : {}),
+    ...(creditPart ? { credit_part: creditPart } : {}),
     imdb_id: imdbId,
     segment_type: segmentType,
     season,
@@ -1672,6 +1778,7 @@ function formatCapturedTimestamp(seconds) {
 function logCapturedTimestamps({
   prefix,
   showTitle,
+  mediaType = 'tv',
   season,
   episode,
   episodeTitle = '',
@@ -1681,12 +1788,15 @@ function logCapturedTimestamps({
 }) {
   if (!items.length) return;
 
-  const episodeLabel = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
+  const episodeLabel = String(mediaType).toLowerCase() === 'movie'
+    ? 'MOVIE'
+    : `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
   const details = {
     title: episodeTitle || '',
     ...(providerId != null && providerId !== '' ? { [providerIdLabel]: providerId } : {}),
     segments: items.map(item => ({
       type: item.segment_type,
+      ...(item.credit_part ? { credit_part: item.credit_part } : {}),
       start: formatCapturedTimestamp(item.start_sec),
       end: formatCapturedTimestamp(item.end_sec),
       start_sec: item.start_sec,
@@ -1836,7 +1946,7 @@ function createPanel() {
     <div id="nfe-title-display" style="color:${colors.textSecondary};font-size:11px;margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:13px"></div>
 
     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
-      <div id="nfe-imdb-status" style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">IMDb ID: ${state.imdbId || 'Not set'}</div>
+      <div id="nfe-imdb-status" style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">${state.mediaType === 'movie' ? 'Movie' : 'TV'} · IMDb ID: ${state.imdbId || 'Not set'}</div>
       <div style="display:flex;gap:4px">
         <input id="nfe-imdb-input" type="text" placeholder="ID (e.g. tt123456)..." value="${state.imdbId}"
           style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
@@ -2037,6 +2147,11 @@ function updateCounters() {
   
   const rq = $('nfe-cnt-req');
   if (rq) rq.textContent = state.showIds.size;
+  const mediaLabel = $('nfe-cnt-series-label');
+  if (mediaLabel) {
+    const hasMovie = state.allItems.some(item => String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie');
+    mediaLabel.textContent = hasMovie ? 'Media' : 'Series';
+  }
   
   const fl = $('nfe-cnt-files');
   if (fl) {
@@ -2286,6 +2401,41 @@ function getItemShowId(item) {
   return item?._showId != null ? String(item._showId) : '';
 }
 
+function getItemMediaType(item) {
+  return String(item?.media_type || item?.mediaType || item?._mediaType || 'tv').toLowerCase() === 'movie'
+    ? 'movie'
+    : 'tv';
+}
+
+function isMovieItem(item) {
+  return getItemMediaType(item) === 'movie';
+}
+
+function getItemCacheKey(item) {
+  return createMediaCacheKey(item.imdb_id, getItemMediaType(item), item.season, item.episode);
+}
+
+function hasTvItems(items) {
+  return items.some(item => !isMovieItem(item));
+}
+
+function hasExistingSegment(existing, item) {
+  if (!existing) return false;
+  const ranges = existing.rangesByType?.get(item.segment_type);
+  if (ranges?.length) {
+    const start = Number(item.start_sec);
+    const end = Number(item.end_sec);
+    return ranges.some(range => {
+      const sameRange = Number.isFinite(start) && Number.isFinite(end) &&
+        Math.abs(Number(range.startSec) - start) < 0.01 &&
+        Math.abs(Number(range.endSec) - end) < 0.01;
+      if (!sameRange) return false;
+      return !item.credit_part || !range.creditPart || item.credit_part === range.creditPart;
+    });
+  }
+  return existing.has?.(item.segment_type) ?? false;
+}
+
 function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
   const normalizedShowId = showId != null ? String(showId) : '';
   const hasTaggedItems = state.allItems.some(item => getItemShowId(item));
@@ -2305,7 +2455,7 @@ function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
 function setDbStatus(msg) {
   state.dbStatusMsg = msg;
   const el = document.getElementById('nfe-imdb-status');
-  if (el) el.textContent = `IMDb ID: ${state.imdbId || 'Not set'}`;
+  if (el) el.textContent = `${state.mediaType === 'movie' ? 'Movie' : 'TV'} · IMDb ID: ${state.imdbId || 'Not set'}`;
 }
 
 function setIntrodbStatus(msg) {
@@ -2323,15 +2473,18 @@ function setTvdbStatus(msg) {
 }
 
 /** Apply the shared IMDb flow after an extractor discovers a show. */
-function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null }) {
+function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null, mediaType = 'tv' }) {
   if (state.updateRequired) return;
   const normalizedShowId = showId != null ? String(showId) : null;
+  const normalizedMediaType = String(mediaType).toLowerCase() === 'movie' ? 'movie' : 'tv';
   const showChanged = Boolean(title) && (
     title !== state.showTitle ||
-    (normalizedShowId && normalizedShowId !== state.showId)
+    (normalizedShowId && normalizedShowId !== state.showId) ||
+    normalizedMediaType !== (state.mediaType || 'tv')
   );
   if (showChanged) {
     state.showTitle = title;
+    state.mediaType = normalizedMediaType;
     state.showId = normalizedShowId;
     if (state.showId) state.showIds.add(state.showId);
     state.showYear = year ? String(year) : '';
@@ -2339,6 +2492,11 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
     state.imdbId = '';
     state.dedupCacheV2 = {};
     state.providerEpisodes = [];
+    updateImdbInput();
+    setDbStatus(`Detected ${normalizedMediaType === 'movie' ? 'movie' : 'TV series'}; looking up IMDb...`);
+    setTvdbStatus(normalizedMediaType === 'movie'
+      ? 'TVDB is not needed for movies'
+      : (state.tvdbApiKey ? 'TVDB credentials saved locally' : ''));
     updatePanelTitle();
   }
 
@@ -2348,9 +2506,10 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
   const lookupTitle = state.showTitle;
   const lookupYear = state.showYear;
   const lookupShowId = state.showId;
+  const lookupMediaType = state.mediaType || 'tv';
   const isCurrentShow = () => lookupShowId
-    ? state.showId === lookupShowId
-    : state.showTitle === lookupTitle;
+    ? state.showId === lookupShowId && (state.mediaType || 'tv') === lookupMediaType
+    : state.showTitle === lookupTitle && (state.mediaType || 'tv') === lookupMediaType;
 
   const cachedImdbId = lookupShowId && state.imdbIdsByShowId?.[lookupShowId];
   if (!imdbOverride && cachedImdbId) {
@@ -2372,8 +2531,13 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
     return;
   }
 
-  searchImdbByTitle(lookupTitle, lookupYear).then(result => {
+  searchImdbByTitle(lookupTitle, lookupYear, { mediaType: lookupMediaType }).then(result => {
     if (result.success) {
+      console.info('[NFE] IMDb media resolved:', {
+        mediaType: lookupMediaType,
+        title: lookupTitle,
+        imdbId: result.imdbId,
+      });
       applyImdbIdToShow(result.imdbId, lookupShowId);
       if (!isCurrentShow()) return;
       state.imdbId = result.imdbId;
@@ -2403,8 +2567,8 @@ function recordExtractedSegments(items) {
 }
 
 function isAlreadyInIntroDB(item) {
-  const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-  return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
+  const key = getItemCacheKey(item);
+  return hasExistingSegment(state.dedupCacheV2[key], item);
 }
 
 async function mapCapturedItemsWithTvdb(action) {
@@ -2414,13 +2578,16 @@ async function mapCapturedItemsWithTvdb(action) {
     toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
   }
 
+  const validItems = capturedItems.filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING');
+  const movieItems = validItems.filter(isMovieItem);
   const seriesGroups = new Map();
-  for (const item of capturedItems.filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')) {
+  for (const item of validItems.filter(item => !isMovieItem(item))) {
     if (!seriesGroups.has(item.imdb_id)) seriesGroups.set(item.imdb_id, []);
     seriesGroups.get(item.imdb_id).push(item);
   }
 
-  const items = [];
+  // Movies have no season/episode pair and deliberately bypass TVDB mapping.
+  const items = movieItems.slice();
   let unreliableSkipped = 0;
   let specialSegmentsExcluded = 0;
   const reasonLabels = {
@@ -2496,7 +2663,8 @@ async function exportJSON() {
     toast('No timestamps yet.');
     return;
   }
-  if (!state.tvdbApiKey) {
+  const requiresTvdb = hasTvItems(state.allItems);
+  if (requiresTvdb && !state.tvdbApiKey) {
     toast('Please enter your own TVDB API key before exporting JSON.');
     setTvdbStatus('No TVDB API key configured');
     return;
@@ -2506,7 +2674,7 @@ async function exportJSON() {
     return;
   }
 
-  toast('Validating JSON export against TVDB...');
+  toast(requiresTvdb ? 'Validating JSON export against TVDB...' : 'Preparing movie JSON export...');
   const mapped = await mapCapturedItemsWithTvdb('JSON export');
   const mappedItems = mapped.items;
   let items = filterShortOutputSegments(mappedItems);
@@ -2520,24 +2688,27 @@ async function exportJSON() {
       return;
     }
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
-    toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : 'No series has a reliable TVDB episode mapping; nothing was exported.');
+    const noMappingMessage = hasTvItems(mapped.capturedItems)
+      ? 'No series has a reliable TVDB episode mapping; nothing was exported.'
+      : 'No movie has a usable IMDb ID; nothing was exported.';
+    toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
     return;
   }
 
-  const episodeKeys = [...new Set(
+  const mediaKeys = [...new Set(
     items
-      .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
+      .map(getItemCacheKey)
   )];
-  toast(`Checking IntroDB for existing segments (${episodeKeys.length} canonical episode(s))...`);
-  const canonicalExisting = new Map(await Promise.all(episodeKeys.map(async key => [
+  toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
+  const canonicalExisting = new Map(await Promise.all(mediaKeys.map(async key => [
     key,
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
   const beforeCount = items.length;
   items = items.filter(item => {
-    const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-    return !canonicalExisting.get(key)?.has(item.segment_type);
+    const key = getItemCacheKey(item);
+    return !hasExistingSegment(canonicalExisting.get(key), item);
   });
   const duplicateCount = beforeCount - items.length;
   if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
@@ -2610,7 +2781,8 @@ async function submitToIntroDB() {
     setIntrodbStatus('No API key configured');
     return;
   }
-  if (!state.tvdbApiKey) {
+  const requiresTvdb = hasTvItems(state.allItems);
+  if (requiresTvdb && !state.tvdbApiKey) {
     toast('Please enter your own TVDB API key in the panel above.');
     setTvdbStatus('No TVDB API key configured');
     return;
@@ -2621,7 +2793,7 @@ async function submitToIntroDB() {
   }
 
   state.submitInProgress = true;
-  updateSubmitBtn('Checking TVDB...');
+  updateSubmitBtn(requiresTvdb ? 'Checking TVDB...' : 'Preparing submission...');
   const stopSubmission = () => {
     state.submitInProgress = false;
     updateSubmitBtn('Submit to IntroDB');
@@ -2643,26 +2815,29 @@ async function submitToIntroDB() {
       return;
     }
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
-    toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : 'No series has a reliable TVDB episode mapping; nothing was submitted.');
-    setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : 'Submission blocked: TVDB mapping unavailable or unreliable');
+    const noMappingMessage = hasTvItems(mapped.capturedItems)
+      ? 'No series has a reliable TVDB episode mapping; nothing was submitted.'
+      : 'No movie has a usable IMDb ID; nothing was submitted.';
+    toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : noMappingMessage);
+    setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : noMappingMessage);
     stopSubmission();
     return;
   }
 
-  const episodeKeys = [...new Set(
+  const mediaKeys = [...new Set(
     allMapped
       .filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')
-      .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
+      .map(getItemCacheKey)
   )];
-  toast(`Checking IntroDB for existing segments (${episodeKeys.length} canonical episode(s))...`);
-  const canonicalExisting = new Map(await Promise.all(episodeKeys.map(async key => [
+  toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
+  const canonicalExisting = new Map(await Promise.all(mediaKeys.map(async key => [
     key,
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
   const items = allMapped.filter(item => {
-    const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-    return !canonicalExisting.get(key)?.has(item.segment_type);
+    const key = getItemCacheKey(item);
+    return !hasExistingSegment(canonicalExisting.get(key), item);
   });
   const skipped = capturedItems.length - items.length;
   if (!items.length) {
@@ -2758,7 +2933,7 @@ function configurePanelCallbacks() {
       state.dbSearchDone = false;
       state.dedupCacheV2 = {};
       const searchShowId = state.showId;
-      searchImdbByTitle(query, state.showYear).then(result => {
+      searchImdbByTitle(query, state.showYear, { mediaType: state.mediaType || 'tv' }).then(result => {
         if (result.success) {
           applyImdbIdToShow(result.imdbId, searchShowId);
           if (searchShowId && state.showId !== searchShowId) return;
@@ -3117,7 +3292,17 @@ const PRIME_VIDEO_MAX_POLL_ATTEMPTS = 40;
 const PRIME_VIDEO_SELECTION_TTL_MS = 60000;
 const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 1000;
 const PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS = 500;
-const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set(['SKIP_RECAP', 'SKIP_INTRO', 'END_CREDITS', 'NEXT_UP']);
+const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set([
+  'SKIP_RECAP',
+  'SKIP_INTRO',
+  'END_CREDITS',
+  'END_CREDIT',
+  'NEXT_UP',
+  'AFTER_CREDITS',
+  'POST_CREDITS',
+  'AFTER_CREDIT_SCENE',
+  'POST_CREDIT_SCENE',
+]);
 
 function isPrimeVideoTitleId(value) {
   return typeof value === 'string' && PRIME_VIDEO_ID_PATTERN.test(value);
@@ -3131,6 +3316,9 @@ function ensurePrimeVideoState() {
   if (!(state.primeVideoCatalogByShowId instanceof Map)) state.primeVideoCatalogByShowId = new Map();
   if (!(state.primeVideoMetadataByTitleId instanceof Map)) state.primeVideoMetadataByTitleId = new Map();
   if (!(state.primeVideoEpisodeTitleByTitleId instanceof Map)) state.primeVideoEpisodeTitleByTitleId = new Map();
+  if (!(state.primeVideoMovieEventsByTitleId instanceof Map)) state.primeVideoMovieEventsByTitleId = new Map();
+  if (!(state.primeVideoMovieRuntimeByTitleId instanceof Map)) state.primeVideoMovieRuntimeByTitleId = new Map();
+  if (!(state.primeVideoMovieDurationPolls instanceof Map)) state.primeVideoMovieDurationPolls = new Map();
   if (!(state.primeVideoFetchedSeasonCatalogUrls instanceof Set)) state.primeVideoFetchedSeasonCatalogUrls = new Set();
   if (!(state.primeVideoPollingTitleIds instanceof Set)) state.primeVideoPollingTitleIds = new Set();
   if (!(state.primeVideoPendingOutroTitleIds instanceof Set)) state.primeVideoPendingOutroTitleIds = new Set();
@@ -3225,6 +3413,67 @@ function findPrimeVideoEpisodeMetadata(root) {
   return candidates[0] || null;
 }
 
+function isPrimeVideoMovieType(value) {
+  return ['MOVIE', 'FILM', 'FEATURE'].includes(String(value || '').trim().toUpperCase());
+}
+
+function isPrimeVideoMovieNode(node) {
+  const typeValues = [
+    node?.contentType,
+    node?.type,
+    node?.titleType,
+    node?.subType,
+    node?.subtype,
+    node?.mediaType,
+    node?.media_type,
+    node?.entityType,
+    node?.contentCategory,
+    node?.catalogType,
+    node?.videoType,
+  ];
+  return typeValues.some(isPrimeVideoMovieType) ||
+    ['isMovie', 'isFilm', 'isFeature'].some(key => node?.[key] === true || node?.[key] === 1 || node?.[key] === 'true');
+}
+
+function findPrimeVideoMovieMetadata(root) {
+  const candidates = [];
+  const visited = new WeakSet();
+  const episodeKeys = ['episodeNumber', 'episode', 'episodeSequenceNumber', 'episodeSequence'];
+
+  function hasEpisodeNumber(node) {
+    return episodeKeys.some(key => coercePrimeVideoInteger(node?.[key]) != null);
+  }
+
+  function walk(node, depth = 0, path = '') {
+    if (!node || typeof node !== 'object' || depth > 8 || visited.has(node)) return;
+    visited.add(node);
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => walk(item, depth + 1, `${path}[${index}]`));
+      return;
+    }
+
+    if (isPrimeVideoMovieNode(node) && !hasEpisodeNumber(node)) {
+      const title = String(node.movieTitle || node.movieName || node.displayTitle || node.title || node.name || node.label || '').trim();
+      const seriesTitle = String(node.seriesTitle || node.showTitle || node.parentTitle || '').trim();
+      const year = node.releaseYear || node.year || node.releaseDate?.slice?.(0, 4) || '';
+      const catalogScore = /catalogMetadata|catalog/i.test(path) ? 4 : 0;
+      candidates.push({
+        title: title || seriesTitle,
+        year,
+        score: catalogScore + (title ? 3 : 0) + (year ? 1 : 0),
+      });
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (value && typeof value === 'object') walk(value, depth + 1, path ? `${path}.${key}` : key);
+    }
+  }
+
+  walk(root);
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0] || null;
+}
+
 function findPrimeVideoEpisodeTitle(root, expectedShowTitle = '') {
   const candidates = [];
   const visited = new WeakSet();
@@ -3259,6 +3508,100 @@ function findPrimeVideoEpisodeTitle(root, expectedShowTitle = '') {
   walk(root);
   candidates.sort((a, b) => b.score - a.score);
   return candidates[0]?.title || '';
+}
+
+function normalizePrimeVideoEventType(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  return {
+    INTRO: 'SKIP_INTRO',
+    RECAP: 'SKIP_RECAP',
+    CREDITS: 'END_CREDITS',
+    CREDIT: 'END_CREDIT',
+  }[normalized] || normalized;
+}
+
+function getPrimeVideoEventType(event) {
+  return normalizePrimeVideoEventType(
+    event?.eventType || event?.elementType || event?.type || event?.name
+  );
+}
+
+function getPrimeVideoTransitionRoots(data) {
+  return [
+    data?.transitionTimecodes?.result,
+    data?.transitionTimecodes,
+    data?.vodPlaybackUrls?.result?.transitionTimecodes?.result,
+    data?.vodPlaybackUrls?.result?.transitionTimecodes,
+    data?.vodPlaylistedPlaybackUrls?.result?.transitionTimecodes?.result,
+    data?.vodPlaylistedPlaybackUrls?.result?.transitionTimecodes,
+  ].filter(root => root && typeof root === 'object');
+}
+
+function readPrimeVideoTransitionBoundary(roots, keys) {
+  for (const root of roots) {
+    for (const key of keys) {
+      const value = coercePrimeVideoMilliseconds(root?.[key]);
+      if (value != null) return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * Prime has returned two transition-timecode shapes over time: the current
+ * result.events form and the older skipElements/endCreditsStart form. Keep
+ * the rest of the extractor independent from that response detail.
+ */
+function readPrimeVideoTransitionEvents(data) {
+  const roots = getPrimeVideoTransitionRoots(data);
+  const rawEvents = [];
+  const seenRawEvents = new Set();
+  for (const root of roots) {
+    for (const key of ['events', 'skipElements']) {
+      if (!Array.isArray(root?.[key])) continue;
+      for (const event of root[key]) {
+        const rawKey = JSON.stringify(event);
+        if (seenRawEvents.has(rawKey)) continue;
+        seenRawEvents.add(rawKey);
+        rawEvents.push(event);
+      }
+    }
+  }
+
+  const endCreditsStartMs = readPrimeVideoTransitionBoundary(roots, [
+    'endCreditsStartMs',
+    'endCreditsStart',
+    'creditsStartMs',
+    'creditsStart',
+  ]);
+  const endCreditsEndMs = readPrimeVideoTransitionBoundary(roots, [
+    'endCreditsEndMs',
+    'endCreditsEnd',
+    'creditsEndMs',
+    'creditsEnd',
+  ]);
+  const events = rawEvents.map(event => ({
+    ...(event && typeof event === 'object' ? event : {}),
+    eventType: getPrimeVideoEventType(event),
+  }));
+
+  const hasEndCreditsEvent = events.some(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)));
+  if (!hasEndCreditsEvent && endCreditsStartMs != null) {
+    events.push({
+      eventType: 'END_CREDITS',
+      startTimeMs: endCreditsStartMs,
+      ...(endCreditsEndMs == null ? {} : { endTimeMs: endCreditsEndMs }),
+    });
+  } else if (endCreditsEndMs != null) {
+    for (const event of events) {
+      if (!['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event))) continue;
+      if (readPrimeVideoEventTimeMs(event, 'end') == null) event.endTimeMs = endCreditsEndMs;
+    }
+  }
+  return events;
 }
 
 function parsePrimeVideoEpisodeText(text) {
@@ -3442,8 +3785,9 @@ function setPrimeVideoActiveEpisode(snapshot) {
 }
 
 function hasPrimeVideoSegmentEvents(data) {
-  const events = data?.transitionTimecodes?.result?.events;
-  return Array.isArray(events) && events.some(event => PRIME_VIDEO_SUPPORTED_EVENT_TYPES.has(event?.eventType));
+  return readPrimeVideoTransitionEvents(data).some(event =>
+    PRIME_VIDEO_SUPPORTED_EVENT_TYPES.has(getPrimeVideoEventType(event))
+  );
 }
 
 function inferNextPrimeVideoEpisode() {
@@ -3618,13 +3962,46 @@ function coercePrimeVideoMilliseconds(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
+function coercePrimeVideoClockMilliseconds(value) {
+  const numeric = coercePrimeVideoMilliseconds(value);
+  if (numeric != null) return numeric;
+  const parts = String(value || '').trim().split(':').map(Number);
+  if (!parts.length || parts.some(part => !Number.isFinite(part))) return null;
+  const seconds = parts.length === 2
+    ? parts[0] * 60 + parts[1]
+    : parts.length === 3
+      ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+      : null;
+  return seconds == null || seconds < 0 ? null : seconds * 1000;
+}
+
 function readPrimeVideoEventTimeMs(event, boundary) {
   const keys = boundary === 'start'
     ? ['startTimeMs', 'startTimecodeMs', 'startTimeCodeMs', 'startMs']
     : ['endTimeMs', 'endTimecodeMs', 'endTimeCodeMs', 'endMs'];
-  for (const key of keys) {
-    const value = coercePrimeVideoMilliseconds(event?.[key]);
-    if (value != null) return value;
+  const nestedSources = [
+    event,
+    event?.timecode,
+    event?.timeCode,
+    event?.timecodes,
+    event?.range,
+  ];
+  for (const source of nestedSources) {
+    for (const key of keys) {
+      const value = coercePrimeVideoClockMilliseconds(source?.[key]);
+      if (value != null) return value;
+    }
+  }
+  const secondKeys = boundary === 'start'
+    ? ['startTime', 'start', 'startSec', 'startSeconds', 'offset']
+    : ['endTime', 'end', 'endSec', 'endSeconds'];
+  for (const source of nestedSources) {
+    for (const key of secondKeys) {
+      const value = Number(source?.[key]);
+      if (Number.isFinite(value) && value >= 0) return value * 1000;
+      const clockMilliseconds = coercePrimeVideoClockMilliseconds(source?.[key]);
+      if (clockMilliseconds != null) return clockMilliseconds;
+    }
   }
   return null;
 }
@@ -3634,8 +4011,16 @@ function findPrimeVideoRuntimeMs(root, events = []) {
     .map(event => readPrimeVideoEventTimeMs(event, 'end'))
     .filter(value => value != null);
   const visited = new WeakSet();
-  const millisecondKeys = new Set(['runtimems', 'runtimemillis', 'runtimemilliseconds', 'durationms', 'durationmillis', 'durationmilliseconds']);
-  const secondKeys = new Set(['runtimeseconds', 'runtimeinseconds', 'durationseconds', 'durationinseconds']);
+  const millisecondKeys = new Set([
+    'runtimems', 'runtimemillis', 'runtimemilliseconds',
+    'durationms', 'durationmillis', 'durationmilliseconds',
+    'contentdurationms', 'contentdurationmillis', 'contentdurationmilliseconds',
+  ]);
+  const secondKeys = new Set([
+    'runtimeseconds', 'runtimeinseconds',
+    'durationseconds', 'durationinseconds',
+    'runtime', 'duration', 'contentduration',
+  ]);
 
   function walk(node, depth = 0) {
     if (!node || typeof node !== 'object' || depth > 8 || visited.has(node)) return;
@@ -3645,7 +4030,11 @@ function findPrimeVideoRuntimeMs(root, events = []) {
       const number = Number(value);
       if (Number.isFinite(number) && number > 0) {
         if (millisecondKeys.has(normalizedKey)) candidates.push(number);
-        if (secondKeys.has(normalizedKey)) candidates.push(number * 1000);
+        if (secondKeys.has(normalizedKey)) candidates.push(
+          ['runtime', 'duration', 'contentduration'].includes(normalizedKey) && number > 100000
+            ? number
+            : number * 1000
+        );
       } else if (value && typeof value === 'object') {
         walk(value, depth + 1);
       }
@@ -3691,10 +4080,11 @@ function readPrimeVideoMediaDurationMs() {
   return candidates.length ? Math.max(...candidates) * 1000 : null;
 }
 
-function logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, items) {
+function logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, items, mediaType = 'tv') {
   logCapturedTimestamps({
     prefix: 'PVE',
     showTitle: showId,
+    mediaType,
     season,
     episode,
     episodeTitle,
@@ -3734,19 +4124,25 @@ function queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle,
   batch.timer = setTimeout(() => flushPrimeVideoSegmentBatch(titleId), PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS);
 }
 
-function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episode, episodeTitle, segmentType, startTimeMs, endTimeMs) {
-  const episodeId = `${titleId}_${segmentType}`;
+function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episode, episodeTitle, segmentType, startTimeMs, endTimeMs, mediaType = 'tv', creditPart = null) {
+  const isMovie = String(mediaType).toLowerCase() === 'movie';
+  const partSuffix = creditPart ? `_${creditPart}` : '';
+  const episodeId = isMovie ? `${titleId}_movie_${segmentType}${partSuffix}` : `${titleId}_${segmentType}${partSuffix}`;
   const alreadyCaptured = item => item._eid === episodeId || (
     item._showId === showId &&
+    String(item.media_type || 'tv').toLowerCase() === String(mediaType).toLowerCase() &&
     item.season === season &&
     item.episode === episode &&
-    item.segment_type === segmentType
+    item.segment_type === segmentType &&
+    (item.credit_part || null) === (creditPart || null)
   );
   if (state.allItems.some(alreadyCaptured) || extractedItems.some(alreadyCaptured)) return false;
   extractedItems.push({
     _eid: episodeId,
     _episodeTitle: episodeTitle,
     _showId: showId,
+    ...(isMovie ? { media_type: 'movie' } : {}),
+    ...(creditPart ? { credit_part: creditPart } : {}),
     imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
     segment_type: segmentType,
     season,
@@ -3755,6 +4151,197 @@ function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episod
     end_sec: endTimeMs / 1000,
   });
   return true;
+}
+
+function readPrimeVideoMoviePageTitle(titleId) {
+  const heading = readPrimeVideoSeriesTitle(document);
+  if (heading) return heading;
+  const pageTitle = String(document.title || '')
+    .replace(/^Prime Video[:\-]\s*/i, '')
+    .trim();
+  return pageTitle || titleId;
+}
+
+function clearPrimeVideoMovieDurationPoll(titleId) {
+  const poll = state.primeVideoMovieDurationPolls.get(titleId);
+  if (poll?.timer != null && typeof clearTimeout === 'function') clearTimeout(poll.timer);
+  state.primeVideoMovieDurationPolls.delete(titleId);
+}
+
+function schedulePrimeVideoMovieDurationPoll(titleId, movieTitle) {
+  if (typeof window === 'undefined' || typeof setTimeout !== 'function') return false;
+  const existing = state.primeVideoMovieDurationPolls.get(titleId);
+  if (existing?.timer != null) return true;
+  if ((existing?.attempt || 0) >= PRIME_VIDEO_MAX_POLL_ATTEMPTS) return false;
+
+  const poll = existing || { attempt: 0, timer: null, movieTitle };
+  poll.movieTitle = movieTitle || poll.movieTitle || titleId;
+  poll.timer = setTimeout(() => {
+    const current = state.primeVideoMovieDurationPolls.get(titleId);
+    if (!current) return;
+    current.timer = null;
+    current.attempt++;
+    state.primeVideoMovieDurationPolls.set(titleId, current);
+    const events = state.primeVideoMovieEventsByTitleId.get(titleId) || [];
+    if (!events.length) return;
+    finalizePrimeVideoMovieEvents(
+      titleId,
+      current.movieTitle || titleId,
+      { transitionTimecodes: { result: { events } } },
+      state.primeVideoMovieRuntimeByTitleId.get(titleId) ?? null
+    );
+  }, PRIME_VIDEO_POLL_INTERVAL_MS);
+  state.primeVideoMovieDurationPolls.set(titleId, poll);
+  return true;
+}
+
+function hasPrimeVideoEpisodePageContext(titleId) {
+  if (state.primeVideoTitleMap.has(titleId)) return true;
+  if (state.primeVideoSelectedEpisode?.resolvedTitleId === titleId) return true;
+  if (readPrimeVideoSelectedSeason(document) != null) return true;
+  const cards = document.querySelectorAll?.(PRIME_VIDEO_CARD_SELECTOR) || [];
+  return cards.length > 0;
+}
+
+function isLikelyPrimeVideoMoviePlayback(titleId, data) {
+  if (state.mediaType === 'movie' && String(state.showId || '') === String(titleId)) return true;
+  if (findPrimeVideoEpisodeMetadata(data) || hasPrimeVideoEpisodePageContext(titleId)) return false;
+  const events = readPrimeVideoTransitionEvents(data);
+  const hasCreditsEvent = events.some(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)));
+  const hasCompleteCredits = events.some(event => {
+    if (!['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event))) return false;
+    const startTimeMs = readPrimeVideoEventTimeMs(event, 'start');
+    const endTimeMs = readPrimeVideoEventTimeMs(event, 'end');
+    return startTimeMs != null && endTimeMs != null && endTimeMs > startTimeMs;
+  });
+  const hasTvOnlyMarker = events.some(event => ['SKIP_RECAP', 'SKIP_INTRO'].includes(String(event?.eventType || '').toUpperCase()));
+  return (hasCompleteCredits || hasCreditsEvent) && !hasTvOnlyMarker;
+}
+
+function finalizePrimeVideoMovieResponses(titleId, movieTitle, currentData = null) {
+  const pending = state.primeVideoPendingByTitleId.get(titleId) || [];
+  state.primeVideoPendingByTitleId.delete(titleId);
+  state.primeVideoPollingTitleIds.delete(titleId);
+
+  const payloads = [...pending, currentData].filter(data => hasPrimeVideoSegmentEvents(data));
+  if (!payloads.length) return;
+  const previousEvents = state.primeVideoMovieEventsByTitleId.get(titleId) || [];
+  const incomingEvents = payloads.flatMap(data => readPrimeVideoTransitionEvents(data));
+  const events = [];
+  const seenEvents = new Set();
+  for (const event of [...previousEvents, ...incomingEvents]) {
+    const key = JSON.stringify(event);
+    if (seenEvents.has(key)) continue;
+    seenEvents.add(key);
+    events.push(event);
+  }
+  state.primeVideoMovieEventsByTitleId.set(titleId, events);
+  const runtimeCandidates = payloads
+    .map(data => findPrimeVideoRuntimeMs(data, []))
+    .filter(value => value != null);
+  if (runtimeCandidates.length) {
+    state.primeVideoMovieRuntimeByTitleId.set(titleId, Math.max(...runtimeCandidates));
+  }
+  finalizePrimeVideoMovieEvents(titleId, movieTitle, {
+    transitionTimecodes: { result: { events } },
+  }, state.primeVideoMovieRuntimeByTitleId.get(titleId) ?? null);
+}
+
+function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverride = null) {
+  const events = readPrimeVideoTransitionEvents(data);
+  const extractedItems = [];
+  const runtimeMs = runtimeMsOverride ?? findPrimeVideoRuntimeMs(data, []) ?? readPrimeVideoMediaDurationMs();
+  const creditRange = events
+    .filter(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)))
+    .map(event => ({
+      startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
+      endTimeMs: readPrimeVideoEventTimeMs(event, 'end') ?? runtimeMs,
+    }))
+    .find(range => range.startTimeMs != null && range.endTimeMs != null && range.endTimeMs > range.startTimeMs);
+
+  if (!creditRange) {
+    const creditEvents = events
+      .filter(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)))
+      .map(event => ({
+        type: getPrimeVideoEventType(event),
+        startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
+        endTimeMs: readPrimeVideoEventTimeMs(event, 'end'),
+      }));
+    const creditStartAvailable = creditEvents.some(event => event.startTimeMs != null);
+    if (creditStartAvailable && schedulePrimeVideoMovieDurationPoll(titleId, movieTitle)) {
+      const poll = state.primeVideoMovieDurationPolls.get(titleId);
+      if (poll?.attempt === 0) {
+        console.info('[PVE] Movie credits found; waiting for Prime media duration before finalizing:', {
+          titleId,
+          creditEvents,
+        });
+      }
+      return;
+    }
+    console.warn('[PVE] Movie credits did not include a safe END_CREDITS range; NEXT_UP was ignored:', titleId, {
+      creditEvents,
+      eventTypes: events.map(getPrimeVideoEventType),
+      runtimeMs,
+    });
+    return;
+  }
+  clearPrimeVideoMovieDurationPoll(titleId);
+
+  const afterCreditsEvents = events.filter(event => [
+    'AFTER_CREDITS',
+    'POST_CREDITS',
+    'AFTER_CREDIT_SCENE',
+    'POST_CREDIT_SCENE',
+  ].includes(getPrimeVideoEventType(event)));
+  const afterCreditsEvent = afterCreditsEvents
+    .map(event => ({
+      event,
+      startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
+      endTimeMs: readPrimeVideoEventTimeMs(event, 'end'),
+    }))
+    .find(range => range.startTimeMs != null && range.startTimeMs > creditRange.startTimeMs);
+  const ranges = splitCreditRange({
+    startSec: creditRange.startTimeMs / 1000,
+    endSec: creditRange.endTimeMs / 1000,
+    afterCreditsDetected: afterCreditsEvents.length > 0,
+    afterCreditsStartSec: afterCreditsEvent?.startTimeMs == null ? null : afterCreditsEvent.startTimeMs / 1000,
+    afterCreditsEndSec: afterCreditsEvent?.endTimeMs == null ? null : afterCreditsEvent.endTimeMs / 1000,
+  });
+  for (const range of ranges) {
+    appendPrimeVideoSegment(
+      extractedItems,
+      titleId,
+      titleId,
+      null,
+      null,
+      movieTitle,
+      'outro',
+      range.startSec * 1000,
+      range.endSec * 1000,
+      'movie',
+      range.creditPart
+    );
+  }
+  if (!extractedItems.length) return;
+
+  const existingMovieItems = state.allItems.filter(item =>
+    String(item?._showId || '') === String(titleId) &&
+    String(item?.media_type || '').toLowerCase() === 'movie' &&
+    item.segment_type === 'outro'
+  );
+  const sameAsExisting = existingMovieItems.length === extractedItems.length && extractedItems.every(item =>
+    existingMovieItems.some(existing =>
+      existing._eid === item._eid &&
+      Math.abs(Number(existing.start_sec) - Number(item.start_sec)) < 0.01 &&
+      Math.abs(Number(existing.end_sec) - Number(item.end_sec)) < 0.01
+    )
+  );
+  if (sameAsExisting) return;
+  if (existingMovieItems.length) {
+    state.allItems = state.allItems.filter(item => !existingMovieItems.includes(item));
+  }
+  logPrimeVideoTimestamps(titleId, movieTitle, null, null, movieTitle, extractedItems, 'movie');
+  recordExtractedSegments(extractedItems);
 }
 
 function pollPrimeVideoOutroDuration(titleId, showId, season, episode, episodeTitle, startTimeMs, attempt = 0) {
@@ -3779,7 +4366,7 @@ function pollPrimeVideoOutroDuration(titleId, showId, season, episode, episodeTi
 }
 
 function finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle = '', showId = state.showId) {
-  const events = data?.transitionTimecodes?.result?.events || [];
+  const events = readPrimeVideoTransitionEvents(data);
   const extractedItems = [];
   const runtimeMs = findPrimeVideoRuntimeMs(data, events) ?? readPrimeVideoMediaDurationMs();
   const resolveEventRange = (event, useRuntime = false) => {
@@ -3790,19 +4377,23 @@ function finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle =
       ? { event, startTimeMs, endTimeMs }
       : null;
   };
-  const outroCandidates = events.filter(event => event.eventType === 'END_CREDITS' || event.eventType === 'NEXT_UP');
+  const outroCandidates = events.filter(event => {
+    const eventType = getPrimeVideoEventType(event);
+    return eventType === 'END_CREDITS' || eventType === 'END_CREDIT' || eventType === 'NEXT_UP';
+  });
   const outroRange = outroCandidates
-    .filter(event => event.eventType === 'END_CREDITS')
+    .filter(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)))
     .map(event => resolveEventRange(event, true))
     .find(Boolean) || outroCandidates
-    .filter(event => event.eventType === 'NEXT_UP')
+    .filter(event => getPrimeVideoEventType(event) === 'NEXT_UP')
     .map(event => resolveEventRange(event, true))
     .find(Boolean);
 
   for (const event of events) {
     let segmentType = null;
-    if (event.eventType === 'SKIP_RECAP') segmentType = 'recap';
-    if (event.eventType === 'SKIP_INTRO') segmentType = 'intro';
+    const eventType = getPrimeVideoEventType(event);
+    if (eventType === 'SKIP_RECAP') segmentType = 'recap';
+    if (eventType === 'SKIP_INTRO') segmentType = 'intro';
     const range = event === outroRange?.event ? outroRange : resolveEventRange(event);
     if (event === outroRange?.event) segmentType = 'outro';
     if (!segmentType || !range) continue;
@@ -3856,6 +4447,11 @@ function commitPrimeVideoEpisode(titleId, snapshot, { allowNumberReuse = false }
 }
 
 function pollPrimeVideoEpisode(titleId, attempt) {
+  if ((state.mediaType === 'movie' && String(state.showId || '') === String(titleId)) ||
+      state.primeVideoMovieEventsByTitleId.has(titleId)) {
+    finalizePrimeVideoMovieResponses(titleId, state.showTitle || titleId);
+    return;
+  }
   const snapshot = readPrimeVideoPlayerSnapshot();
   if (snapshot.isPlayerActive && snapshot.season != null && snapshot.episode != null) {
     if (commitPrimeVideoEpisode(titleId, snapshot)) return;
@@ -3873,6 +4469,37 @@ function processPrimeVideoMetadata(data, bodyText, url) {
   ensurePrimeVideoState();
   const titleId = extractPrimeVideoTitleId(bodyText, url);
   if (!titleId) return;
+  const movieMetadata = findPrimeVideoMovieMetadata(data);
+  if (movieMetadata) {
+    const movieTitle = movieMetadata.title || titleId;
+    console.info('[PVE] Movie metadata classified; skipping season/episode resolution.', {
+      titleId,
+      title: movieTitle,
+      year: movieMetadata.year || '',
+    });
+    handleDetectedShow({
+      title: movieTitle,
+      showId: titleId,
+      year: movieMetadata.year || '',
+      mediaType: 'movie',
+    });
+    finalizePrimeVideoMovieResponses(titleId, movieTitle, data);
+    return;
+  }
+  if (state.mediaType === 'movie' && String(state.showId || '') === String(titleId)) {
+    finalizePrimeVideoMovieResponses(titleId, state.showTitle || titleId, data);
+    return;
+  }
+  if (isLikelyPrimeVideoMoviePlayback(titleId, data)) {
+    const movieTitle = readPrimeVideoMoviePageTitle(titleId);
+    console.info('[PVE] Movie playback classified from credit events; skipping season/episode resolution.', {
+      titleId,
+      title: movieTitle,
+    });
+    handleDetectedShow({ title: movieTitle, showId: titleId, mediaType: 'movie' });
+    finalizePrimeVideoMovieResponses(titleId, movieTitle, data);
+    return;
+  }
   const responseMetadata = findPrimeVideoEpisodeMetadata(data);
   const expectedShowTitle = responseMetadata?.seriesTitle || state.showId || readPrimeVideoSeriesTitle(document);
   const responseEpisodeTitle = responseMetadata?.episodeTitle || findPrimeVideoEpisodeTitle(data, expectedShowTitle);
@@ -4058,16 +4685,30 @@ function coerceVideolandNumber(value) {
 function extractVideolandRootMeta(json) {
   const video = json?.seo?.video || null;
   const entity = json?.entity || null;
+  const parent = json?.seo?.parent || json?.parent || null;
+  const type = String(
+    json?.mediaType || json?.type || json?.videoType || json?.contentType ||
+    json?.seo?.mediaType || json?.seo?.type || json?.seo?.contentType ||
+    video?.mediaType || video?.type || video?.videoType || video?.contentType ||
+    entity?.mediaType || entity?.type || entity?.videoType || entity?.contentType || ''
+  ).trim().toLowerCase();
   return {
     entityId: entity?.id != null ? String(entity.id) : null,
     entity,
-    season: coerceVideolandNumber(video?.season),
-    episode: coerceVideolandNumber(video?.episode),
-    duration: coerceVideolandNumber(video?.duration),
-    programId: json?.seo?.parent?.id != null ? String(json.seo.parent.id) : null,
-    programTitle: json?.seo?.parent?.name || null,
-    episodeTitle: video?.name || video?.title || null,
-    extraTitle: video?.extraTitle || null,
+    mediaType: json?.isMovie === true || video?.isMovie === true || entity?.isMovie === true || ['movie', 'film', 'feature'].includes(type)
+      ? 'movie'
+      : 'tv',
+    season: coerceVideolandNumber(video?.season ?? entity?.season ?? json?.season),
+    episode: coerceVideolandNumber(video?.episode ?? entity?.episode ?? json?.episode),
+    duration: coerceVideolandNumber(video?.duration ?? entity?.duration ?? json?.duration),
+    programId: parent?.id != null
+      ? String(parent.id)
+      : (json?.programId ?? entity?.programId ?? entity?.seriesId) != null
+        ? String(json?.programId ?? entity?.programId ?? entity?.seriesId)
+        : null,
+    programTitle: parent?.name || json?.programTitle || json?.seriesTitle || null,
+    episodeTitle: video?.name || video?.title || entity?.episodeTitle || entity?.episodeName || null,
+    extraTitle: video?.extraTitle || entity?.extraTitle || null,
   };
 }
 
@@ -4095,9 +4736,21 @@ function mapVideolandChapterType(type) {
   return null;
 }
 
-function updateVideolandTitle(title, programId) {
+function isVideolandMovieCreditsType(type) {
+  return [
+    'ending_credits',
+    'endingcredits',
+    'end_credits',
+    'endcredits',
+    'closing_credits',
+    'closingcredits',
+    'credits',
+  ].includes(String(type || '').trim().toLowerCase());
+}
+
+function updateVideolandTitle(title, programId, mediaType = 'tv') {
   const showId = String(programId || title);
-  handleDetectedShow({ title, showId });
+  handleDetectedShow({ title, showId, mediaType });
   return showId;
 }
 
@@ -4168,17 +4821,86 @@ function processVideolandLayout(json) {
   const clipId = String(activeItem.video.id);
   const season = rootMeta.season;
   const episode = rootMeta.episode;
-  const title = (rootMeta.programTitle || activeItem.title || '').trim();
+  const hasMovieCreditsChapter = (activeItem.video.chapters || []).some(chapter => isVideolandMovieCreditsType(chapter.type));
+  const isMovie = rootMeta.mediaType === 'movie' || (season == null && episode == null && hasMovieCreditsChapter);
+  const title = (rootMeta.programTitle || rootMeta.episodeTitle || activeItem.title || activeItem.video.title || activeItem.video.name || '').trim();
+  const mediaId = isMovie ? (rootMeta.programId || rootMeta.entityId || clipId) : rootMeta.programId;
   const episodeTitle = chooseVideolandEpisodeTitle(rootMeta, activeItem, title);
-  if (!episodeTitle) {
+  if (isMovie) {
+    console.info('[VLE] Movie metadata classified; skipping TVDB mapping.', {
+      title,
+      showId: mediaId,
+      clipId,
+    });
+  }
+  if (!isMovie && !episodeTitle) {
     console.warn('[VLE] No episode-specific title found; the series title will not be used for TVDB matching.', {
       clipId,
       seriesTitle: title,
     });
   }
-  const showId = updateVideolandTitle(title, rootMeta.programId);
+  const showId = updateVideolandTitle(title, mediaId, isMovie ? 'movie' : 'tv');
   const useGtstAbsoluteTitleMatch = isVideolandGtstSeries(title);
-  state.clipMap.set(clipId, { season, episode, title, showId });
+  state.clipMap.set(clipId, { season, episode, title, showId, mediaType: isMovie ? 'movie' : 'tv' });
+
+  if (isMovie) {
+    const extractedItems = [];
+    const chapters = activeItem.video.chapters || [];
+    const afterCreditsChapters = chapters.filter(chapter => [
+      'after_credits',
+      'aftercredits',
+      'after_credits_scene',
+      'aftercreditsscene',
+      'post_credits',
+      'postcredits',
+      'post_credits_scene',
+      'postcreditsscene',
+    ].includes(String(chapter.type || '').trim().toLowerCase()));
+    const afterCreditsChapter = afterCreditsChapters[0];
+    for (const chapter of chapters) {
+      const chapterType = String(chapter.type || '').trim().toLowerCase();
+      if (!isVideolandMovieCreditsType(chapterType)) continue;
+      const startSec = coerceVideolandNumber(chapter.tcStart);
+      const endSec = coerceVideolandNumber(chapter.tcEnd);
+      if (startSec == null || endSec == null || endSec <= startSec) continue;
+
+      const ranges = splitCreditRange({
+        startSec,
+        endSec,
+        afterCreditsDetected: afterCreditsChapters.length > 0,
+        afterCreditsStartSec: coerceVideolandNumber(afterCreditsChapter?.tcStart),
+        afterCreditsEndSec: coerceVideolandNumber(afterCreditsChapter?.tcEnd),
+      });
+      for (const range of ranges) {
+        const episodeId = `${clipId}_movie_outro${range.creditPart ? `_${range.creditPart}` : ''}`;
+        if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+        extractedItems.push({
+          _eid: episodeId,
+          _episodeTitle: title,
+          _showId: showId,
+          media_type: 'movie',
+          ...(range.creditPart ? { credit_part: range.creditPart } : {}),
+          imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
+          segment_type: 'outro',
+          season: null,
+          episode: null,
+          start_sec: range.startSec,
+          end_sec: range.endSec,
+        });
+      }
+    }
+    logCapturedTimestamps({
+      prefix: 'VLE',
+      showTitle: title,
+      mediaType: 'movie',
+      episodeTitle: title,
+      providerIdLabel: 'clipId',
+      providerId: clipId,
+      items: extractedItems,
+    });
+    recordExtractedSegments(extractedItems);
+    return;
+  }
 
   if (season != null && episode != null) {
     state.currentSeason = season;

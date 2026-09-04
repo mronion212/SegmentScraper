@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadBootstrap({ mappingResult, stateOverrides = {} }) {
+function loadBootstrap({ mappingResult, stateOverrides = {}, existingSegmentsByKey = new Map() }) {
   const calls = { map: [], dedup: [], toasts: [], previews: [], submissions: [], confirmations: [], infoLogs: [], warnLogs: [] };
   const state = {
     allItems: [
@@ -50,12 +50,15 @@ function loadBootstrap({ mappingResult, stateOverrides = {} }) {
     },
     createState: () => ({}),
     createEpisodeCacheKey: (imdbId, season, episode) => `${imdbId}|${season}|${episode}`,
+    createMediaCacheKey: (imdbId, mediaType, season, episode) => String(mediaType).toLowerCase() === 'movie'
+      ? `${imdbId}|movie`
+      : `${imdbId}|${season}|${episode}`,
     searchImdbByTitle: async () => ({ success: false }),
     lookupImdbTitle: async () => ({ success: false }),
     loadExistingSegments: async () => [],
     loadExistingSegmentsForEpisode: async (key, apiKey, options) => {
       calls.dedup.push({ key, apiKey, options });
-      return new Set();
+      return existingSegmentsByKey.get(key) || new Set();
     },
     submitSegment: async item => {
       calls.submissions.push(item);
@@ -236,4 +239,96 @@ test('IntroDB submission removes segments shorter than five seconds', async () =
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.submissions)), [eligibleItem]);
   assert.match(bootstrap.calls.confirmations[0], /Submit 1 timestamp/);
   assert.ok(bootstrap.calls.toasts.some(message => message.includes('shorter than 5 seconds skipped')));
+});
+
+test('movie JSON export bypasses TVDB and uses a movie deduplication key', async () => {
+  const movieItem = {
+    imdb_id: 'ttmovie1',
+    media_type: 'movie',
+    segment_type: 'outro',
+    season: null,
+    episode: null,
+    start_sec: 5400,
+    end_sec: 5700,
+  };
+  const bootstrap = loadBootstrap({
+    stateOverrides: {
+      allItems: [movieItem],
+      imdbId: 'ttmovie1',
+      tvdbApiKey: '',
+    },
+    mappingResult: { success: false, reason: 'TVDB must not be called for movies' },
+  });
+
+  await bootstrap.exportJSON();
+
+  assert.equal(bootstrap.calls.map.length, 0);
+  assert.deepEqual(bootstrap.calls.dedup.map(call => call.key), ['ttmovie1|movie']);
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [movieItem]);
+});
+
+test('movie IntroDB submission bypasses TVDB mapping', async () => {
+  const movieItem = {
+    imdb_id: 'ttmovie2',
+    media_type: 'movie',
+    segment_type: 'outro',
+    season: null,
+    episode: null,
+    start_sec: 5400,
+    end_sec: 5700,
+  };
+  const bootstrap = loadBootstrap({
+    stateOverrides: {
+      allItems: [movieItem],
+      imdbId: 'ttmovie2',
+      tvdbApiKey: '',
+    },
+    mappingResult: { success: false, reason: 'TVDB must not be called for movies' },
+  });
+
+  await bootstrap.submitToIntroDB();
+  await new Promise(resolve => setTimeout(resolve, 200));
+
+  assert.equal(bootstrap.calls.map.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.submissions)), [movieItem]);
+});
+
+test('movie export keeps the credit part that is not already present in IntroDB', async () => {
+  const before = {
+    imdb_id: 'ttmovie3',
+    media_type: 'movie',
+    segment_type: 'outro',
+    credit_part: 'before_after_credits_scene',
+    season: null,
+    episode: null,
+    start_sec: 5400,
+    end_sec: 5600,
+  };
+  const after = {
+    ...before,
+    _eid: 'after',
+    credit_part: 'after_after_credits_scene',
+    start_sec: 5800,
+    end_sec: 6000,
+  };
+  const existing = new Set(['outro']);
+  existing.rangesByType = new Map([['outro', [{
+    startSec: before.start_sec,
+    endSec: before.end_sec,
+    creditPart: before.credit_part,
+  }]]]);
+  const bootstrap = loadBootstrap({
+    stateOverrides: {
+      allItems: [before, after],
+      imdbId: 'ttmovie3',
+      tvdbApiKey: '',
+    },
+    mappingResult: { success: false, reason: 'TVDB must not be called for movies' },
+    existingSegmentsByKey: new Map([['ttmovie3|movie', existing]]),
+  });
+
+  await bootstrap.exportJSON();
+
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [after]);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('1 duplicate')));
 });

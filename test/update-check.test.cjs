@@ -46,13 +46,13 @@ test('a newer GitHub version enables the required-update state', async () => {
   const loaded = loadUpdateCheck();
   const result = await loaded.checkForRequiredUpdate(options => options.onload({
     status: 200,
-    responseText: '// @version      1.7.0',
+    responseText: '// @version      1.8.0',
   }));
 
   assert.equal(result.required, true);
   assert.equal(loaded.state.updateRequired, true);
   assert.equal(loaded.state.updateStatus, 'required');
-  assert.equal(loaded.state.latestVersion, '1.7.0');
+  assert.equal(loaded.state.latestVersion, '1.8.0');
   assert.equal(loaded.state.currentVersion, currentVersion);
 });
 

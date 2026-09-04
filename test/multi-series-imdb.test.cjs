@@ -17,6 +17,7 @@ function loadShowHandler(searches) {
     imdbIdsByShowId: {},
     showTitle: '',
     showId: null,
+    mediaType: 'tv',
     showYear: '',
     showIds: new Set(),
     dbSearchDone: false,
@@ -29,10 +30,14 @@ function loadShowHandler(searches) {
   source += '\nglobalThis.bootstrapExports = { handleDetectedShow };';
 
   const noop = () => {};
+  const searchCalls = [];
   const context = vm.createContext({
     state,
     console: { log: noop, info: noop, warn: noop, error: noop },
-    searchImdbByTitle: title => searches[title].promise,
+    searchImdbByTitle: (title, year, options) => {
+      searchCalls.push({ title, year, options });
+      return searches[title].promise;
+    },
     loadExistingSegments: async () => [],
     updatePanelTitle: noop,
     updateImdbInput: noop,
@@ -48,7 +53,7 @@ function loadShowHandler(searches) {
     getProviderConfig: () => ({ name: 'SkyShowtime' }),
   });
   vm.runInContext(source, context, { filename: 'bootstrap.js' });
-  return { state, handleDetectedShow: context.bootstrapExports.handleDetectedShow };
+  return { state, searchCalls, handleDetectedShow: context.bootstrapExports.handleDetectedShow };
 }
 
 test('concurrent IMDb lookups only update items belonging to their SkyShowtime series', async () => {
@@ -71,4 +76,24 @@ test('concurrent IMDb lookups only update items belonging to their SkyShowtime s
     'series-alpha': 'tt111',
     'series-beta': 'tt222',
   });
+});
+
+test('movie IMDb lookup uses movie mode and updates the captured movie item', async () => {
+  const searches = { Movie: deferred() };
+  const bootstrap = loadShowHandler(searches);
+
+  bootstrap.handleDetectedShow({ title: 'Movie', showId: 'movie-id', year: 2025, mediaType: 'movie' });
+  bootstrap.state.allItems.push({ _showId: 'movie-id', media_type: 'movie', imdb_id: 'IMDB_PENDING' });
+
+  assert.equal(bootstrap.searchCalls.length, 1);
+  assert.equal(bootstrap.searchCalls[0].title, 'Movie');
+  assert.equal(bootstrap.searchCalls[0].year, '2025');
+  assert.equal(bootstrap.searchCalls[0].options.mediaType, 'movie');
+
+  searches.Movie.resolve({ success: true, imdbId: 'tt333' });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(bootstrap.state.imdbId, 'tt333');
+  assert.equal(bootstrap.state.allItems[0].imdb_id, 'tt333');
+  assert.equal(bootstrap.state.imdbIdsByShowId['movie-id'], 'tt333');
 });

@@ -1,6 +1,7 @@
 /** Prime Video catalogue, playback-resource, and timestamp extraction. */
 
 import { state } from '../../core/state.js';
+import { splitCreditRange } from '../../normalization/segment-mapper.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { recordProviderEpisode } from '../../core/tvdb.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
@@ -14,7 +15,17 @@ const PRIME_VIDEO_MAX_POLL_ATTEMPTS = 40;
 const PRIME_VIDEO_SELECTION_TTL_MS = 60000;
 const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 1000;
 const PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS = 500;
-const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set(['SKIP_RECAP', 'SKIP_INTRO', 'END_CREDITS', 'NEXT_UP']);
+const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set([
+  'SKIP_RECAP',
+  'SKIP_INTRO',
+  'END_CREDITS',
+  'END_CREDIT',
+  'NEXT_UP',
+  'AFTER_CREDITS',
+  'POST_CREDITS',
+  'AFTER_CREDIT_SCENE',
+  'POST_CREDIT_SCENE',
+]);
 
 function isPrimeVideoTitleId(value) {
   return typeof value === 'string' && PRIME_VIDEO_ID_PATTERN.test(value);
@@ -28,6 +39,9 @@ function ensurePrimeVideoState() {
   if (!(state.primeVideoCatalogByShowId instanceof Map)) state.primeVideoCatalogByShowId = new Map();
   if (!(state.primeVideoMetadataByTitleId instanceof Map)) state.primeVideoMetadataByTitleId = new Map();
   if (!(state.primeVideoEpisodeTitleByTitleId instanceof Map)) state.primeVideoEpisodeTitleByTitleId = new Map();
+  if (!(state.primeVideoMovieEventsByTitleId instanceof Map)) state.primeVideoMovieEventsByTitleId = new Map();
+  if (!(state.primeVideoMovieRuntimeByTitleId instanceof Map)) state.primeVideoMovieRuntimeByTitleId = new Map();
+  if (!(state.primeVideoMovieDurationPolls instanceof Map)) state.primeVideoMovieDurationPolls = new Map();
   if (!(state.primeVideoFetchedSeasonCatalogUrls instanceof Set)) state.primeVideoFetchedSeasonCatalogUrls = new Set();
   if (!(state.primeVideoPollingTitleIds instanceof Set)) state.primeVideoPollingTitleIds = new Set();
   if (!(state.primeVideoPendingOutroTitleIds instanceof Set)) state.primeVideoPendingOutroTitleIds = new Set();
@@ -122,6 +136,67 @@ function findPrimeVideoEpisodeMetadata(root) {
   return candidates[0] || null;
 }
 
+function isPrimeVideoMovieType(value) {
+  return ['MOVIE', 'FILM', 'FEATURE'].includes(String(value || '').trim().toUpperCase());
+}
+
+function isPrimeVideoMovieNode(node) {
+  const typeValues = [
+    node?.contentType,
+    node?.type,
+    node?.titleType,
+    node?.subType,
+    node?.subtype,
+    node?.mediaType,
+    node?.media_type,
+    node?.entityType,
+    node?.contentCategory,
+    node?.catalogType,
+    node?.videoType,
+  ];
+  return typeValues.some(isPrimeVideoMovieType) ||
+    ['isMovie', 'isFilm', 'isFeature'].some(key => node?.[key] === true || node?.[key] === 1 || node?.[key] === 'true');
+}
+
+function findPrimeVideoMovieMetadata(root) {
+  const candidates = [];
+  const visited = new WeakSet();
+  const episodeKeys = ['episodeNumber', 'episode', 'episodeSequenceNumber', 'episodeSequence'];
+
+  function hasEpisodeNumber(node) {
+    return episodeKeys.some(key => coercePrimeVideoInteger(node?.[key]) != null);
+  }
+
+  function walk(node, depth = 0, path = '') {
+    if (!node || typeof node !== 'object' || depth > 8 || visited.has(node)) return;
+    visited.add(node);
+    if (Array.isArray(node)) {
+      node.forEach((item, index) => walk(item, depth + 1, `${path}[${index}]`));
+      return;
+    }
+
+    if (isPrimeVideoMovieNode(node) && !hasEpisodeNumber(node)) {
+      const title = String(node.movieTitle || node.movieName || node.displayTitle || node.title || node.name || node.label || '').trim();
+      const seriesTitle = String(node.seriesTitle || node.showTitle || node.parentTitle || '').trim();
+      const year = node.releaseYear || node.year || node.releaseDate?.slice?.(0, 4) || '';
+      const catalogScore = /catalogMetadata|catalog/i.test(path) ? 4 : 0;
+      candidates.push({
+        title: title || seriesTitle,
+        year,
+        score: catalogScore + (title ? 3 : 0) + (year ? 1 : 0),
+      });
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (value && typeof value === 'object') walk(value, depth + 1, path ? `${path}.${key}` : key);
+    }
+  }
+
+  walk(root);
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0] || null;
+}
+
 function findPrimeVideoEpisodeTitle(root, expectedShowTitle = '') {
   const candidates = [];
   const visited = new WeakSet();
@@ -156,6 +231,100 @@ function findPrimeVideoEpisodeTitle(root, expectedShowTitle = '') {
   walk(root);
   candidates.sort((a, b) => b.score - a.score);
   return candidates[0]?.title || '';
+}
+
+function normalizePrimeVideoEventType(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  return {
+    INTRO: 'SKIP_INTRO',
+    RECAP: 'SKIP_RECAP',
+    CREDITS: 'END_CREDITS',
+    CREDIT: 'END_CREDIT',
+  }[normalized] || normalized;
+}
+
+function getPrimeVideoEventType(event) {
+  return normalizePrimeVideoEventType(
+    event?.eventType || event?.elementType || event?.type || event?.name
+  );
+}
+
+function getPrimeVideoTransitionRoots(data) {
+  return [
+    data?.transitionTimecodes?.result,
+    data?.transitionTimecodes,
+    data?.vodPlaybackUrls?.result?.transitionTimecodes?.result,
+    data?.vodPlaybackUrls?.result?.transitionTimecodes,
+    data?.vodPlaylistedPlaybackUrls?.result?.transitionTimecodes?.result,
+    data?.vodPlaylistedPlaybackUrls?.result?.transitionTimecodes,
+  ].filter(root => root && typeof root === 'object');
+}
+
+function readPrimeVideoTransitionBoundary(roots, keys) {
+  for (const root of roots) {
+    for (const key of keys) {
+      const value = coercePrimeVideoMilliseconds(root?.[key]);
+      if (value != null) return value;
+    }
+  }
+  return null;
+}
+
+/**
+ * Prime has returned two transition-timecode shapes over time: the current
+ * result.events form and the older skipElements/endCreditsStart form. Keep
+ * the rest of the extractor independent from that response detail.
+ */
+function readPrimeVideoTransitionEvents(data) {
+  const roots = getPrimeVideoTransitionRoots(data);
+  const rawEvents = [];
+  const seenRawEvents = new Set();
+  for (const root of roots) {
+    for (const key of ['events', 'skipElements']) {
+      if (!Array.isArray(root?.[key])) continue;
+      for (const event of root[key]) {
+        const rawKey = JSON.stringify(event);
+        if (seenRawEvents.has(rawKey)) continue;
+        seenRawEvents.add(rawKey);
+        rawEvents.push(event);
+      }
+    }
+  }
+
+  const endCreditsStartMs = readPrimeVideoTransitionBoundary(roots, [
+    'endCreditsStartMs',
+    'endCreditsStart',
+    'creditsStartMs',
+    'creditsStart',
+  ]);
+  const endCreditsEndMs = readPrimeVideoTransitionBoundary(roots, [
+    'endCreditsEndMs',
+    'endCreditsEnd',
+    'creditsEndMs',
+    'creditsEnd',
+  ]);
+  const events = rawEvents.map(event => ({
+    ...(event && typeof event === 'object' ? event : {}),
+    eventType: getPrimeVideoEventType(event),
+  }));
+
+  const hasEndCreditsEvent = events.some(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)));
+  if (!hasEndCreditsEvent && endCreditsStartMs != null) {
+    events.push({
+      eventType: 'END_CREDITS',
+      startTimeMs: endCreditsStartMs,
+      ...(endCreditsEndMs == null ? {} : { endTimeMs: endCreditsEndMs }),
+    });
+  } else if (endCreditsEndMs != null) {
+    for (const event of events) {
+      if (!['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event))) continue;
+      if (readPrimeVideoEventTimeMs(event, 'end') == null) event.endTimeMs = endCreditsEndMs;
+    }
+  }
+  return events;
 }
 
 function parsePrimeVideoEpisodeText(text) {
@@ -339,8 +508,9 @@ function setPrimeVideoActiveEpisode(snapshot) {
 }
 
 function hasPrimeVideoSegmentEvents(data) {
-  const events = data?.transitionTimecodes?.result?.events;
-  return Array.isArray(events) && events.some(event => PRIME_VIDEO_SUPPORTED_EVENT_TYPES.has(event?.eventType));
+  return readPrimeVideoTransitionEvents(data).some(event =>
+    PRIME_VIDEO_SUPPORTED_EVENT_TYPES.has(getPrimeVideoEventType(event))
+  );
 }
 
 function inferNextPrimeVideoEpisode() {
@@ -515,13 +685,46 @@ function coercePrimeVideoMilliseconds(value) {
   return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
+function coercePrimeVideoClockMilliseconds(value) {
+  const numeric = coercePrimeVideoMilliseconds(value);
+  if (numeric != null) return numeric;
+  const parts = String(value || '').trim().split(':').map(Number);
+  if (!parts.length || parts.some(part => !Number.isFinite(part))) return null;
+  const seconds = parts.length === 2
+    ? parts[0] * 60 + parts[1]
+    : parts.length === 3
+      ? parts[0] * 3600 + parts[1] * 60 + parts[2]
+      : null;
+  return seconds == null || seconds < 0 ? null : seconds * 1000;
+}
+
 function readPrimeVideoEventTimeMs(event, boundary) {
   const keys = boundary === 'start'
     ? ['startTimeMs', 'startTimecodeMs', 'startTimeCodeMs', 'startMs']
     : ['endTimeMs', 'endTimecodeMs', 'endTimeCodeMs', 'endMs'];
-  for (const key of keys) {
-    const value = coercePrimeVideoMilliseconds(event?.[key]);
-    if (value != null) return value;
+  const nestedSources = [
+    event,
+    event?.timecode,
+    event?.timeCode,
+    event?.timecodes,
+    event?.range,
+  ];
+  for (const source of nestedSources) {
+    for (const key of keys) {
+      const value = coercePrimeVideoClockMilliseconds(source?.[key]);
+      if (value != null) return value;
+    }
+  }
+  const secondKeys = boundary === 'start'
+    ? ['startTime', 'start', 'startSec', 'startSeconds', 'offset']
+    : ['endTime', 'end', 'endSec', 'endSeconds'];
+  for (const source of nestedSources) {
+    for (const key of secondKeys) {
+      const value = Number(source?.[key]);
+      if (Number.isFinite(value) && value >= 0) return value * 1000;
+      const clockMilliseconds = coercePrimeVideoClockMilliseconds(source?.[key]);
+      if (clockMilliseconds != null) return clockMilliseconds;
+    }
   }
   return null;
 }
@@ -531,8 +734,16 @@ function findPrimeVideoRuntimeMs(root, events = []) {
     .map(event => readPrimeVideoEventTimeMs(event, 'end'))
     .filter(value => value != null);
   const visited = new WeakSet();
-  const millisecondKeys = new Set(['runtimems', 'runtimemillis', 'runtimemilliseconds', 'durationms', 'durationmillis', 'durationmilliseconds']);
-  const secondKeys = new Set(['runtimeseconds', 'runtimeinseconds', 'durationseconds', 'durationinseconds']);
+  const millisecondKeys = new Set([
+    'runtimems', 'runtimemillis', 'runtimemilliseconds',
+    'durationms', 'durationmillis', 'durationmilliseconds',
+    'contentdurationms', 'contentdurationmillis', 'contentdurationmilliseconds',
+  ]);
+  const secondKeys = new Set([
+    'runtimeseconds', 'runtimeinseconds',
+    'durationseconds', 'durationinseconds',
+    'runtime', 'duration', 'contentduration',
+  ]);
 
   function walk(node, depth = 0) {
     if (!node || typeof node !== 'object' || depth > 8 || visited.has(node)) return;
@@ -542,7 +753,11 @@ function findPrimeVideoRuntimeMs(root, events = []) {
       const number = Number(value);
       if (Number.isFinite(number) && number > 0) {
         if (millisecondKeys.has(normalizedKey)) candidates.push(number);
-        if (secondKeys.has(normalizedKey)) candidates.push(number * 1000);
+        if (secondKeys.has(normalizedKey)) candidates.push(
+          ['runtime', 'duration', 'contentduration'].includes(normalizedKey) && number > 100000
+            ? number
+            : number * 1000
+        );
       } else if (value && typeof value === 'object') {
         walk(value, depth + 1);
       }
@@ -588,10 +803,11 @@ function readPrimeVideoMediaDurationMs() {
   return candidates.length ? Math.max(...candidates) * 1000 : null;
 }
 
-function logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, items) {
+function logPrimeVideoTimestamps(titleId, showId, season, episode, episodeTitle, items, mediaType = 'tv') {
   logCapturedTimestamps({
     prefix: 'PVE',
     showTitle: showId,
+    mediaType,
     season,
     episode,
     episodeTitle,
@@ -631,19 +847,25 @@ function queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle,
   batch.timer = setTimeout(() => flushPrimeVideoSegmentBatch(titleId), PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS);
 }
 
-function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episode, episodeTitle, segmentType, startTimeMs, endTimeMs) {
-  const episodeId = `${titleId}_${segmentType}`;
+function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episode, episodeTitle, segmentType, startTimeMs, endTimeMs, mediaType = 'tv', creditPart = null) {
+  const isMovie = String(mediaType).toLowerCase() === 'movie';
+  const partSuffix = creditPart ? `_${creditPart}` : '';
+  const episodeId = isMovie ? `${titleId}_movie_${segmentType}${partSuffix}` : `${titleId}_${segmentType}${partSuffix}`;
   const alreadyCaptured = item => item._eid === episodeId || (
     item._showId === showId &&
+    String(item.media_type || 'tv').toLowerCase() === String(mediaType).toLowerCase() &&
     item.season === season &&
     item.episode === episode &&
-    item.segment_type === segmentType
+    item.segment_type === segmentType &&
+    (item.credit_part || null) === (creditPart || null)
   );
   if (state.allItems.some(alreadyCaptured) || extractedItems.some(alreadyCaptured)) return false;
   extractedItems.push({
     _eid: episodeId,
     _episodeTitle: episodeTitle,
     _showId: showId,
+    ...(isMovie ? { media_type: 'movie' } : {}),
+    ...(creditPart ? { credit_part: creditPart } : {}),
     imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
     segment_type: segmentType,
     season,
@@ -652,6 +874,197 @@ function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episod
     end_sec: endTimeMs / 1000,
   });
   return true;
+}
+
+function readPrimeVideoMoviePageTitle(titleId) {
+  const heading = readPrimeVideoSeriesTitle(document);
+  if (heading) return heading;
+  const pageTitle = String(document.title || '')
+    .replace(/^Prime Video[:\-]\s*/i, '')
+    .trim();
+  return pageTitle || titleId;
+}
+
+function clearPrimeVideoMovieDurationPoll(titleId) {
+  const poll = state.primeVideoMovieDurationPolls.get(titleId);
+  if (poll?.timer != null && typeof clearTimeout === 'function') clearTimeout(poll.timer);
+  state.primeVideoMovieDurationPolls.delete(titleId);
+}
+
+function schedulePrimeVideoMovieDurationPoll(titleId, movieTitle) {
+  if (typeof window === 'undefined' || typeof setTimeout !== 'function') return false;
+  const existing = state.primeVideoMovieDurationPolls.get(titleId);
+  if (existing?.timer != null) return true;
+  if ((existing?.attempt || 0) >= PRIME_VIDEO_MAX_POLL_ATTEMPTS) return false;
+
+  const poll = existing || { attempt: 0, timer: null, movieTitle };
+  poll.movieTitle = movieTitle || poll.movieTitle || titleId;
+  poll.timer = setTimeout(() => {
+    const current = state.primeVideoMovieDurationPolls.get(titleId);
+    if (!current) return;
+    current.timer = null;
+    current.attempt++;
+    state.primeVideoMovieDurationPolls.set(titleId, current);
+    const events = state.primeVideoMovieEventsByTitleId.get(titleId) || [];
+    if (!events.length) return;
+    finalizePrimeVideoMovieEvents(
+      titleId,
+      current.movieTitle || titleId,
+      { transitionTimecodes: { result: { events } } },
+      state.primeVideoMovieRuntimeByTitleId.get(titleId) ?? null
+    );
+  }, PRIME_VIDEO_POLL_INTERVAL_MS);
+  state.primeVideoMovieDurationPolls.set(titleId, poll);
+  return true;
+}
+
+function hasPrimeVideoEpisodePageContext(titleId) {
+  if (state.primeVideoTitleMap.has(titleId)) return true;
+  if (state.primeVideoSelectedEpisode?.resolvedTitleId === titleId) return true;
+  if (readPrimeVideoSelectedSeason(document) != null) return true;
+  const cards = document.querySelectorAll?.(PRIME_VIDEO_CARD_SELECTOR) || [];
+  return cards.length > 0;
+}
+
+function isLikelyPrimeVideoMoviePlayback(titleId, data) {
+  if (state.mediaType === 'movie' && String(state.showId || '') === String(titleId)) return true;
+  if (findPrimeVideoEpisodeMetadata(data) || hasPrimeVideoEpisodePageContext(titleId)) return false;
+  const events = readPrimeVideoTransitionEvents(data);
+  const hasCreditsEvent = events.some(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)));
+  const hasCompleteCredits = events.some(event => {
+    if (!['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event))) return false;
+    const startTimeMs = readPrimeVideoEventTimeMs(event, 'start');
+    const endTimeMs = readPrimeVideoEventTimeMs(event, 'end');
+    return startTimeMs != null && endTimeMs != null && endTimeMs > startTimeMs;
+  });
+  const hasTvOnlyMarker = events.some(event => ['SKIP_RECAP', 'SKIP_INTRO'].includes(String(event?.eventType || '').toUpperCase()));
+  return (hasCompleteCredits || hasCreditsEvent) && !hasTvOnlyMarker;
+}
+
+function finalizePrimeVideoMovieResponses(titleId, movieTitle, currentData = null) {
+  const pending = state.primeVideoPendingByTitleId.get(titleId) || [];
+  state.primeVideoPendingByTitleId.delete(titleId);
+  state.primeVideoPollingTitleIds.delete(titleId);
+
+  const payloads = [...pending, currentData].filter(data => hasPrimeVideoSegmentEvents(data));
+  if (!payloads.length) return;
+  const previousEvents = state.primeVideoMovieEventsByTitleId.get(titleId) || [];
+  const incomingEvents = payloads.flatMap(data => readPrimeVideoTransitionEvents(data));
+  const events = [];
+  const seenEvents = new Set();
+  for (const event of [...previousEvents, ...incomingEvents]) {
+    const key = JSON.stringify(event);
+    if (seenEvents.has(key)) continue;
+    seenEvents.add(key);
+    events.push(event);
+  }
+  state.primeVideoMovieEventsByTitleId.set(titleId, events);
+  const runtimeCandidates = payloads
+    .map(data => findPrimeVideoRuntimeMs(data, []))
+    .filter(value => value != null);
+  if (runtimeCandidates.length) {
+    state.primeVideoMovieRuntimeByTitleId.set(titleId, Math.max(...runtimeCandidates));
+  }
+  finalizePrimeVideoMovieEvents(titleId, movieTitle, {
+    transitionTimecodes: { result: { events } },
+  }, state.primeVideoMovieRuntimeByTitleId.get(titleId) ?? null);
+}
+
+function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverride = null) {
+  const events = readPrimeVideoTransitionEvents(data);
+  const extractedItems = [];
+  const runtimeMs = runtimeMsOverride ?? findPrimeVideoRuntimeMs(data, []) ?? readPrimeVideoMediaDurationMs();
+  const creditRange = events
+    .filter(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)))
+    .map(event => ({
+      startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
+      endTimeMs: readPrimeVideoEventTimeMs(event, 'end') ?? runtimeMs,
+    }))
+    .find(range => range.startTimeMs != null && range.endTimeMs != null && range.endTimeMs > range.startTimeMs);
+
+  if (!creditRange) {
+    const creditEvents = events
+      .filter(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)))
+      .map(event => ({
+        type: getPrimeVideoEventType(event),
+        startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
+        endTimeMs: readPrimeVideoEventTimeMs(event, 'end'),
+      }));
+    const creditStartAvailable = creditEvents.some(event => event.startTimeMs != null);
+    if (creditStartAvailable && schedulePrimeVideoMovieDurationPoll(titleId, movieTitle)) {
+      const poll = state.primeVideoMovieDurationPolls.get(titleId);
+      if (poll?.attempt === 0) {
+        console.info('[PVE] Movie credits found; waiting for Prime media duration before finalizing:', {
+          titleId,
+          creditEvents,
+        });
+      }
+      return;
+    }
+    console.warn('[PVE] Movie credits did not include a safe END_CREDITS range; NEXT_UP was ignored:', titleId, {
+      creditEvents,
+      eventTypes: events.map(getPrimeVideoEventType),
+      runtimeMs,
+    });
+    return;
+  }
+  clearPrimeVideoMovieDurationPoll(titleId);
+
+  const afterCreditsEvents = events.filter(event => [
+    'AFTER_CREDITS',
+    'POST_CREDITS',
+    'AFTER_CREDIT_SCENE',
+    'POST_CREDIT_SCENE',
+  ].includes(getPrimeVideoEventType(event)));
+  const afterCreditsEvent = afterCreditsEvents
+    .map(event => ({
+      event,
+      startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
+      endTimeMs: readPrimeVideoEventTimeMs(event, 'end'),
+    }))
+    .find(range => range.startTimeMs != null && range.startTimeMs > creditRange.startTimeMs);
+  const ranges = splitCreditRange({
+    startSec: creditRange.startTimeMs / 1000,
+    endSec: creditRange.endTimeMs / 1000,
+    afterCreditsDetected: afterCreditsEvents.length > 0,
+    afterCreditsStartSec: afterCreditsEvent?.startTimeMs == null ? null : afterCreditsEvent.startTimeMs / 1000,
+    afterCreditsEndSec: afterCreditsEvent?.endTimeMs == null ? null : afterCreditsEvent.endTimeMs / 1000,
+  });
+  for (const range of ranges) {
+    appendPrimeVideoSegment(
+      extractedItems,
+      titleId,
+      titleId,
+      null,
+      null,
+      movieTitle,
+      'outro',
+      range.startSec * 1000,
+      range.endSec * 1000,
+      'movie',
+      range.creditPart
+    );
+  }
+  if (!extractedItems.length) return;
+
+  const existingMovieItems = state.allItems.filter(item =>
+    String(item?._showId || '') === String(titleId) &&
+    String(item?.media_type || '').toLowerCase() === 'movie' &&
+    item.segment_type === 'outro'
+  );
+  const sameAsExisting = existingMovieItems.length === extractedItems.length && extractedItems.every(item =>
+    existingMovieItems.some(existing =>
+      existing._eid === item._eid &&
+      Math.abs(Number(existing.start_sec) - Number(item.start_sec)) < 0.01 &&
+      Math.abs(Number(existing.end_sec) - Number(item.end_sec)) < 0.01
+    )
+  );
+  if (sameAsExisting) return;
+  if (existingMovieItems.length) {
+    state.allItems = state.allItems.filter(item => !existingMovieItems.includes(item));
+  }
+  logPrimeVideoTimestamps(titleId, movieTitle, null, null, movieTitle, extractedItems, 'movie');
+  recordExtractedSegments(extractedItems);
 }
 
 function pollPrimeVideoOutroDuration(titleId, showId, season, episode, episodeTitle, startTimeMs, attempt = 0) {
@@ -676,7 +1089,7 @@ function pollPrimeVideoOutroDuration(titleId, showId, season, episode, episodeTi
 }
 
 function finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle = '', showId = state.showId) {
-  const events = data?.transitionTimecodes?.result?.events || [];
+  const events = readPrimeVideoTransitionEvents(data);
   const extractedItems = [];
   const runtimeMs = findPrimeVideoRuntimeMs(data, events) ?? readPrimeVideoMediaDurationMs();
   const resolveEventRange = (event, useRuntime = false) => {
@@ -687,19 +1100,23 @@ function finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle =
       ? { event, startTimeMs, endTimeMs }
       : null;
   };
-  const outroCandidates = events.filter(event => event.eventType === 'END_CREDITS' || event.eventType === 'NEXT_UP');
+  const outroCandidates = events.filter(event => {
+    const eventType = getPrimeVideoEventType(event);
+    return eventType === 'END_CREDITS' || eventType === 'END_CREDIT' || eventType === 'NEXT_UP';
+  });
   const outroRange = outroCandidates
-    .filter(event => event.eventType === 'END_CREDITS')
+    .filter(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)))
     .map(event => resolveEventRange(event, true))
     .find(Boolean) || outroCandidates
-    .filter(event => event.eventType === 'NEXT_UP')
+    .filter(event => getPrimeVideoEventType(event) === 'NEXT_UP')
     .map(event => resolveEventRange(event, true))
     .find(Boolean);
 
   for (const event of events) {
     let segmentType = null;
-    if (event.eventType === 'SKIP_RECAP') segmentType = 'recap';
-    if (event.eventType === 'SKIP_INTRO') segmentType = 'intro';
+    const eventType = getPrimeVideoEventType(event);
+    if (eventType === 'SKIP_RECAP') segmentType = 'recap';
+    if (eventType === 'SKIP_INTRO') segmentType = 'intro';
     const range = event === outroRange?.event ? outroRange : resolveEventRange(event);
     if (event === outroRange?.event) segmentType = 'outro';
     if (!segmentType || !range) continue;
@@ -753,6 +1170,11 @@ function commitPrimeVideoEpisode(titleId, snapshot, { allowNumberReuse = false }
 }
 
 function pollPrimeVideoEpisode(titleId, attempt) {
+  if ((state.mediaType === 'movie' && String(state.showId || '') === String(titleId)) ||
+      state.primeVideoMovieEventsByTitleId.has(titleId)) {
+    finalizePrimeVideoMovieResponses(titleId, state.showTitle || titleId);
+    return;
+  }
   const snapshot = readPrimeVideoPlayerSnapshot();
   if (snapshot.isPlayerActive && snapshot.season != null && snapshot.episode != null) {
     if (commitPrimeVideoEpisode(titleId, snapshot)) return;
@@ -770,6 +1192,37 @@ export function processPrimeVideoMetadata(data, bodyText, url) {
   ensurePrimeVideoState();
   const titleId = extractPrimeVideoTitleId(bodyText, url);
   if (!titleId) return;
+  const movieMetadata = findPrimeVideoMovieMetadata(data);
+  if (movieMetadata) {
+    const movieTitle = movieMetadata.title || titleId;
+    console.info('[PVE] Movie metadata classified; skipping season/episode resolution.', {
+      titleId,
+      title: movieTitle,
+      year: movieMetadata.year || '',
+    });
+    handleDetectedShow({
+      title: movieTitle,
+      showId: titleId,
+      year: movieMetadata.year || '',
+      mediaType: 'movie',
+    });
+    finalizePrimeVideoMovieResponses(titleId, movieTitle, data);
+    return;
+  }
+  if (state.mediaType === 'movie' && String(state.showId || '') === String(titleId)) {
+    finalizePrimeVideoMovieResponses(titleId, state.showTitle || titleId, data);
+    return;
+  }
+  if (isLikelyPrimeVideoMoviePlayback(titleId, data)) {
+    const movieTitle = readPrimeVideoMoviePageTitle(titleId);
+    console.info('[PVE] Movie playback classified from credit events; skipping season/episode resolution.', {
+      titleId,
+      title: movieTitle,
+    });
+    handleDetectedShow({ title: movieTitle, showId: titleId, mediaType: 'movie' });
+    finalizePrimeVideoMovieResponses(titleId, movieTitle, data);
+    return;
+  }
   const responseMetadata = findPrimeVideoEpisodeMetadata(data);
   const expectedShowTitle = responseMetadata?.seriesTitle || state.showId || readPrimeVideoSeriesTitle(document);
   const responseEpisodeTitle = responseMetadata?.episodeTitle || findPrimeVideoEpisodeTitle(data, expectedShowTitle);

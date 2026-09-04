@@ -140,7 +140,7 @@ export function createPanel() {
     <div id="nfe-title-display" style="color:${colors.textSecondary};font-size:11px;margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:13px"></div>
 
     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
-      <div id="nfe-imdb-status" style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">IMDb ID: ${state.imdbId || 'Not set'}</div>
+      <div id="nfe-imdb-status" style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">${state.mediaType === 'movie' ? 'Movie' : 'TV'} · IMDb ID: ${state.imdbId || 'Not set'}</div>
       <div style="display:flex;gap:4px">
         <input id="nfe-imdb-input" type="text" placeholder="ID (e.g. tt123456)..." value="${state.imdbId}"
           style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
@@ -341,6 +341,11 @@ export function updateCounters() {
   
   const rq = $('nfe-cnt-req');
   if (rq) rq.textContent = state.showIds.size;
+  const mediaLabel = $('nfe-cnt-series-label');
+  if (mediaLabel) {
+    const hasMovie = state.allItems.some(item => String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie');
+    mediaLabel.textContent = hasMovie ? 'Media' : 'Series';
+  }
   
   const fl = $('nfe-cnt-files');
   if (fl) {

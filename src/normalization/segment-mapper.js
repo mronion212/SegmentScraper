@@ -12,6 +12,65 @@ export const SEGMENT_TYPES = {
   OUTRO: 'outro',
 };
 
+/** Labels used when a movie's credits are split around an after-credits scene. */
+export const CREDIT_PARTS = {
+  BEFORE_AFTER_CREDITS_SCENE: 'before_after_credits_scene',
+  AFTER_AFTER_CREDITS_SCENE: 'after_after_credits_scene',
+};
+
+/**
+ * Split a movie credit range around a provider-reported after-credits scene.
+ *
+ * The scene itself is deliberately omitted. If its end is unknown, only the
+ * safe part before the scene is returned; guessing the post-scene start would
+ * risk including the scene in the credits segment.
+ */
+export function splitCreditRange({
+  startSec,
+  endSec,
+  afterCreditsStartSec = null,
+  afterCreditsEndSec = null,
+  afterCreditsDetected = false,
+}) {
+  const start = Number(startSec);
+  const end = Number(endSec);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) return [];
+
+  const sceneStart = afterCreditsStartSec == null ? null : Number(afterCreditsStartSec);
+  const sceneEnd = afterCreditsEndSec == null ? null : Number(afterCreditsEndSec);
+  const hasScene = afterCreditsDetected || Number.isFinite(sceneStart) || Number.isFinite(sceneEnd);
+
+  if (!hasScene) return [{ startSec: start, endSec: end, creditPart: null }];
+  if (!Number.isFinite(sceneStart)) return [];
+
+  // If all credits finish before the scene, they are still the pre-scene
+  // portion and should remain clearly labelled as such.
+  if (sceneStart >= end) return [{
+    startSec: start,
+    endSec: end,
+    creditPart: CREDIT_PARTS.BEFORE_AFTER_CREDITS_SCENE,
+  }];
+  if (sceneStart <= start) return [];
+
+  const parts = [{
+    startSec: start,
+    endSec: sceneStart,
+    creditPart: CREDIT_PARTS.BEFORE_AFTER_CREDITS_SCENE,
+  }];
+
+  // Without a trustworthy scene end there is no safe post-scene range.
+  if (!Number.isFinite(sceneEnd) || sceneEnd <= sceneStart) return parts;
+  const postSceneStart = Math.min(sceneEnd, end);
+  if (postSceneStart < end) {
+    parts.push({
+      startSec: postSceneStart,
+      endSec: end,
+      creditPart: CREDIT_PARTS.AFTER_AFTER_CREDITS_SCENE,
+    });
+  }
+  return parts;
+}
+
 /**
  * Provider-specific segment name mappings
  * Each provider can have different names for the same segment types
@@ -71,6 +130,8 @@ export function normalizeSegmentType(providerSegmentType, providerName) {
  * @param {string} [params.imdbId] - IMDb ID (optional, defaults to IMDB_PENDING)
  * @param {string} [params.showId] - Provider series identifier used to isolate multiple series
  * @param {string} [params.episodeTitle] - Provider episode title used only for TVDB mapping
+ * @param {string} [params.mediaType] - Media type, currently `tv` or `movie`
+ * @param {string} [params.creditPart] - Movie credit part around an after-credits scene
  * @returns {Object|null} - Normalized segment item or null if type not recognized
  */
 export function createNormalizedSegment({
@@ -83,7 +144,9 @@ export function createNormalizedSegment({
   endSec,
   imdbId = 'IMDB_PENDING',
   showId = '',
-  episodeTitle = ''
+  episodeTitle = '',
+  mediaType = 'tv',
+  creditPart = null,
 }) {
   const segmentType = normalizeSegmentType(providerSegmentType, providerName);
   if (!segmentType) return null;
@@ -92,6 +155,8 @@ export function createNormalizedSegment({
     _eid: episodeId,
     _episodeTitle: episodeTitle,
     ...(showId ? { _showId: String(showId) } : {}),
+    ...(String(mediaType).toLowerCase() === 'movie' ? { media_type: 'movie' } : {}),
+    ...(creditPart ? { credit_part: creditPart } : {}),
     imdb_id: imdbId,
     segment_type: segmentType,
     season,
