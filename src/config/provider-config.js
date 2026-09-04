@@ -126,7 +126,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically from SkyShowtime catalogue metadata.',
+    captureHint: 'Series segments and movie credits are captured automatically from SkyShowtime catalogue metadata.',
   },
   crunchyroll: {
     name: 'Crunchyroll',

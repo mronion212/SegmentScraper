@@ -11,12 +11,12 @@ SegmentScraper extracts intro, recap, and outro timestamps from supported stream
 - Crunchyroll
 
 Disney+ and HBO Max are present in the provider configuration but do not yet have extraction modules.
-Movie extraction in this branch is intentionally enabled for Prime Video and Videoland only; the other providers retain their existing TV behavior.
-SkyShowtime captures catalogue metadata automatically from page or worker network requests and maps SOI/EOI, SOR/EOR, and SOCR/runtime to intro, recap, and outro segments. When loading a series, wait until the UI icon has finished loading (that is, until the banner starts playing).
+Movie extraction in this branch is enabled for Prime Video, Videoland, and SkyShowtime; the other providers retain their existing TV behavior.
+SkyShowtime captures catalogue metadata automatically from page or worker network requests and maps SOI/EOI, SOR/EOR, and SOCR/runtime to intro, recap, and outro segments. Movie credits use an explicit credit end marker when available and otherwise the known media runtime. SkyShowtime can return multiple provider variants for one title (for example a short preview and the full feature); movie extraction follows the `provider_variant_id` from the active request so those variants are not mixed. Captured timestamps remain available until `Clear Data` is used, so opening multiple titles in one tab intentionally keeps them together for export. When loading a series, wait until the UI icon has finished loading (that is, until the banner starts playing).
 
 Crunchyroll reads the current episode metadata from the watch page and maps its public recap, intro, and credits markers to recap, intro, and outro segments. Episodes are captured as they are opened.
 
-Every active provider logs each captured episode with readable timestamps and the exact raw start/end seconds. Prime Video and Videoland movies bypass TheTVDB and use their IMDb ID with movie metadata in JSON exports and IntroDB submissions.
+Every active provider logs each captured episode with readable timestamps and the exact raw start/end seconds. Prime Video, Videoland, and SkyShowtime movies bypass TheTVDB and use their IMDb ID with movie metadata in JSON exports and IntroDB submissions.
 
 ## Features
 
@@ -26,7 +26,7 @@ Every active provider logs each captured episode with readable timestamps and th
 - Previews JSON before download
 - Submits timestamps to IntroDB
 - Removes segments already present in IntroDB from exports and submissions
-- Maps regular provider episodes to canonical TheTVDB season/episode numbers before JSON export or submission; Prime Video and Videoland movies bypass TheTVDB
+- Maps regular provider episodes to canonical TheTVDB season/episode numbers before JSON export or submission; movies bypass TheTVDB
 - Excludes provider specials and TheTVDB Season 0 from count checks and normal submission mapping
 - Uses one shared provider panel based on the Netflix layout
 - Checks GitHub for a newer release and blocks normal use until a confirmed update is installed

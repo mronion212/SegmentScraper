@@ -243,6 +243,9 @@ test('IntroDB submission removes segments shorter than five seconds', async () =
 
 test('movie JSON export bypasses TVDB and uses a movie deduplication key', async () => {
   const movieItem = {
+    _eid: 'movie-internal-id',
+    _episodeTitle: 'Primate',
+    _showId: 'skyshowtime-variant-id',
     imdb_id: 'ttmovie1',
     media_type: 'movie',
     segment_type: 'outro',
@@ -264,7 +267,13 @@ test('movie JSON export bypasses TVDB and uses a movie deduplication key', async
 
   assert.equal(bootstrap.calls.map.length, 0);
   assert.deepEqual(bootstrap.calls.dedup.map(call => call.key), ['ttmovie1|movie']);
-  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [movieItem]);
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [{
+    imdb_id: 'ttmovie1',
+    media_type: 'movie',
+    segment_type: 'outro',
+    start_sec: 5400,
+    end_sec: 5700,
+  }]);
 });
 
 test('movie IntroDB submission bypasses TVDB mapping', async () => {
@@ -329,6 +338,13 @@ test('movie export keeps the credit part that is not already present in IntroDB'
 
   await bootstrap.exportJSON();
 
-  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [after]);
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [{
+    imdb_id: 'ttmovie3',
+    media_type: 'movie',
+    segment_type: 'outro',
+    credit_part: 'after_after_credits_scene',
+    start_sec: 5800,
+    end_sec: 6000,
+  }]);
   assert.ok(bootstrap.calls.toasts.some(message => message.includes('1 duplicate')));
 });

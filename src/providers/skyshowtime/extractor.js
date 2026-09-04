@@ -7,6 +7,7 @@
  */
 
 import { state } from '../../core/state.js';
+import { splitCreditRange } from '../../normalization/segment-mapper.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { setProviderEpisodeCatalog } from '../../core/tvdb.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
@@ -15,6 +16,7 @@ const SKYSHOWTIME_WORKER_MESSAGE = '__segmentScraperSkyShowtime';
 const SKYSHOWTIME_CATALOGUE_HOST = 'atom.skyshowtime.com';
 const SKYSHOWTIME_CATALOGUE_PATH = '/adapter-calypso/';
 const SKYSHOWTIME_SERIES_PATH = '/provider_series_id/';
+const SKYSHOWTIME_VARIANT_PATH = '/provider_variant_id/';
 
 function coerceSkyShowtimeNumber(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -30,7 +32,7 @@ export function isSkyShowtimeCatalogueUrl(url) {
   const value = String(url || '');
   return value.includes(SKYSHOWTIME_CATALOGUE_HOST) &&
     value.includes(SKYSHOWTIME_CATALOGUE_PATH) &&
-    value.includes(SKYSHOWTIME_SERIES_PATH);
+    (value.includes(SKYSHOWTIME_SERIES_PATH) || value.includes(SKYSHOWTIME_VARIANT_PATH));
 }
 
 function looksLikeSkyShowtimeEpisode(node) {
@@ -41,16 +43,87 @@ function looksLikeSkyShowtimeEpisode(node) {
   return hasRuntime || hasContext || hasFormats;
 }
 
+function isSkyShowtimeMovieType(value) {
+  return ['movie', 'film', 'feature'].includes(String(value || '').trim().toLowerCase());
+}
+
+function looksLikeSkyShowtimeMovie(node) {
+  if (!node || typeof node !== 'object' || node.episodeNumber != null) return false;
+  const typeValues = [
+    node.mediaType,
+    node.type,
+    node.contentType,
+    node.videoType,
+    node.assetType,
+    node.productType,
+    node.entityType,
+    node.programmeType,
+    node.programType,
+    node.kind,
+    node.subType,
+  ];
+  const hasRuntime = node.durationMilliseconds != null || node.durationSeconds != null;
+  const hasFormats = Boolean(node.formats && typeof node.formats === 'object');
+  const hasCreditMarkers = hasFormats && Object.values(node.formats).some(format => {
+    const markers = format?.markers || {};
+    return ['SOCR', 'EOCR', 'EOC', 'startOfCredits', 'creditsStart'].some(key => markers[key] != null || format?.[key] != null);
+  });
+  const hasMovieFlag = ['isMovie', 'isFilm', 'isFeature'].some(key =>
+    node[key] === true || node[key] === 1 || node[key] === 'true'
+  );
+  return (typeValues.some(isSkyShowtimeMovieType) || hasMovieFlag || hasCreditMarkers) && (hasRuntime || hasFormats);
+}
+
 function extendSkyShowtimeContext(context, attributes) {
   if (!attributes || typeof attributes !== 'object') return context;
+  const mediaType = attributes.mediaType || attributes.type || attributes.contentType || attributes.entityType || context.mediaType;
   return {
     seasonNumber: attributes.seasonNumber ?? context.seasonNumber,
+    ...(mediaType ? { mediaType } : {}),
     providerSeriesId: attributes.providerSeriesId || context.providerSeriesId,
+    providerVariantId: attributes.providerVariantId || context.providerVariantId,
+    programmeUuid: attributes.programmeUuid || context.programmeUuid,
+    providerMovieId: attributes.providerMovieId || context.providerMovieId,
+    movieId: attributes.movieId || context.movieId,
+    id: attributes.id || context.id,
     seriesId: attributes.seriesId || context.seriesId,
     seriesUuid: attributes.seriesUuid || context.seriesUuid,
     seriesName: attributes.seriesName || context.seriesName,
-    year: attributes.year ?? context.year,
+    movieName: attributes.movieName || context.movieName,
+    titleLong: attributes.titleLong || context.titleLong,
+    titleMedium: attributes.titleMedium || context.titleMedium,
+    title: attributes.title || context.title,
+    name: attributes.name || context.name,
+    durationMilliseconds: attributes.durationMilliseconds ?? context.durationMilliseconds,
+    durationSeconds: attributes.durationSeconds ?? context.durationSeconds,
+    year: attributes.year ?? attributes.releaseYear ?? attributes.releaseDate?.slice?.(0, 4) ?? context.year,
   };
+}
+
+function getSkyShowtimeMovieIdentifiers(movie) {
+  return [
+    movie?.providerVariantId,
+    movie?.programmeUuid,
+    movie?.providerMovieId,
+    movie?.movieId,
+    movie?.id,
+    movie?.contentId,
+    movie?.catalogId,
+  ].filter(value => value != null && String(value).trim() !== '').map(value => String(value).trim());
+}
+
+function getSkyShowtimeMovieId(movie) {
+  return getSkyShowtimeMovieIdentifiers(movie)[0] || '';
+}
+
+function getSkyShowtimeRequestedVariantId(sourceUrl) {
+  const match = String(sourceUrl || '').match(/\/provider_variant_id\/([^/?#]+)/i);
+  if (!match) return '';
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
 }
 
 /** Find episode attributes while inheriting series/season data from parent nodes. */
@@ -99,12 +172,139 @@ export function findSkyShowtimeEpisodes(root) {
   });
 }
 
+/** Find explicitly typed movie records while inheriting catalogue context. */
+export function findSkyShowtimeMovies(root) {
+  const found = [];
+  const visited = new WeakSet();
+
+  function walk(node, inheritedContext = {}) {
+    if (!node || typeof node !== 'object' || visited.has(node)) return;
+    visited.add(node);
+    if (Array.isArray(node)) {
+      node.forEach(item => walk(item, inheritedContext));
+      return;
+    }
+
+    const hasAttributes = node.attributes && typeof node.attributes === 'object';
+    const attributes = hasAttributes
+      ? { ...node.attributes, ...(node.id != null && node.attributes.id == null ? { id: node.id } : {}) }
+      : node;
+    const context = extendSkyShowtimeContext(inheritedContext, attributes);
+    const candidate = { ...context, ...attributes };
+    if (looksLikeSkyShowtimeMovie(candidate)) {
+      found.push({
+        ...candidate,
+        providerVariantId: attributes.providerVariantId || context.providerVariantId,
+        seriesId: attributes.seriesId || context.seriesId,
+        seriesUuid: attributes.seriesUuid || context.seriesUuid,
+        seriesName: attributes.seriesName || context.seriesName,
+        year: attributes.year ?? attributes.releaseYear ?? attributes.releaseDate?.slice?.(0, 4) ?? context.year,
+      });
+    }
+
+    for (const value of Object.values(node)) walk(value, context);
+  }
+
+  walk(root);
+  const movieKeys = new Set();
+  return found.filter(movie => {
+    const key = [
+      getSkyShowtimeMovieId(movie) || movie.titleLong || movie.titleMedium || movie.title || 'movie',
+      movie.year || '?',
+    ].join('::');
+    if (movieKeys.has(key)) return false;
+    movieKeys.add(key);
+    return true;
+  });
+}
+
 function getSkyShowtimeFormat(episode) {
   const formats = episode?.formats;
   if (!formats || typeof formats !== 'object') return null;
   const candidates = [formats.HD, formats.UHDSDR, ...Object.values(formats)]
     .filter(format => format && typeof format === 'object');
-  return candidates.find(format => format.markers || format.startOfCredits != null) || candidates[0] || null;
+  const directMarkerKeys = [
+    'SOI', 'EOI', 'SOR', 'EOR', 'SOCR', 'EOCR', 'EOC',
+    'startOfCredits', 'creditsStart', 'endOfCredits', 'creditsEnd',
+  ];
+  const hasMarkers = format =>
+    Boolean(format.markers && typeof format.markers === 'object' && Object.keys(format.markers).length) ||
+    directMarkerKeys.some(key => format[key] != null);
+  return candidates.find(hasMarkers) || candidates[0] || null;
+}
+
+function firstSkyShowtimeMarkerValue(markers, format, keys) {
+  for (const key of keys) {
+    const value = coerceSkyShowtimeNumber(markers?.[key] ?? format?.[key]);
+    if (value != null) return value;
+  }
+  return null;
+}
+
+function getSkyShowtimeMovieCreditRange(movie, format) {
+  const markers = format?.markers || {};
+  const startMs = firstSkyShowtimeMarkerValue(markers, format, [
+    'SOCR',
+    'startOfCredits',
+    'creditsStart',
+    'creditsStartMs',
+  ]);
+  let endMs = firstSkyShowtimeMarkerValue(markers, format, [
+    'EOCR',
+    'EOC',
+    'endOfCredits',
+    'creditsEnd',
+    'creditsEndMs',
+  ]);
+  const afterCreditsStartMs = firstSkyShowtimeMarkerValue(markers, format, [
+    'SOAC',
+    'SOAfterCredits',
+    'afterCreditsStart',
+    'afterCreditsStartMs',
+    'postCreditsStart',
+    'postCreditsStartMs',
+  ]);
+  const afterCreditsEndMs = firstSkyShowtimeMarkerValue(markers, format, [
+    'EOAC',
+    'EOAfterCredits',
+    'afterCreditsEnd',
+    'afterCreditsEndMs',
+    'postCreditsEnd',
+    'postCreditsEndMs',
+  ]);
+  const afterCreditsDetected = afterCreditsStartMs != null || afterCreditsEndMs != null || [
+    markers.afterCredits,
+    markers.afterCreditsScene,
+    markers.postCredits,
+    markers.postCreditsScene,
+    format?.afterCredits,
+    format?.afterCreditsScene,
+    format?.postCredits,
+    format?.postCreditsScene,
+  ].some(value => value === true || (value && typeof value === 'object'));
+
+  const durationMilliseconds = [
+    movie.durationMilliseconds,
+    movie.durationMs,
+    format?.durationMilliseconds,
+    format?.durationMs,
+  ].map(coerceSkyShowtimeNumber).find(value => value != null) ?? null;
+  const durationSeconds = [
+    movie.durationSeconds,
+    movie.runtimeSeconds,
+    format?.durationSeconds,
+    format?.runtimeSeconds,
+  ].map(coerceSkyShowtimeNumber).find(value => value != null) ?? null;
+  const durationMs = durationMilliseconds ?? (durationSeconds == null ? null : durationSeconds * 1000);
+  if (endMs == null && afterCreditsStartMs != null) endMs = afterCreditsStartMs;
+  if (endMs == null) endMs = durationMs;
+  if (startMs == null || endMs == null || endMs <= startMs) return null;
+  if (durationMs != null) {
+    if (startMs >= durationMs) return null;
+    endMs = Math.min(endMs, durationMs);
+  }
+  if (endMs <= startMs) return null;
+  return { startMs, endMs, afterCreditsStartMs, afterCreditsEndMs, afterCreditsDetected };
 }
 
 function isSkyShowtimeSpecialEpisode(episode) {
@@ -119,14 +319,26 @@ function makeSkyShowtimeEpisodeId(episode, season, episodeNumber) {
   return `${seriesId}::S${season}E${episodeNumber}::${variantId}`;
 }
 
-function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, startMs, endMs) {
+function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, startMs, endMs, mediaType = 'tv', creditPart = null) {
   if (startMs == null || endMs == null || endMs <= startMs) return;
-  const episodeId = `${common.episodeId}::${providerSegmentType}`;
-  if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) return;
+  const isMovie = String(mediaType).toLowerCase() === 'movie';
+  const partSuffix = creditPart ? `::${creditPart}` : '';
+  const episodeId = `${common.episodeId}${isMovie ? '::movie' : ''}::${providerSegmentType}${partSuffix}`;
+  const isDuplicate = item => item._eid === episodeId || (
+    item._showId === common.showId &&
+    String(item.media_type || 'tv').toLowerCase() === String(mediaType).toLowerCase() &&
+    item.season === common.season &&
+    item.episode === common.episode &&
+    item.segment_type === providerSegmentType &&
+    (item.credit_part || null) === (creditPart || null)
+  );
+  if (state.allItems.some(isDuplicate) || extractedItems.some(isDuplicate)) return;
   extractedItems.push({
     _eid: episodeId,
     _episodeTitle: common.episodeTitle,
     _showId: common.showId,
+    ...(isMovie ? { media_type: 'movie' } : {}),
+    ...(creditPart ? { credit_part: creditPart } : {}),
     imdb_id: state.imdbIdsByShowId?.[common.showId] || 'IMDB_PENDING',
     segment_type: providerSegmentType,
     season: common.season,
@@ -139,7 +351,12 @@ function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, star
 /** Parse SOI/EOI, SOR/EOR and SOCR/runtime markers from a catalogue response. */
 export function processSkyShowtimeMetadata(data, sourceUrl = '') {
   const episodes = findSkyShowtimeEpisodes(data);
-  if (!episodes.length) return 0;
+  const discoveredMovies = findSkyShowtimeMovies(data);
+  const requestedVariantId = getSkyShowtimeRequestedVariantId(sourceUrl);
+  const movies = requestedVariantId
+    ? discoveredMovies.filter(movie => getSkyShowtimeMovieIdentifiers(movie).some(id => id === requestedVariantId))
+    : discoveredMovies;
+  if (!episodes.length && !movies.length) return 0;
 
   const showEpisode = episodes.find(episode => episode.seriesName || episode.titleLong || episode.titleMedium || episode.title);
   const showId = showEpisode
@@ -156,7 +373,19 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
     });
   }
 
-  setProviderEpisodeCatalog(episodes.flatMap(episode => {
+  for (const movie of movies) {
+    const movieId = getSkyShowtimeMovieId(movie) || movie.titleLong || movie.titleMedium || movie.title;
+    const movieTitle = movie.titleLong || movie.titleMedium || movie.movieName || movie.title || movie.name || '';
+    if (!movieId || !movieTitle) continue;
+    handleDetectedShow({
+      title: movieTitle,
+      showId: String(movieId),
+      year: movie.year || '',
+      mediaType: 'movie',
+    });
+  }
+
+  if (episodes.length) setProviderEpisodeCatalog(episodes.flatMap(episode => {
     const season = coerceSkyShowtimeNumber(episode.seasonNumber);
     const episodeNumber = coerceSkyShowtimeNumber(episode.episodeNumber);
     if (season == null || episodeNumber == null) return [];
@@ -222,6 +451,51 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
     });
   }
 
+  for (const movie of movies) {
+    const movieId = getSkyShowtimeMovieId(movie) || movie.titleLong || movie.titleMedium || movie.title;
+    const movieTitle = movie.titleLong || movie.titleMedium || movie.movieName || movie.title || movie.name || '';
+    const format = getSkyShowtimeFormat(movie);
+    const creditRange = getSkyShowtimeMovieCreditRange(movie, format);
+    if (!movieId || !movieTitle || !creditRange) continue;
+
+    const common = {
+      episodeId: String(movieId),
+      episodeTitle: movieTitle,
+      showId: String(movieId),
+      season: null,
+      episode: null,
+    };
+    const movieItems = [];
+    const ranges = splitCreditRange({
+      startSec: creditRange.startMs / 1000,
+      endSec: creditRange.endMs / 1000,
+      afterCreditsDetected: creditRange.afterCreditsDetected,
+      afterCreditsStartSec: creditRange.afterCreditsStartMs == null ? null : creditRange.afterCreditsStartMs / 1000,
+      afterCreditsEndSec: creditRange.afterCreditsEndMs == null ? null : creditRange.afterCreditsEndMs / 1000,
+    });
+    for (const range of ranges) {
+      addSkyShowtimeSegment(
+        movieItems,
+        common,
+        'outro',
+        range.startSec * 1000,
+        range.endSec * 1000,
+        'movie',
+        range.creditPart
+      );
+    }
+    extractedItems.push(...movieItems);
+    logCapturedTimestamps({
+      prefix: 'SSE',
+      showTitle: movieTitle,
+      mediaType: 'movie',
+      episodeTitle: movieTitle,
+      providerIdLabel: 'providerVariantId',
+      providerId: movieId,
+      items: movieItems,
+    });
+  }
+
   if (extractedItems.length) {
     recordExtractedSegments(extractedItems);
     console.info(`[SSE] Captured ${extractedItems.length} segment(s) from ${sourceUrl || 'SkyShowtime metadata'}.`);
@@ -245,6 +519,7 @@ function buildSkyShowtimeWorkerSource(originalUrl, isModule) {
   const targetHost = JSON.stringify(SKYSHOWTIME_CATALOGUE_HOST);
   const targetPath = JSON.stringify(SKYSHOWTIME_CATALOGUE_PATH);
   const seriesPath = JSON.stringify(SKYSHOWTIME_SERIES_PATH);
+  const variantPath = JSON.stringify(SKYSHOWTIME_VARIANT_PATH);
   const messageKey = JSON.stringify(SKYSHOWTIME_WORKER_MESSAGE);
   const importStatement = isModule
     ? `import(${JSON.stringify(originalUrl)});`
@@ -254,7 +529,8 @@ function buildSkyShowtimeWorkerSource(originalUrl, isModule) {
       const messageKey = ${messageKey};
       const isTarget = url => {
         const value = String(url || '');
-        return value.includes(${targetHost}) && value.includes(${targetPath}) && value.includes(${seriesPath});
+        return value.includes(${targetHost}) && value.includes(${targetPath}) &&
+          (value.includes(${seriesPath}) || value.includes(${variantPath}));
       };
       const sendResponse = (response, url, via) => {
         response.clone().json().then(data => {

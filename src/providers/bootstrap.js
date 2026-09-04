@@ -277,6 +277,21 @@ function filterShortOutputSegments(items) {
   });
 }
 
+function normalizeMovieExportItem(item) {
+  return {
+    imdb_id: item.imdb_id,
+    media_type: 'movie',
+    segment_type: item.segment_type,
+    ...(item.credit_part ? { credit_part: item.credit_part } : {}),
+    start_sec: item.start_sec,
+    end_sec: item.end_sec,
+  };
+}
+
+function normalizeExportItem(item) {
+  return isMovieItem(item) ? normalizeMovieExportItem(item) : item;
+}
+
 export async function exportJSON() {
   if (!state.allItems.length) {
     toast('No timestamps yet.');
@@ -336,8 +351,9 @@ export async function exportJSON() {
     return;
   }
 
+  const exportItems = items.map(normalizeExportItem);
   const groups = new Map();
-  for (const item of items) {
+  for (const item of exportItems) {
     const key = item.imdb_id || 'no_id';
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(item);
@@ -359,7 +375,7 @@ export async function exportJSON() {
   let downloaded = 0;
   function downloadNext(index) {
     if (index >= files.length) {
-      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${items.length} entries`);
+      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
       return;
     }
     const file = files[index];
@@ -378,7 +394,7 @@ export async function exportJSON() {
   }
 
   showExportPreview({
-    items,
+    items: exportItems,
     fileCount: files.length,
     duplicateCount,
     onConfirm: () => downloadNext(0),
