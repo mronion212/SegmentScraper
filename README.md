@@ -20,7 +20,7 @@ Every active provider logs each captured episode with readable timestamps and th
 
 ## Features
 
-- Provider-specific playback-control anchors with automatic relocation when controls appear or rerender
+- Provider-specific playback-control anchors with automatic insertion when controls appear or rerender
 - Fullscreen-aware panels, keyboard focus restoration, Escape to close, and collapsible API settings
 - Tab-scoped capture recovery after reload, including movies and episode mapping metadata; API credentials are excluded
 - Bounded duplicate-check batches and request timeouts; failed duplicate checks stop export/submission and can be retried
@@ -112,9 +112,9 @@ The generated userscript is written to `SegmentScraper.user.js`.
 
 ## Player UI and Recovery Checks
 
-Run `node --test` for regression tests and `node benchmark/serve-player-ui.cjs` for the local browser fixture at `http://127.0.0.1:8096`. The fixture runs 20 DOM checks across the five provider adapters, with controls for rerendering, fallback placement, hidden controls, fullscreen, and a sample JSON preview. `http://127.0.0.1:8096/compact` embeds it in a 360 × 480 viewport. These are synthetic fixtures, not live provider compatibility tests.
+Run `node --test` for regression tests and `node benchmark/serve-player-ui.cjs` for the local browser fixture at `http://127.0.0.1:8096`. The fixture runs 20 DOM checks across the five provider adapters, with controls for rerendering, waiting for controls, hidden controls, fullscreen, and a sample JSON preview. `http://127.0.0.1:8096/compact` embeds it in a 360 × 480 viewport. These are synthetic fixtures, not live provider compatibility tests.
 
-Before releasing, verify each provider with a series and, where supported, a movie: open the panel from the playback controls, hide/show the native controls, enter/exit fullscreen, navigate to another title, allow autoplay to advance, and reload after capture. Confirm that the button stays out of the timeline and recovered segments are not captured twice. Cross-origin iframe players and native video-only fullscreen may restrict custom overlays; the top-right fallback remains available in accessible player documents when an anchor is unavailable.
+Before releasing, verify each provider with a series and, where supported, a movie: open the panel from the playback controls, hide/show the native controls, enter/exit fullscreen, navigate to another title, allow autoplay to advance, and reload after capture. Confirm that the button stays out of the timeline and recovered segments are not captured twice. Cross-origin iframe players and native video-only fullscreen may restrict custom overlays; the icon is only shown when a lower playback-control anchor is available. No floating fallback is displayed.
 
 Captured sessions are stored in browser session storage, separately per provider and tab. Reloading the same tab restores captures and common episode-mapping metadata. Closing the tab normally ends that session; this is recovery storage, not a permanent backup. The panel shows the last saved time or a storage failure notice. Use **Clear data** to remove the saved capture; API credentials remain in userscript-manager storage. An update notice preserves the recovery copy.
 

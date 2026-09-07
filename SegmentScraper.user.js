@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
-// @version      1.8.0
+// @version      1.8.1
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -36,7 +36,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const SEGMENTSCRAPER_VERSION = "1.8.0";
+  const SEGMENTSCRAPER_VERSION = "1.8.1";
   const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
@@ -2402,9 +2402,25 @@ const PLAYER_CONTROL_ANCHORS = {
 
 function getNextEpBtn(providerName) {
   const root = document.fullscreenElement || document;
+  const videos = [...root.querySelectorAll('video')].map(video => video.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
+  const isPlaybackControl = anchor => {
+    if (!anchor || !anchor.matches('button, [role="button"]') || anchor.closest('[role="slider"], .vjs-progress-control, [data-uia="timeline"]')) return false;
+    const rect = anchor.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+    // Reject top toolbars and controls belonging to another part of the page.
+    return videos.some(video => rect.top >= video.top + video.height / 2 && rect.top <= video.bottom + 60 && rect.left >= video.left && rect.right <= video.right + 1);
+  };
   for (const selector of PLAYER_CONTROL_ANCHORS[providerName] || []) {
-    const anchor = root.querySelector(selector);
-    if (anchor && !anchor.closest('[role="slider"], .vjs-progress-control, [data-uia="timeline"]')) return anchor;
+    for (const candidate of root.querySelectorAll(selector)) {
+      const anchor = candidate.matches('button, [role="button"]') ? candidate : candidate.querySelector('button, [role="button"]');
+      if (isPlaybackControl(anchor)) return anchor;
+    }
+  }
+  // Semantic play/pause controls cover alternate player builds without relying on
+  // a next-episode button (which is absent for movies and season finales).
+  for (const anchor of root.querySelectorAll('button[aria-label], button[title]')) {
+    const label = anchor.getAttribute('aria-label') || anchor.title || '';
+    if (/^(play|pause|afspelen|pauzeren)( video| playback)?$/i.test(label.trim()) && isPlaybackControl(anchor)) return anchor;
   }
   return null;
 }
@@ -2412,6 +2428,11 @@ function getNextEpBtn(providerName) {
 function injectBtn(providerName, getAnchor = getNextEpBtn) {
   if (!document.body) return;
   let button = document.getElementById('nfe-btn');
+  const anchor = getAnchor(providerName);
+  if (!anchor) {
+    button?.remove();
+    return;
+  }
   if (!button) {
     button = document.createElement('button');
     button.id = 'nfe-btn';
@@ -2428,22 +2449,16 @@ function injectBtn(providerName, getAnchor = getNextEpBtn) {
     });
     button.addEventListener('keydown', event => event.stopPropagation());
   }
-  const anchor = getAnchor(providerName);
-  const mode = anchor ? 'controls' : 'floating';
+  const mode = 'controls';
   if (button.dataset.placement !== mode) {
     button.dataset.placement = mode;
     button.style.cssText = 'all:initial;box-sizing:border-box;color:white;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;vertical-align:middle;';
-    button.style.cssText += anchor
-      ? 'width:40px;height:40px;margin:0 4px;border-radius:4px;'
-      : 'position:fixed;top:20px;right:20px;width:40px;height:40px;background:rgba(0,0,0,.7);border-radius:8px;z-index:2147483000;';
+    button.style.cssText += 'width:40px;height:40px;margin:0 4px;border-radius:4px;';
   }
   if (anchor) {
     if (button.parentElement !== anchor.parentElement || button.nextElementSibling !== anchor) {
       anchor.insertAdjacentElement('beforebegin', button);
     }
-  } else {
-    const host = document.fullscreenElement || document.body;
-    if (button.parentElement !== host) host.appendChild(button);
   }
   if (!document.getElementById('nfe-button-style')) {
     const style = document.createElement('style');
