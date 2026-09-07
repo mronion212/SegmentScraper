@@ -101,7 +101,16 @@ for (const name of [...provider.options].map(option => option.value)) {
   }
   const icon = mountedButton.querySelector('span').shadowRoot.querySelector('svg');
   check(getComputedStyle(icon.querySelector('rect')).fill === 'none' && getComputedStyle(icon.querySelector('rect')).stroke === 'rgb(255, 255, 255)', name + ': original white outline survives provider SVG rules');
-  check(icon.getBoundingClientRect().width === 28, name + ': readable 28px logo');
+  check(icon.getBoundingClientRect().width === (name === 'netflix' ? Math.max(32, Math.min(48, getNextEpBtn(name).querySelector('svg').getBoundingClientRect().width)) : 28), name + ': readable provider-sized logo');
+  if (name === 'netflix') {
+    const nativeIcon = getNextEpBtn(name).querySelector('svg');
+    nativeIcon.style.transform = 'translateY(-5px)';
+    nativeIcon.style.width = '44px';
+    injectBtn(name);
+    const actual = icon.getBoundingClientRect();
+    const expected = nativeIcon.getBoundingClientRect();
+    check(Math.abs(actual.top + actual.height / 2 - expected.top - expected.height / 2) < 1 && actual.width === 44, 'Netflix: logo follows the visible native icon size and vertical offset');
+  }
   for (const width of ['640px', '100%']) {
     player.style.width = width;
     injectBtn(name);

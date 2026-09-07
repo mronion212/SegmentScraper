@@ -130,6 +130,23 @@ export function injectBtn(providerName, getAnchor = getNextEpBtn) {
   if (button.parentElement !== slot) slot.appendChild(button);
   const correctlyPlaced = after ? reference.nextElementSibling === slot : slot.nextElementSibling === reference;
   if (slot.parentElement !== reference.parentElement || !correctlyPlaced) reference.insertAdjacentElement(after ? 'afterend' : 'beforebegin', slot);
+  if (providerName === 'netflix') {
+    // Netflix's SVG can sit above the button's box center. Match the visible
+    // native icon, including its responsive size, rather than the wrapper.
+    const nativeIcon = anchor.querySelector('svg')?.getBoundingClientRect();
+    if (nativeIcon?.width > 0 && nativeIcon.height > 0) {
+      const size = Math.max(32, Math.min(48, nativeIcon.width));
+      const box = button.getBoundingClientRect();
+      const offset = nativeIcon.top + nativeIcon.height / 2 - box.top - box.height / 2;
+      const appearance = size + ':' + offset;
+      if (button.dataset.netflixIcon !== appearance) {
+        const icon = button.firstElementChild;
+        icon.style.cssText = 'display:block!important;flex-shrink:0!important;width:' + size + 'px!important;height:' + size + 'px!important;pointer-events:none!important;transform:translateY(' + offset + 'px)!important;';
+        icon.shadowRoot.querySelector('svg').style.cssText = 'width:100%;height:100%;';
+        button.dataset.netflixIcon = appearance;
+      }
+    }
+  }
   mountedPlayerControl = { providerName, anchor };
   if (!document.getElementById('nfe-button-style')) {
     const style = document.createElement('style');
