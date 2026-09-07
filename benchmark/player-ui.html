@@ -12,6 +12,18 @@
   #controls button { color:white; background:transparent; border:0; }
   #timeline { position:absolute; bottom:82px; left:20px; right:20px; height:4px; background:#aaa; }
   #results { white-space:pre-wrap; color:#a9dfbf; }
+  .fn81nbv, .lowerControls-nruDSV { display:flex; align-items:center; gap:16px; width:100%; }
+  .f1mgyl9u { display:block; }
+  #controls .f13imzm1 { width:48px; height:48px; padding:12px; margin:0; }
+  #controls .f1kwmyva { width:90px; height:90px; background:#444; border-radius:50%; }
+  .centerControls-ki4PEW { margin:auto; }
+  #controls .playbackButton-W7fOEa { width:48px; height:48px; padding:12px; margin:0; vertical-align:middle; }
+  .root-aPp5XA { display:block; width:24px; height:24px; }
+  .GrUSCDgpInViNyFf, .KaHKA4FGlqZNemJ6 { display:flex; align-items:center; gap:12px; }
+  .GrUSCDgpInViNyFf { width:100%; }
+  .Ty3yu3IegFo92Lzr { flex:1; }
+  #controls .g4VwZQnNKdUJnqyU { width:48px; height:48px; padding:12px; margin:0; }
+  .GhaCLI__5ZvbgF5Z { width:24px; height:24px; }
 </style>
 <h1>Player UI checks</h1>
 <p>Local fixtures only. No streaming requests or submissions are made.</p>
@@ -22,7 +34,8 @@
 <div id="player"><video style="position:absolute;width:100%;height:100%"></video><div id="timeline" role="slider" aria-label="Playback position" aria-valuenow="30"></div><div id="controls"></div></div>
 <script type="module">
 import { state } from '/src/core/state.js';
-import { injectBtn } from '/src/ui/button.js';
+import { providerControlFixtures } from '/benchmark/provider-control-fixtures.js';
+import { injectBtn, getNextEpBtn } from '/src/ui/button.js';
 import { setProviderName, closePanel, openPanel, showExportPreview } from '/src/ui/panel.js';
 const provider = document.getElementById('provider');
 const player = document.getElementById('player');
@@ -48,6 +61,7 @@ function mount(name) {
   controls.replaceChildren(); controls.style.opacity = '1';
   const play = document.createElement('button'); play.textContent = 'Play / pause';
   controls.append(play, anchorFor(name));
+  if (providerControlFixtures[name]) controls.innerHTML = providerControlFixtures[name];
   injectBtn(name);
 }
 const checks = [];
@@ -56,7 +70,28 @@ for (const name of [...provider.options].map(option => option.value)) {
   controls.replaceChildren(); injectBtn(name);
   check(!document.getElementById('nfe-btn'), name + ': no floating icon without controls');
   mount(name);
-  check(document.getElementById('nfe-btn').parentElement === controls, name + ': icon appears inside controls');
+  check(controls.contains(document.getElementById('nfe-btn')), name + ': icon appears inside controls');
+  const mountedButton = document.getElementById('nfe-btn');
+  controls.style.display = 'none'; injectBtn(name);
+  check(document.getElementById('nfe-btn') === mountedButton, name + ': hiding controls preserves the mounted button');
+  controls.style.display = ''; injectBtn(name);
+  check(document.getElementById('nfe-btn') === mountedButton, name + ': showing controls restores the same button');
+  if (providerControlFixtures[name]) {
+    const nativeBox = getNextEpBtn(name).getBoundingClientRect();
+    const iconBox = mountedButton.getBoundingClientRect();
+    check(Math.abs(nativeBox.top + nativeBox.height / 2 - iconBox.top - iconBox.height / 2) < 1, name + ': button is vertically aligned with native controls');
+    check(Math.abs(nativeBox.height - iconBox.height) < 1, name + ': button uses native control height');
+  }
+  if (name === 'prime-video') {
+    check(mountedButton.parentElement.parentElement === controls.querySelector('#atvwebplayersdk-skip-backward-button').parentElement.parentElement, 'Prime: separate native wrapper in the row');
+  }
+  if (name === 'skyshowtime') {
+    check(mountedButton.parentElement === controls.querySelector('[data-testid="language-settings-button"]').parentElement, 'SkyShowtime: lower utility group, outside play controls');
+  }
+  if (name === 'videoland') {
+    check(mountedButton.parentElement.parentElement === controls.querySelector('#volume-bar-control').parentElement.parentElement, 'Videoland: own slot in bottom utility group');
+    check(!mountedButton.closest('[role="slider"]'), 'Videoland: outside both seek and volume sliders');
+  }
   mount(name);
   check(document.querySelectorAll('#nfe-btn').length === 1, name + ': rerender keeps exactly one button');
   check(!document.getElementById('timeline').contains(document.getElementById('nfe-btn')), name + ': timeline stays clear');

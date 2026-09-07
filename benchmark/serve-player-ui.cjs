@@ -12,7 +12,7 @@ http.createServer((request, response) => {
   }
   const relative = pathname === '/' ? 'benchmark/player-ui.html' : pathname.slice(1);
   const target = path.resolve(root, relative);
-  if (!target.startsWith(root + path.sep) || !(relative === 'benchmark/player-ui.html' || relative.startsWith('src/'))) {
+  if (!target.startsWith(root + path.sep) || !(relative === 'benchmark/player-ui.html' || relative === 'benchmark/provider-control-fixtures.js' || relative.startsWith('src/'))) {
     response.writeHead(404).end(); return;
   }
   fs.readFile(target, (error, content) => {

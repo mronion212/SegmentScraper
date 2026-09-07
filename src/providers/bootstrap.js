@@ -7,7 +7,7 @@ import { restoreCaptureSession, scheduleCaptureSave, saveCaptureSession, clearCa
 import { state, createState, createMediaCacheKey } from '../core/state.js';
 import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
-import { injectBtn, getNextEpBtn } from '../ui/button.js';
+import { injectBtn, getNextEpBtn, removePlayerButton } from '../ui/button.js';
 import { setProviderName, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput, showExportPreview, showRequiredUpdate } from '../ui/panel.js';
 import { getProviderConfig } from '../config/provider-config.js';
 import { loadIntrodbSettings, saveIntrodbSettings } from '../core/introdb-settings.js';
@@ -736,7 +736,7 @@ export function bootstrapProvider({
       }
     }
     if (inPlayer) injectBtn(providerName, getNextEpBtn);
-    else document.getElementById('nfe-btn')?.remove();
+    else removePlayerButton();
     const host = document.fullscreenElement || document.body;
     for (const id of ['nfe-panel', 'nfe-export-preview', 'nfe-toast']) {
       const element = document.getElementById(id);
