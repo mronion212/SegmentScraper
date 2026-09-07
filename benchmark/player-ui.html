@@ -24,6 +24,13 @@
   .Ty3yu3IegFo92Lzr { flex:1; }
   #controls .g4VwZQnNKdUJnqyU { width:48px; height:48px; padding:12px; margin:0; }
   .GhaCLI__5ZvbgF5Z { width:24px; height:24px; }
+  .netflix-controls-row { display:flex; align-items:center; margin-left:auto; }
+  .netflix-control-box { flex:0 0 48px; width:48px; height:48px; }
+  #controls .netflix-control-box button { width:48px; height:48px; margin:0; padding:0; }
+  .KaHKA4FGlqZNemJ6 { width:108px; flex:0 0 108px; }
+  /* Reproduce hostile provider styles and a fixed native utility-group width. */
+  #controls button { color:black; }
+  #controls svg rect { fill:black!important; stroke:black!important; }
 </style>
 <h1>Player UI checks</h1>
 <p>Local fixtures only. No streaming requests or submissions are made.</p>
@@ -86,12 +93,25 @@ for (const name of [...provider.options].map(option => option.value)) {
     check(mountedButton.parentElement.parentElement === controls.querySelector('#atvwebplayersdk-skip-backward-button').parentElement.parentElement, 'Prime: separate native wrapper in the row');
   }
   if (name === 'skyshowtime') {
-    check(mountedButton.parentElement === controls.querySelector('[data-testid="language-settings-button"]').parentElement, 'SkyShowtime: lower utility group, outside play controls');
+    check(mountedButton.parentElement.previousElementSibling === controls.querySelector('[data-testid="language-settings-button"]'), 'SkyShowtime: immediately right of subtitles');
   }
   if (name === 'videoland') {
-    check(mountedButton.parentElement.parentElement === controls.querySelector('#volume-bar-control').parentElement.parentElement, 'Videoland: own slot in bottom utility group');
+    check(mountedButton.parentElement.nextElementSibling === controls.querySelector('#volume-bar-control').parentElement.parentElement, 'Videoland: own slot before the fixed bottom utility group');
     check(!mountedButton.closest('[role="slider"]'), 'Videoland: outside both seek and volume sliders');
   }
+  const icon = mountedButton.querySelector('span').shadowRoot.querySelector('svg');
+  check(getComputedStyle(icon.querySelector('rect')).fill === 'none' && getComputedStyle(icon.querySelector('rect')).stroke === 'rgb(255, 255, 255)', name + ': original white outline survives provider SVG rules');
+  check(icon.getBoundingClientRect().width === 28, name + ': readable 28px logo');
+  for (const width of ['640px', '100%']) {
+    player.style.width = width;
+    injectBtn(name);
+    const own = mountedButton.getBoundingClientRect();
+    check([...controls.querySelectorAll('button:not(#nfe-btn)')].every(control => {
+      const box = control.getBoundingClientRect();
+      return own.right <= box.left || own.left >= box.right || own.bottom <= box.top || own.top >= box.bottom;
+    }), name + ': no native control overlap at ' + width);
+  }
+  player.style.width = '';
   mount(name);
   check(document.querySelectorAll('#nfe-btn').length === 1, name + ': rerender keeps exactly one button');
   check(!document.getElementById('timeline').contains(document.getElementById('nfe-btn')), name + ': timeline stays clear');

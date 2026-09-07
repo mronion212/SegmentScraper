@@ -760,6 +760,7 @@ export function bootstrapProvider({
   else document.addEventListener('DOMContentLoaded', observePlayer, { once: true });
   document.addEventListener('fullscreenchange', refreshControls);
   window.addEventListener('popstate', scheduleRefresh);
+  window.addEventListener('resize', scheduleRefresh);
   // Backstop for history changes that do not mutate the player DOM.
   setInterval(() => { if (!document.hidden) refreshControls(); }, 5000);
 

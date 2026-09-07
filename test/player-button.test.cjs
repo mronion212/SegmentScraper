@@ -59,20 +59,30 @@ test('Prime places its own slot beside the native wrapper, not inside the play w
   assert.equal(mount.wrapped, true);
 });
 
-test('SkyShowtime inserts beside the language control in the lower utilities group', () => {
-  const anchor = { parentElement:{} };
+test('SkyShowtime inserts to the right of subtitles in the lower utilities group', () => {
+  const anchor = { parentElement:{}, getAttribute: () => 'language-settings-button' };
   const mount = loadButton([]).getControlMount('skyshowtime', anchor);
   assert.equal(mount.reference, anchor);
   assert.equal(mount.wrapped, false);
+  assert.equal(mount.after, true);
 });
 
-test('Videoland uses the fullscreen wrapper beside volume without entering either slider', () => {
+test('Videoland reserves space before the whole volume/fullscreen group in both modes', () => {
   const group = { querySelector: () => fullscreen };
   const fullscreenWrapper = { children:[{}], parentElement:group };
   const fullscreen = { parentElement:fullscreenWrapper };
   const volume = { id:'volume-bar-control', parentElement:{ parentElement:group } };
   const api = loadButton([], { querySelector: () => volume });
-  assert.equal(api.getNextEpBtn('videoland'), fullscreen);
-  assert.equal(api.getControlMount('videoland', fullscreen).reference, fullscreenWrapper);
-  assert.equal(api.getControlMount('videoland', fullscreen).wrapped, true);
+  assert.equal(api.getNextEpBtn('videoland'), volume);
+  assert.equal(api.getControlMount('videoland', volume).reference, group);
+  assert.equal(api.getControlMount('videoland', volume).wrapped, true);
+});
+
+test('Netflix inserts outside the fixed-width fullscreen wrapper', () => {
+  const row = { querySelectorAll: () => [{}, {}], matches: () => false };
+  const wrapper = { parentElement:row, querySelectorAll: () => [{}], matches: () => false };
+  const anchor = { parentElement:wrapper };
+  const mount = loadButton([]).getControlMount('netflix', anchor);
+  assert.equal(mount.reference, wrapper);
+  assert.equal(mount.wrapped, true);
 });

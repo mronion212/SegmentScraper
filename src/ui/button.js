@@ -23,10 +23,7 @@ export function getNextEpBtn(providerName) {
   const verifiedSelector = VERIFIED_CONTROL_ANCHORS[providerName];
   if (verifiedSelector) {
     const verified = root.querySelector(verifiedSelector);
-    if (verified && providerName === 'videoland') {
-      // The volume wrapper and fullscreen wrapper share the bottom utility row.
-      return verified.parentElement?.parentElement?.querySelector('button[aria-label="Volledig scherm"], button[aria-label="Fullscreen"], button[aria-label="Exit fullscreen"], button[aria-label="Verlaat volledig scherm"]') || verified;
-    }
+
     if (verified) return verified;
   }
   const videos = [...root.querySelectorAll('video')].map(video => video.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
@@ -52,9 +49,27 @@ export function getNextEpBtn(providerName) {
 /** Pure structural decision; wrapped native controls receive a sibling slot. */
 export function getControlMount(providerName, anchor) {
   const parent = anchor.parentElement;
-  const wrapped = providerName === 'prime-video' && anchor.id === 'atvwebplayersdk-skip-backward-button'
-    || providerName === 'videoland' && (anchor.id === 'volume-bar-control' || parent?.children.length === 1) && parent.parentElement;
-  return { reference: wrapped ? parent : anchor, wrapped: Boolean(wrapped) };
+  if (providerName === 'videoland' && anchor.id === 'volume-bar-control') {
+    // Reserve space beside the entire volume/fullscreen group. Do not enlarge a
+    // fixed-size fullscreen wrapper or depend on its changing translated label.
+    return { reference: parent.parentElement, wrapped: true, after: false };
+  }
+  if (providerName === 'skyshowtime' && anchor.getAttribute('data-testid') === 'language-settings-button') {
+    return { reference: anchor, wrapped: false, after: true };
+  }
+  if (providerName === 'prime-video' && anchor.id === 'atvwebplayersdk-skip-backward-button') {
+    return { reference: parent, wrapped: true, after: false };
+  }
+  // Lift past single-control wrappers until reaching a row containing other
+  // native controls. Inserting inside a fixed fullscreen wrapper stacks buttons.
+  let reference = anchor;
+  for (let container = parent; container && !container.matches?.('body, html'); container = container.parentElement) {
+    const count = container.querySelectorAll?.('button:not(#nfe-btn), [role="button"]:not(#nfe-btn)').length;
+    if (count > 1) return { reference, wrapped: reference !== anchor, after: false };
+    if (count == null) break;
+    reference = container;
+  }
+  return { reference: anchor, wrapped: false, after: false };
 }
 
 export function removePlayerButton() {
@@ -82,7 +97,13 @@ export function injectBtn(providerName, getAnchor = getNextEpBtn) {
     button.setAttribute('aria-label', 'Open SegmentScraper');
     button.setAttribute('aria-controls', 'nfe-panel');
     button.setAttribute('aria-expanded', 'false');
-    button.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="1.7"/><path d="M8 5v14M16 5v14M3 10h5m8 0h5M3 14h5m8 0h5" stroke="currentColor" stroke-width="1.5"/></svg>';
+    const icon = document.createElement('span');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.style.cssText = 'display:block!important;width:28px!important;height:28px!important;pointer-events:none!important;';
+    // Provider SVG rules must not turn the filmstrip into a filled square.
+    const shadow = icon.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<style>:host{color:white}svg{display:block;width:28px;height:28px;fill:none}</style><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="5" width="20" height="14" rx="1.5" stroke="white" stroke-width="1.6" fill="none"/><path d="M6 5v14M18 5v14M2 9h4m12 0h4M2 15h4m12 0h4" stroke="white" stroke-width="1.4" fill="none"/><polyline points="9,10 12,13.5 15,10" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M12 8v5.5" stroke="white" stroke-width="1.6" stroke-linecap="round" fill="none"/></svg>';
+    button.appendChild(icon);
     button.addEventListener('click', event => {
       event.stopPropagation();
       event.preventDefault();
@@ -90,36 +111,25 @@ export function injectBtn(providerName, getAnchor = getNextEpBtn) {
     });
     button.addEventListener('keydown', event => event.stopPropagation());
   }
-  const { reference, wrapped } = getControlMount(providerName, anchor);
-  const native = providerName === 'prime-video' || providerName === 'skyshowtime' || providerName === 'videoland';
-  const appearance = providerName + ':' + (native ? anchor.className : '');
-  if (button.dataset.appearance !== appearance) {
-    button.dataset.appearance = appearance;
-    button.dataset.placement = 'controls';
-    // Preserve the provider's box size, padding and vertical alignment.
-    button.className = native ? anchor.className : '';
-    button.style.cssText = native
-      ? 'cursor:pointer;flex-shrink:0;align-self:center;'
-      : 'box-sizing:border-box;color:white;background:transparent;border:0;padding:0;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;vertical-align:middle;width:40px;height:40px;margin:0 4px;border-radius:4px;';
-    const icon = button.querySelector('svg');
-    icon.style.cssText = 'display:block;margin:auto;pointer-events:none;';
-    if (native) icon.setAttribute('class', anchor.querySelector('svg')?.getAttribute('class') || '');
+  const { reference, after } = getControlMount(providerName, anchor);
+  button.dataset.placement = 'controls';
+  button.className = '';
+  const rect = anchor.getBoundingClientRect();
+  const height = rect.height > 0 ? Math.max(40, Math.min(64, rect.height)) : 40;
+  const buttonStyle = 'all:initial;box-sizing:border-box!important;display:flex!important;align-items:center!important;justify-content:center!important;width:40px!important;min-width:40px!important;height:' + height + 'px!important;padding:0!important;margin:0!important;border:0!important;background:transparent!important;color:white!important;cursor:pointer!important;flex:0 0 40px!important;position:static!important;transform:none!important;';
+  if (button.dataset.controlHeight !== String(height)) {
+    button.dataset.controlHeight = String(height);
+    button.style.cssText = buttonStyle;
   }
   let slot = document.getElementById('nfe-button-slot');
-  if (wrapped) {
-    if (!slot) {
-      slot = document.createElement('div');
-      slot.id = 'nfe-button-slot';
-    }
-    if (slot.className !== reference.className) slot.className = reference.className;
-    // No provider-owned node is moved or restyled.
-    slot.style.cssText = 'display:flex;align-items:center;justify-content:center;align-self:center;flex-shrink:0;';
-    if (button.parentElement !== slot) slot.appendChild(button);
-    if (slot.parentElement !== reference.parentElement || slot.nextElementSibling !== reference) reference.insertAdjacentElement('beforebegin', slot);
-  } else {
-    if (button.parentElement !== reference.parentElement || button.nextElementSibling !== reference) reference.insertAdjacentElement('beforebegin', button);
-    slot?.remove();
+  if (!slot) {
+    slot = document.createElement('span');
+    slot.id = 'nfe-button-slot';
+    slot.style.cssText = 'all:initial;box-sizing:border-box!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;align-self:center!important;vertical-align:middle!important;flex:0 0 48px!important;width:48px!important;min-width:48px!important;margin:0 4px!important;padding:0!important;position:static!important;';
   }
+  if (button.parentElement !== slot) slot.appendChild(button);
+  const correctlyPlaced = after ? reference.nextElementSibling === slot : slot.nextElementSibling === reference;
+  if (slot.parentElement !== reference.parentElement || !correctlyPlaced) reference.insertAdjacentElement(after ? 'afterend' : 'beforebegin', slot);
   mountedPlayerControl = { providerName, anchor };
   if (!document.getElementById('nfe-button-style')) {
     const style = document.createElement('style');
