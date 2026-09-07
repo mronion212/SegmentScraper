@@ -107,7 +107,7 @@ export async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) 
   
   console.log('[NFE] Using fetch fallback (may fail due to CORS)');
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
     const data = await response.json();
     console.log('[NFE] IMDb search response data:', data);
     return resolveImdbSearchResponse(data, title, year, mediaType);
@@ -177,6 +177,9 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
   const gmXhr = getGmXhr();
 
   const parseExistingSegments = json => {
+    if (!json || typeof json !== 'object' || json.error || json.errors) {
+      throw new Error('IntroDB returned an invalid response. Please try again.');
+    }
     const set = new Set();
     const rangesByType = new Map();
     const coerceExistingSeconds = value => {
@@ -223,11 +226,14 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
     return set;
   };
   
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (gmXhr) {
       gmXhr({
         method: 'GET',
         url: url,
+        timeout: 15000,
+        ontimeout: () => reject(new Error('IntroDB duplicate check timed out. Please try again.')),
+        onabort: () => reject(new Error('IntroDB duplicate check was interrupted. Please try again.')),
         headers: { 'Accept': 'application/json' },
         onload: (response) => {
           try {
@@ -236,33 +242,34 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
               const set = parseExistingSegments(json);
               if (writeCache) state.dedupCacheV2[key] = set;
               resolve(set);
-            } else {
+            } else if (response.status === 404) {
               if (writeCache) state.dedupCacheV2[key] = new Set();
               resolve(new Set());
+            } else {
+              reject(new Error(`IntroDB duplicate check returned HTTP ${response.status}. Please try again.`));
             }
           } catch (_) {
-            if (writeCache) state.dedupCacheV2[key] = new Set();
-            resolve(new Set());
+            reject(new Error('IntroDB returned an invalid response. Please try again.'));
           }
         },
         onerror: () => {
-          if (writeCache) state.dedupCacheV2[key] = new Set();
-          resolve(new Set());
+          reject(new Error('IntroDB duplicate check failed. Please try again.'));
         }
       });
     } else {
       // Fallback to fetch (will likely fail due to CORS)
-      fetch(url)
-        .then(response => response.json())
+      fetch(url, { signal: AbortSignal.timeout(15000) })
+        .then(response => {
+          if (response.status === 404) return {};
+          if (!response.ok) throw new Error(`IntroDB returned HTTP ${response.status}. Please try again.`);
+          return response.json();
+        })
         .then(json => {
           const set = parseExistingSegments(json);
           if (writeCache) state.dedupCacheV2[key] = set;
           resolve(set);
         })
-        .catch(() => {
-          if (writeCache) state.dedupCacheV2[key] = new Set();
-          resolve(new Set());
-        });
+        .catch(reject);
     }
   });
 }
@@ -293,6 +300,9 @@ export async function submitSegment(item, apiKey) {
       gmXhr({
         method: 'POST',
         url: url,
+        timeout: 15000,
+        ontimeout: () => resolve({ success: false, status: 0 }),
+        onabort: () => resolve({ success: false, status: 0 }),
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
@@ -315,6 +325,7 @@ export async function submitSegment(item, apiKey) {
   try {
     const response = await fetch(url, {
       method: 'POST',
+      signal: AbortSignal.timeout(15000),
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': apiKey,
@@ -351,7 +362,7 @@ export async function lookupImdbTitle(imdbId) {
             ontimeout: reject,
           });
         })
-      : await fetch(url).then(response => response.text());
+      : await fetch(url, { signal: AbortSignal.timeout(15000) }).then(response => response.text());
     const result = (JSON.parse(responseText).d || []).find(item => item.id === imdbId);
     return result ? { success: true, title: result.l, year: result.y } : { success: false };
   } catch (_) {

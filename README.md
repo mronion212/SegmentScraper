@@ -20,6 +20,11 @@ Every active provider logs each captured episode with readable timestamps and th
 
 ## Features
 
+- Provider-specific playback-control anchors with automatic relocation when controls appear or rerender
+- Fullscreen-aware panels, keyboard focus restoration, Escape to close, and collapsible API settings
+- Tab-scoped capture recovery after reload, including movies and episode mapping metadata; API credentials are excluded
+- Bounded duplicate-check batches and request timeouts; failed duplicate checks stop export/submission and can be retried
+
 - Captures and normalizes provider-specific segment metadata
 - Automatically looks up IMDb series IDs
 - Exports captured timestamps as JSON
@@ -104,6 +109,16 @@ npm run build
 ```
 
 The generated userscript is written to `SegmentScraper.user.js`.
+
+## Player UI and Recovery Checks
+
+Run `node --test` for regression tests and `node benchmark/serve-player-ui.cjs` for the local browser fixture at `http://127.0.0.1:8096`. The fixture runs 20 DOM checks across the five provider adapters, with controls for rerendering, fallback placement, hidden controls, fullscreen, and a sample JSON preview. `http://127.0.0.1:8096/compact` embeds it in a 360 × 480 viewport. These are synthetic fixtures, not live provider compatibility tests.
+
+Before releasing, verify each provider with a series and, where supported, a movie: open the panel from the playback controls, hide/show the native controls, enter/exit fullscreen, navigate to another title, allow autoplay to advance, and reload after capture. Confirm that the button stays out of the timeline and recovered segments are not captured twice. Cross-origin iframe players and native video-only fullscreen may restrict custom overlays; the top-right fallback remains available in accessible player documents when an anchor is unavailable.
+
+Captured sessions are stored in browser session storage, separately per provider and tab. Reloading the same tab restores captures and common episode-mapping metadata. Closing the tab normally ends that session; this is recovery storage, not a permanent backup. The panel shows the last saved time or a storage failure notice. Use **Clear data** to remove the saved capture; API credentials remain in userscript-manager storage. An update notice preserves the recovery copy.
+
+IntroDB errors and malformed responses are not cached as empty records. Export or submission stops when its duplicate check fails; use the same action again to retry. Requests made by SegmentScraper have timeouts, and duplicate checks for export/submission use batches of at most four. POST submissions are not automatically retried after an uncertain network result; a later submission checks IntroDB again first. The players' own network requests are left under provider control.
 
 ## Releasing an Update
 

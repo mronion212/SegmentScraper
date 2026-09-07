@@ -13,7 +13,7 @@ const PRIME_VIDEO_EPISODE_HEADING_PATTERN = /^\s*(\d+)\s*[.\-:]\s*(.*?)\s*$/;
 const PRIME_VIDEO_POLL_INTERVAL_MS = 250;
 const PRIME_VIDEO_MAX_POLL_ATTEMPTS = 40;
 const PRIME_VIDEO_SELECTION_TTL_MS = 60000;
-const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 1000;
+const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 5000;
 const PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS = 500;
 const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set([
   'SKIP_RECAP',
@@ -654,7 +654,7 @@ export async function preloadPrimeVideoSeasonCatalogs(root = document, options =
     if (readPrimeVideoDetailId(urlKey) === currentDetailId) return;
 
     try {
-      const response = await fetchImpl(urlKey, { credentials: 'same-origin' });
+      const response = await fetchImpl(urlKey, { credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
       if (!response?.ok) throw new Error(`HTTP ${response?.status || 'error'}`);
       const seasonDocument = parseHtml(await response.text());
       const found = scanPrimeVideoEpisodeCatalog(seasonDocument);
@@ -1301,6 +1301,7 @@ export function processPrimeVideoMetadata(data, bodyText, url) {
 export function setupPrimeVideoInterception() {
   ensurePrimeVideoState();
   const scanCatalog = () => {
+    if (document.hidden) return;
     try {
       scanPrimeVideoEpisodeCatalog();
       preloadPrimeVideoSeasonCatalogs();
@@ -1311,9 +1312,10 @@ export function setupPrimeVideoInterception() {
   setInterval(scanCatalog, PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS);
   if (typeof MutationObserver === 'function') {
     let scanTimer = null;
-    const observer = new MutationObserver(() => {
-      if (scanTimer != null) clearTimeout(scanTimer);
-      scanTimer = setTimeout(scanCatalog, PRIME_VIDEO_POLL_INTERVAL_MS);
+    const observer = new MutationObserver(records => {
+      if (records.every(record => record.target.closest?.('[id^="nfe-"]'))) return;
+      if (scanTimer != null) return;
+      scanTimer = setTimeout(() => { scanTimer = null; scanCatalog(); }, PRIME_VIDEO_POLL_INTERVAL_MS);
     });
     observer.observe(document.documentElement || document.body, {
       subtree: true,

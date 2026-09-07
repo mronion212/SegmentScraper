@@ -4,6 +4,39 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+test('large exports limit concurrent duplicate checks to four', async () => {
+  let active = 0;
+  let peak = 0;
+  const bootstrap = loadBootstrap({
+    stateOverrides: { allItems: Array.from({ length:10 }, (_, index) => ({ imdb_id:'ttmovie' + index, media_type:'movie', segment_type:'outro', start_sec:100, end_sec:130 })), tvdbApiKey:'' },
+    existingSegmentsByKey: { get() {
+      active++; peak = Math.max(peak, active);
+      return new Promise(resolve => setTimeout(() => { active--; resolve(new Set()); }, 2));
+    } },
+  });
+  await bootstrap.exportJSON();
+  assert.equal(peak, 4);
+  assert.equal(bootstrap.calls.dedup.length, 10);
+  assert.equal(bootstrap.calls.previews[0].items.length, 10);
+});
+
+test('export and submission stop on unknown duplicate status and allow a later retry', async () => {
+  let fail = true;
+  const bootstrap = loadBootstrap({
+    stateOverrides: { allItems: [{ imdb_id: 'ttmovie', media_type: 'movie', segment_type: 'outro', start_sec: 100, end_sec: 130 }], tvdbApiKey: '' },
+    existingSegmentsByKey: { get() { if (fail) throw new Error('Duplicate check timed out'); return new Set(); } },
+  });
+  await bootstrap.exportJSON();
+  await bootstrap.submitToIntroDB();
+  assert.equal(bootstrap.calls.previews.length, 0);
+  assert.equal(bootstrap.calls.submissions.length, 0);
+  assert.equal(bootstrap.calls.confirmations.length, 0);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('timed out')));
+  fail = false;
+  await bootstrap.exportJSON();
+  assert.equal(bootstrap.calls.previews.length, 1);
+});
+
 function loadBootstrap({ mappingResult, stateOverrides = {}, existingSegmentsByKey = new Map() }) {
   const calls = { map: [], dedup: [], toasts: [], previews: [], submissions: [], confirmations: [], infoLogs: [], warnLogs: [] };
   const state = {

@@ -39,6 +39,7 @@ function loadShowHandler(searches) {
       return searches[title].promise;
     },
     loadExistingSegments: async () => [],
+    scheduleCaptureSave: noop,
     updatePanelTitle: noop,
     updateImdbInput: noop,
     updateCounters: noop,

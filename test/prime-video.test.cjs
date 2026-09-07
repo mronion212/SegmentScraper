@@ -30,6 +30,7 @@ function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
   source += '\nglobalThis.primeExports = { extractPrimeVideoTitleId, processPrimeVideoMetadata, readPrimeVideoPlayerSnapshot, rememberPrimeVideoEpisodeSelection, scanPrimeVideoEpisodeCatalog, preloadPrimeVideoSeasonCatalogs };';
 
   const contextValues = {
+    AbortSignal,
     state,
     document,
     location: document.location,
@@ -220,8 +221,9 @@ test('preloads episode titles from every season link with the same card scanner'
   assert.equal(found, 2);
   assert.deepEqual(plain(requests), [{
     url: `https://www.primevideo.com${seasonTwoHref}`,
-    options: { credentials: 'same-origin' },
+    options: { credentials: 'same-origin', signal: {} },
   }]);
+  assert.ok(requests[0].options.signal instanceof AbortSignal);
   assert.deepEqual(plain(seasonTwoIds.map(id => prime.state.primeVideoTitleMap.get(id))), [
     { season: 2, episode: 1, episodeTitle: 'ATM', showId: 'Example Series' },
     { season: 2, episode: 2, episodeTitle: 'What Happens in Atlantic City', showId: 'Example Series' },

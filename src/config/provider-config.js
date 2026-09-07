@@ -21,8 +21,8 @@ export const PANEL_COLORS = {
   panelBg: '#181818',
   border: '#2c2c2c',
   text: '#fff',
-  textSecondary: '#777',
-  textMuted: '#444',
+  textSecondary: '#b0b0b0',
+  textMuted: '#999',
   accent: '#E50914',
 };
 

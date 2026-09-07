@@ -7,7 +7,7 @@ import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 const CRUNCHYROLL_SKIP_EVENTS_BASE = 'https://static.crunchyroll.com/skip-events/production';
-const CRUNCHYROLL_SCAN_INTERVAL_MS = 750;
+const CRUNCHYROLL_SCAN_INTERVAL_MS = 2000;
 const crunchyrollStructuredDataCache = new WeakMap();
 
 function ensureCrunchyrollState() {
@@ -227,7 +227,7 @@ function loadCrunchyrollSkipEvents(metadata, originalFetch) {
   }
 
   if (originalFetch) {
-    originalFetch(url)
+    originalFetch(url, { signal: AbortSignal.timeout(15000) })
       .then(response => response.status === 404 ? null : response.json())
       .then(data => { if (data) processCrunchyrollEpisode(metadata, data); })
       .catch(error => console.warn('[CRE] Skip-event fetch failed:', error));
@@ -244,6 +244,7 @@ export function setupCrunchyrollInterception() {
   const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
 
   const scanCurrentEpisode = () => {
+    if (document.hidden) return;
     const watchId = getCrunchyrollWatchId(location.pathname);
     if (!watchId || state.crunchyrollRequestedWatchIds?.has(watchId)) return;
     const metadata = readCrunchyrollPageMetadata(document, location.pathname);

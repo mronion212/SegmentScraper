@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SegmentScraper player UI checks</title>
+<style>
+  body { background:#141820; color:#eee; font:16px system-ui; margin:24px; }
+  button,select { font:inherit; padding:8px 12px; margin:4px; }
+  #player { position:relative; background:linear-gradient(120deg,#172438,#293447); height:420px; border-radius:12px; margin-top:20px; }
+  #player:fullscreen { height:100vh; width:100vw; }
+  #controls { position:absolute; bottom:18px; left:20px; right:20px; display:flex; align-items:center; }
+  #controls button { color:white; background:transparent; border:0; }
+  #timeline { position:absolute; bottom:82px; left:20px; right:20px; height:4px; background:#aaa; }
+  #results { white-space:pre-wrap; color:#a9dfbf; }
+</style>
+<h1>Player UI checks</h1>
+<p>Local fixtures only. No streaming requests or submissions are made.</p>
+<label>Provider <select id="provider"><option>netflix</option><option>prime-video</option><option>videoland</option><option>skyshowtime</option><option>crunchyroll</option></select></label>
+<button id="rerender">Rerender controls</button><button id="remove">Remove controls</button><button id="hide">Toggle controls visibility</button>
+<button id="fullscreen">Toggle fullscreen</button><button id="preview">Preview sample JSON</button>
+<pre id="results"></pre>
+<div id="player"><div id="timeline" role="slider" aria-label="Playback position" aria-valuenow="30"></div><div id="controls"></div></div>
+<script type="module">
+import { state } from '/src/core/state.js';
+import { injectBtn } from '/src/ui/button.js';
+import { setProviderName, closePanel, openPanel, showExportPreview } from '/src/ui/panel.js';
+const provider = document.getElementById('provider');
+const player = document.getElementById('player');
+const controls = document.getElementById('controls');
+const results = document.getElementById('results');
+const sample = { imdb_id:'tt1234567', media_type:'movie', segment_type:'outro', start_sec:5400, end_sec:5600 };
+state.allItems = [sample]; state.showIds.add('sample'); state.showTitle = 'Example Movie'; state.mediaType = 'movie'; state.imdbId = sample.imdb_id;
+window.nfePanelCallbacks = { onClose:closePanel, onExport:preview, onSubmit:() => {}, onClear:() => {} };
+function preview() { showExportPreview({ items:[sample], fileCount:1, duplicateCount:0, onConfirm:() => {} }); }
+function anchorFor(name) {
+  const button = document.createElement('button');
+  button.textContent = 'Fullscreen';
+  if (name === 'netflix') button.dataset.uia = 'control-fullscreen-enter';
+  else if (name === 'prime-video') button.className = 'atvwebplayersdk-fullscreen-button';
+  else if (name === 'videoland') button.className = 'vjs-fullscreen-control';
+  else button.dataset.testid = 'fullscreen-button';
+  button.onclick = () => player.requestFullscreen();
+  return button;
+}
+function mount(name) {
+  document.getElementById('nfe-panel')?.remove(); state.panelVisible = false;
+  setProviderName(name);
+  controls.replaceChildren(); controls.style.opacity = '1';
+  const play = document.createElement('button'); play.textContent = 'Play / pause';
+  controls.append(play, anchorFor(name));
+  injectBtn(name);
+}
+const checks = [];
+function check(condition, label) { if (!condition) throw new Error(label); checks.push('PASS ' + label); }
+for (const name of [...provider.options].map(option => option.value)) {
+  controls.replaceChildren(); injectBtn(name);
+  check(document.getElementById('nfe-btn').dataset.placement === 'floating', name + ': fallback without controls');
+  mount(name);
+  check(document.getElementById('nfe-btn').parentElement === controls, name + ': fallback moves into controls');
+  mount(name);
+  check(document.querySelectorAll('#nfe-btn').length === 1, name + ': rerender keeps exactly one button');
+  check(!document.getElementById('timeline').contains(document.getElementById('nfe-btn')), name + ': timeline stays clear');
+}
+mount('netflix'); results.textContent = checks.length + ' checks passed\n' + checks.join('\n');
+if (new URLSearchParams(location.search).has('panel')) openPanel();
+provider.onchange = () => mount(provider.value);
+document.getElementById('rerender').onclick = () => mount(provider.value);
+document.getElementById('remove').onclick = () => { controls.replaceChildren(); injectBtn(provider.value); };
+document.getElementById('hide').onclick = () => { controls.style.opacity = controls.style.opacity === '0' ? '1' : '0'; };
+document.getElementById('fullscreen').onclick = () => document.fullscreenElement ? document.exitFullscreen() : player.requestFullscreen();
+document.getElementById('preview').onclick = preview;
+document.addEventListener('fullscreenchange', () => {
+  injectBtn(provider.value);
+  for (const id of ['nfe-panel','nfe-export-preview']) {
+    const element = document.getElementById(id);
+    if (element) (document.fullscreenElement || document.body).appendChild(element);
+  }
+});
+</script>
+</html>

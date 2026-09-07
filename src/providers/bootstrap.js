@@ -3,6 +3,7 @@
  * The Netflix UI/controls are the single source of truth for every provider.
  */
 
+import { restoreCaptureSession, scheduleCaptureSave, saveCaptureSession, clearCaptureSession } from '../core/capture-session.js';
 import { state, createState, createMediaCacheKey } from '../core/state.js';
 import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
@@ -12,9 +13,9 @@ import { getProviderConfig } from '../config/provider-config.js';
 import { loadIntrodbSettings, saveIntrodbSettings } from '../core/introdb-settings.js';
 import { loadTvdbSettings, saveTvdbSettings, mapSeriesItemsToTvdb } from '../core/tvdb.js';
 
-const BUTTON_IDLE_DELAY_MS = 3000;
+
 let activeProviderConfig = getProviderConfig('netflix');
-let buttonHideTimer;
+
 
 function getItemShowId(item) {
   return item?._showId != null ? String(item._showId) : '';
@@ -56,6 +57,7 @@ function hasExistingSegment(existing, item) {
 }
 
 function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
+  scheduleCaptureSave();
   const normalizedShowId = showId != null ? String(showId) : '';
   const hasTaggedItems = state.allItems.some(item => getItemShowId(item));
   state.allItems.forEach(item => {
@@ -73,6 +75,8 @@ function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
 
 export function setDbStatus(msg) {
   state.dbStatusMsg = msg;
+  const feedback = document.getElementById('nfe-imdb-feedback');
+  if (feedback) feedback.textContent = msg;
   const el = document.getElementById('nfe-imdb-status');
   if (el) el.textContent = `${state.mediaType === 'movie' ? 'Movie' : 'TV'} · IMDb ID: ${state.imdbId || 'Not set'}`;
 }
@@ -146,7 +150,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     updateImdbInput();
     setDbStatus(`Manual override applied · ID: ${imdbOverride}`);
     updateCounters();
-    loadExistingSegments(imdbOverride);
+    loadExistingSegments(imdbOverride).catch(error => setIntrodbStatus(error.message));
     return;
   }
 
@@ -163,7 +167,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
       updateImdbInput();
       setDbStatus(`Found: ${result.imdbId}`);
       updateCounters();
-      loadExistingSegments(result.imdbId);
+      loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
     } else {
       if (!isCurrentShow()) return;
       setDbStatus(`IMDb lookup failed: ${result.error}`);
@@ -176,10 +180,23 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
 }
 
 /** Store extractor output and update the shared counters/toast identically. */
+function capturedSegmentKey(item) {
+  return JSON.stringify([item._showId, item._eid, item.media_type, item.season, item.episode, item.segment_type, item.start_sec, item.end_sec, item.credit_part]);
+}
+
 export function recordExtractedSegments(items) {
   if (state.updateRequired) return;
   if (!items.length) return;
+  const keys = new Set(state.allItems.map(capturedSegmentKey));
+  items = items.filter(item => {
+    const key = capturedSegmentKey(item);
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  });
+  if (!items.length) return;
   state.allItems.push(...items);
+  scheduleCaptureSave();
   state.interceptedCount++;
   updateCounters();
   toast(`+${items.length} timestamps captured · total: ${state.allItems.length}`);
@@ -292,13 +309,39 @@ function normalizeExportItem(item) {
   return isMovieItem(item) ? normalizeMovieExportItem(item) : item;
 }
 
+async function loadCanonicalExisting(mediaKeys) {
+  const results = new Map();
+  // Avoid bursts of hundreds of requests for large captured catalogues.
+  for (let index = 0; index < mediaKeys.length; index += 4) {
+    const batch = await Promise.all(mediaKeys.slice(index, index + 4).map(async key => [
+      key, await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
+    ]));
+    for (const [key, value] of batch) results.set(key, value);
+  }
+  return results;
+}
+
 export async function exportJSON() {
+  if (state.exportInProgress || state.submitInProgress) {
+    toast('An operation is already in progress. Please wait.');
+    return;
+  }
+  state.exportInProgress = true;
+  try { await prepareJSONExport(); }
+  catch (error) {
+    toast(error.message || 'Export failed. Please try again.');
+    setIntrodbStatus('Export stopped. Please try again when the connection is available.');
+  } finally { state.exportInProgress = false; }
+}
+
+async function prepareJSONExport() {
   if (!state.allItems.length) {
     toast('No timestamps yet.');
     return;
   }
   const requiresTvdb = hasTvItems(state.allItems);
   if (requiresTvdb && !state.tvdbApiKey) {
+    revealApiSettings();
     toast('Please enter your own TVDB API key before exporting JSON.');
     setTvdbStatus('No TVDB API key configured');
     return;
@@ -334,10 +377,7 @@ export async function exportJSON() {
       .map(getItemCacheKey)
   )];
   toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
-  const canonicalExisting = new Map(await Promise.all(mediaKeys.map(async key => [
-    key,
-    await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
-  ])));
+  const canonicalExisting = await loadCanonicalExisting(mediaKeys);
 
   const beforeCount = items.length;
   items = items.filter(item => {
@@ -407,18 +447,34 @@ function updateSubmitBtn(label) {
 }
 
 export async function submitToIntroDB() {
+  if (state.exportInProgress || state.submitInProgress) {
+    toast('An operation is already in progress. Please wait.');
+    return;
+  }
+  try { await prepareIntroDBSubmission(); }
+  catch (error) {
+    state.submitInProgress = false;
+    updateSubmitBtn('Submit to IntroDB');
+    toast(error.message || 'Submission failed. Please try again.');
+    setIntrodbStatus('Submission stopped. Please try again when the connection is available.');
+  }
+}
+
+async function prepareIntroDBSubmission() {
   if (!state.allItems.length) {
     toast('No timestamps to submit.');
     return;
   }
   if (!state.introdbApiKey) {
-    toast('Please enter your IntroDB API key in the panel above.');
+    revealApiSettings();
+    toast('Please enter your IntroDB API key in API settings.');
     setIntrodbStatus('No API key configured');
     return;
   }
   const requiresTvdb = hasTvItems(state.allItems);
   if (requiresTvdb && !state.tvdbApiKey) {
-    toast('Please enter your own TVDB API key in the panel above.');
+    revealApiSettings();
+    toast('Please enter your own TVDB API key in API settings.');
     setTvdbStatus('No TVDB API key configured');
     return;
   }
@@ -465,10 +521,7 @@ export async function submitToIntroDB() {
       .map(getItemCacheKey)
   )];
   toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
-  const canonicalExisting = new Map(await Promise.all(mediaKeys.map(async key => [
-    key,
-    await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
-  ])));
+  const canonicalExisting = await loadCanonicalExisting(mediaKeys);
 
   const items = allMapped.filter(item => {
     const key = getItemCacheKey(item);
@@ -526,17 +579,25 @@ export async function submitToIntroDB() {
 }
 
 export function clearData() {
+  if (state.submitInProgress || state.exportInProgress) { toast('Please wait until the current operation finishes.'); return; }
   if (!confirm('Delete all captured timestamps?')) return;
   const introdbApiKey = state.introdbApiKey;
+  const panelVisible = state.panelVisible;
   const { apiKey: tvdbApiKey, pin: tvdbPin } = loadTvdbSettings();
   for (const key of Object.keys(state)) delete state[key];
-  Object.assign(state, createState(activeProviderConfig.name), { introdbApiKey, tvdbApiKey, tvdbPin });
+  Object.assign(state, createState(activeProviderConfig.name), { introdbApiKey, tvdbApiKey, tvdbPin, panelVisible });
+  clearCaptureSession();
   updateCounters();
   updatePanelTitle();
   setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
   setIntrodbStatus('');
   updateImdbInput();
   toast('Data cleared');
+}
+
+function revealApiSettings() {
+  const settings = document.getElementById('nfe-settings');
+  if (settings) settings.open = true;
 }
 
 function configurePanelCallbacks() {
@@ -553,7 +614,7 @@ function configurePanelCallbacks() {
       state.dedupCacheV2 = {};
       setDbStatus(`ID saved: ${value}`);
       updateCounters();
-      loadExistingSegments(value);
+      loadExistingSegments(value).catch(error => setIntrodbStatus(error.message));
       lookupImdbTitle(value).then(result => {
         if (!result.success) return;
         state.showTitle = result.title;
@@ -576,7 +637,7 @@ function configurePanelCallbacks() {
           updateImdbInput();
           setDbStatus(`Found: ${result.imdbId}`);
           updateCounters();
-          loadExistingSegments(result.imdbId);
+          loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
         } else {
           setDbStatus(`IMDb lookup failed: ${result.error}`);
         }
@@ -615,6 +676,7 @@ function configurePanelCallbacks() {
 
 function setupPanelHandler() {
   document.addEventListener('click', event => {
+    if (event.target.closest?.('#nfe-export-preview')) return;
     const panel = document.getElementById('nfe-panel');
     const button = document.getElementById('nfe-btn');
     if (panel && state.panelVisible && !panel.contains(event.target) && !button?.contains(event.target)) closePanel();
@@ -622,88 +684,32 @@ function setupPanelHandler() {
 }
 
 function syncVisibility() {
-  if (!state.panelVisible) return;
-  if (state.updateRequired) {
-    const panel = document.getElementById('nfe-panel');
-    if (panel) {
-      panel.style.opacity = '1';
-      panel.style.pointerEvents = 'auto';
-    }
-    return;
+  const panel = document.getElementById("nfe-panel");
+  if (panel && state.panelVisible) {
+    panel.style.opacity = "1";
+    panel.style.pointerEvents = "auto";
   }
-  const controls =
-    document.querySelector('[data-uia="controls-standard"]') ||
-    document.querySelector('[class*="PlayerControls"]') ||
-    document.querySelector('.watch-video--bottom-controls-container');
-  if (!controls) return;
-  const panel = document.getElementById('nfe-panel');
-  if (!panel) return;
-  const visible = parseFloat(getComputedStyle(controls).opacity) > 0.05;
-  const opacity = visible ? '1' : '0';
-  const pointerEvents = visible ? 'auto' : 'none';
-  if (panel.style.opacity !== opacity) panel.style.opacity = opacity;
-  if (panel.style.pointerEvents !== pointerEvents) panel.style.pointerEvents = pointerEvents;
-}
-
-function setButtonVisibility(visible) {
-  const button = document.getElementById('nfe-btn');
-  if (!button) return;
-  const opacity = visible ? '0.85' : '0';
-  const pointerEvents = visible ? 'auto' : 'none';
-  if (button.style.opacity !== opacity) button.style.opacity = opacity;
-  if (button.style.pointerEvents !== pointerEvents) button.style.pointerEvents = pointerEvents;
-}
-
-function resetButtonIdleTimer() {
-  clearTimeout(buttonHideTimer);
-  setButtonVisibility(true);
-  buttonHideTimer = setTimeout(() => {
-    buttonHideTimer = null;
-    setButtonVisibility(false);
-  }, BUTTON_IDLE_DELAY_MS);
-}
-
-function setupControlVisibilityHandler() {
-  let framePending = false;
-  let trailingSyncTimer = null;
-  const scheduleFrame = typeof requestAnimationFrame === 'function'
-    ? requestAnimationFrame
-    : callback => setTimeout(callback, 0);
-
-  document.addEventListener('mousemove', () => {
-    if (framePending) return;
-    framePending = true;
-    scheduleFrame(() => {
-      framePending = false;
-      resetButtonIdleTimer();
-      syncVisibility();
-      if (trailingSyncTimer != null) clearTimeout(trailingSyncTimer);
-      trailingSyncTimer = setTimeout(() => {
-        trailingSyncTimer = null;
-        syncVisibility();
-      }, 250);
-    });
-  }, true);
 }
 
 export function bootstrapProvider({
   providerName,
   setupInterception,
-  isPlayerPage = () => true,
+  isPlayerPage = () => Boolean(document.querySelector('video')),
 }) {
   activeProviderConfig = getProviderConfig(providerName);
   Object.assign(state, createState(activeProviderConfig.name));
+  restoreCaptureSession(providerName);
+  window.addEventListener('pagehide', saveCaptureSession);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) saveCaptureSession(); });
   loadIntrodbSettings();
   loadTvdbSettings();
   setProviderName(providerName);
   configurePanelCallbacks();
   setupInterception();
   setupPanelHandler();
-  setupControlVisibilityHandler();
   checkForRequiredUpdate().then(result => {
     if (!result.required) return;
-    state.allItems = [];
-    state.interceptedCount = 0;
+    saveCaptureSession();
     const showNotice = () => {
       if (document.body) showRequiredUpdate();
       else setTimeout(showNotice, 50);
@@ -712,31 +718,50 @@ export function bootstrapProvider({
   });
 
   let lastPath = location.pathname;
-  setInterval(() => {
+  let refreshTimer = null;
+  const refreshControls = () => {
+    refreshTimer = null;
+    if (!document.body) return;
     if (state.updateRequired) {
-      if (!document.getElementById('nfe-panel') && document.body) showRequiredUpdate();
-      syncVisibility();
+      if (!document.getElementById('nfe-panel')) showRequiredUpdate();
       return;
     }
-
     const inPlayer = isPlayerPage();
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
-      document.getElementById('nfe-btn')?.remove();
+      scheduleCaptureSave();
       if (!inPlayer) {
         document.getElementById('nfe-panel')?.remove();
         state.panelVisible = false;
       }
     }
-    if (inPlayer) {
-      const buttonMissing = !document.getElementById('nfe-btn');
-      if (buttonMissing) {
-        injectBtn(providerName, getNextEpBtn);
-        resetButtonIdleTimer();
-      }
-      syncVisibility();
+    if (inPlayer) injectBtn(providerName, getNextEpBtn);
+    else document.getElementById('nfe-btn')?.remove();
+    const host = document.fullscreenElement || document.body;
+    for (const id of ['nfe-panel', 'nfe-export-preview', 'nfe-toast']) {
+      const element = document.getElementById(id);
+      if (element && element.parentElement !== host) host.appendChild(element);
     }
-  }, 1000);
+    syncVisibility();
+  };
+  const scheduleRefresh = () => {
+    if (refreshTimer === null) refreshTimer = setTimeout(refreshControls, 100);
+  };
+  const observePlayer = () => {
+    refreshControls();
+    if (typeof MutationObserver !== 'function') return;
+    const observer = new MutationObserver(records => {
+      if (records.every(record => record.target.closest?.('[id^="nfe-"]'))) return;
+      scheduleRefresh();
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  };
+  if (document.documentElement) observePlayer();
+  else document.addEventListener('DOMContentLoaded', observePlayer, { once: true });
+  document.addEventListener('fullscreenchange', refreshControls);
+  window.addEventListener('popstate', scheduleRefresh);
+  // Backstop for history changes that do not mutate the player DOM.
+  setInterval(() => { if (!document.hidden) refreshControls(); }, 5000);
 
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
   win.__segmentScraper = {

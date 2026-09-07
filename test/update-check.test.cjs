@@ -5,6 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const currentVersion = require('../package.json').version;
+const newerVersion = (Number(currentVersion.split('.')[0]) + 1) + '.0.0';
 
 function loadUpdateCheck() {
   const state = {};
@@ -46,13 +47,13 @@ test('a newer GitHub version enables the required-update state', async () => {
   const loaded = loadUpdateCheck();
   const result = await loaded.checkForRequiredUpdate(options => options.onload({
     status: 200,
-    responseText: '// @version      1.8.0',
+    responseText: '// @version      ' + newerVersion,
   }));
 
   assert.equal(result.required, true);
   assert.equal(loaded.state.updateRequired, true);
   assert.equal(loaded.state.updateStatus, 'required');
-  assert.equal(loaded.state.latestVersion, '1.8.0');
+  assert.equal(loaded.state.latestVersion, newerVersion);
   assert.equal(loaded.state.currentVersion, currentVersion);
 });
 

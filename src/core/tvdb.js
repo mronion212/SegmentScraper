@@ -67,6 +67,7 @@ function tvdbRequest({ method = 'GET', path, token = '', data }) {
   }
 
   return fetch(url, {
+    signal: AbortSignal.timeout(15000),
     method,
     headers,
     body: data === undefined ? undefined : JSON.stringify(data),
