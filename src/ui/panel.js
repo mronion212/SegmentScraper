@@ -196,7 +196,7 @@ export function createPanel() {
              padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
              transition:background 0.15s"
       onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">
-      Download JSON(s)
+      Show timestamps
     </button>
 
      <details id="nfe-settings"><summary>API settings</summary>
@@ -446,7 +446,7 @@ export function toast(msg) {
  * Show the export data in a modal before files are downloaded.
  * The preview deliberately uses textContent so captured metadata cannot inject HTML.
  */
-export function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
+export function showExportPreview(view) {
   document.getElementById('nfe-export-preview')?.remove();
 
   const { colors: providerColors, name: providerName } = getProviderConfig(currentProvider);
@@ -467,18 +467,11 @@ export function showExportPreview({ items, fileCount, duplicateCount, onConfirm 
   `;
 
   const heading = document.createElement('h2');
-  heading.textContent = `Review ${providerName} JSON export`;
+  heading.textContent = `${providerName} timestamps`;
   heading.style.cssText = `margin:0 0 6px; color:${providerColors.primary}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
-  const timestampLabel = items.length === 1 ? 'timestamp' : 'timestamps';
-  const fileLabel = fileCount === 1 ? 'file' : 'files';
-  const duplicateSummary = duplicateCount
-    ? `; ${duplicateCount} ${duplicateCount === 1 ? 'duplicate' : 'duplicates'} excluded`
-    : '';
-  summary.textContent = `${items.length} ${timestampLabel} in ${fileCount} ${fileLabel}${duplicateSummary}.`;
   summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
-  const preview = document.createElement('pre');
-  preview.textContent = JSON.stringify({ items }, null, 2);
+  const preview = document.createElement('div');
   preview.style.cssText = `
     overflow:auto; flex:1; min-height:180px; margin:0 0 14px; padding:12px; border-radius:8px;
     background:${colors.panelBg}; color:${colors.text}; box-sizing:border-box;
@@ -487,32 +480,69 @@ export function showExportPreview({ items, fileCount, duplicateCount, onConfirm 
   const actions = document.createElement('div');
   actions.style.cssText = 'display:flex; justify-content:flex-end; gap:8px;';
   const cancel = document.createElement('button');
-  cancel.textContent = 'Cancel';
+  cancel.textContent = 'Close';
   cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
   const confirm = document.createElement('button');
   confirm.textContent = 'Download JSON';
   confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
 
+  const clock = value => {
+    if (value == null || !Number.isFinite(Number(value))) return '—';
+    const ms = Math.round(Number(value) * 1000);
+    const seconds = Math.floor(ms / 1000);
+    return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
+  };
+  const update = next => {
+    view = next;
+    const rows = view.rows || [];
+    summary.textContent = `${rows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${view.duplicateCount} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
+    preview.replaceChildren();
+    for (const row of rows) {
+      const item = row.item;
+      const movie = String(item.media_type || item._mediaType || '').toLowerCase() === 'movie';
+      const entry = document.createElement('div');
+      entry.style.cssText = `padding:10px 0; border-bottom:1px solid ${colors.border}; line-height:1.6;`;
+      const label = document.createElement('strong');
+      label.textContent = row.status;
+      label.style.color = row.status === 'NEW' ? '#69d89b' : colors.textSecondary;
+      const details = document.createElement('div');
+      details.textContent = `${item.imdb_id || 'IMDb pending'} · ${movie ? 'Movie' : `Provider S${item.season}E${item.episode}`} ${item._episodeTitle || ''}\n${item.segment_type}${item.credit_part ? ` (${item.credit_part})` : ''} · ${clock(item.start_sec)} → ${clock(item.end_sec)} (${item.start_sec}–${item.end_sec} sec)`;
+      if (row.canonical && !movie) details.textContent += `\nTVDB S${row.canonical.season}E${row.canonical.episode}`;
+      if (row.reason) details.textContent += `\n${row.reason}`;
+      for (const range of row.existingRanges || []) {
+        details.textContent += `\nIntroDB: ${clock(range.startSec)} → ${clock(range.endSec)}`;
+      }
+      entry.append(label, details);
+      preview.append(entry);
+    }
+    confirm.disabled = view.checking || !view.items.length || !view.onConfirm;
+    confirm.style.opacity = confirm.disabled ? '.45' : '1';
+    confirm.style.cursor = confirm.disabled ? 'not-allowed' : 'pointer';
+    confirm.textContent = view.checking ? 'Checking…' : `Download JSON (${view.fileCount})`;
+  };
+  update(view);
+
   const previousFocus = document.activeElement;
   dialog.setAttribute('role', 'dialog');
   dialog.setAttribute('aria-modal', 'true');
-  dialog.setAttribute('aria-label', 'Review JSON export');
+  dialog.setAttribute('aria-label', 'Show timestamps');
   const close = () => { overlay.remove(); if (previousFocus?.isConnected) previousFocus.focus(); };
   overlay.addEventListener('keydown', event => {
     event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); close(); }
     if (event.key === 'Tab') {
       event.preventDefault();
-      (document.activeElement === confirm ? cancel : confirm).focus();
+      (confirm.disabled || document.activeElement === confirm ? cancel : confirm).focus();
     }
   });
   cancel.addEventListener('click', close);
   overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  confirm.addEventListener('click', () => { close(); onConfirm(); });
+  confirm.addEventListener('click', () => { if (!confirm.disabled) view.onConfirm(); });
   actions.append(cancel, confirm);
   dialog.append(heading, summary, preview, actions);
   overlay.append(dialog);
   overlay.addEventListener('click', event => event.stopPropagation());
   (document.fullscreenElement || document.body).append(overlay);
-  confirm.focus();
+  cancel.focus();
+  return update;
 }

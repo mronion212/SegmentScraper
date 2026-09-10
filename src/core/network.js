@@ -170,6 +170,15 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
   
   const [imdbId, seasonOrMediaType, episode] = key.split('|');
   const isMovie = seasonOrMediaType === 'movie';
+  if (!isMovie && (!/^\d+$/.test(seasonOrMediaType || '') || Number(seasonOrMediaType) < 1
+    || !/^\d+$/.test(episode || '') || Number(episode) < 1)) {
+    throw new Error(`IntroDB cannot check ${imdbId} S${seasonOrMediaType}E${episode}: season and episode must be positive integers.`);
+  }
+  const describeHttpError = (status, body) => {
+    let detail = '';
+    try { const json = JSON.parse(body); detail = typeof json.error === 'string' ? json.error.slice(0, 200) : ''; } catch (_) {}
+    return new Error(`IntroDB duplicate check returned HTTP ${status} for ${imdbId} ${isMovie ? 'movie' : `S${seasonOrMediaType}E${episode}`}${detail ? `: ${detail}` : '.'}`);
+  };
   const url = isMovie
     ? `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}`
     : `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(seasonOrMediaType)}&episode=${encodeURIComponent(episode)}`;
@@ -246,7 +255,7 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
               if (writeCache) state.dedupCacheV2[key] = new Set();
               resolve(new Set());
             } else {
-              reject(new Error(`IntroDB duplicate check returned HTTP ${response.status}. Please try again.`));
+              reject(describeHttpError(response.status, response.responseText));
             }
           } catch (_) {
             reject(new Error('IntroDB returned an invalid response. Please try again.'));
@@ -259,9 +268,9 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
     } else {
       // Fallback to fetch (will likely fail due to CORS)
       fetch(url, { signal: AbortSignal.timeout(15000) })
-        .then(response => {
+        .then(async response => {
           if (response.status === 404) return {};
-          if (!response.ok) throw new Error(`IntroDB returned HTTP ${response.status}. Please try again.`);
+          if (!response.ok) throw describeHttpError(response.status, await response.text());
           return response.json();
         })
         .then(json => {

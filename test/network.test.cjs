@@ -6,6 +6,21 @@ const vm = require('node:vm');
 
 const plain = value => JSON.parse(JSON.stringify(value));
 
+test('invalid episode numbers are rejected before making an HTTP request', async () => {
+  let requests = 0;
+  const network = loadNetwork(() => { requests++; });
+  for (const key of ['tt14507354|0|1', 'tt14507354|1|0', 'tt14507354|null|1', 'tt14507354|1|undefined']) {
+    await assert.rejects(network.loadExistingSegmentsForEpisode(key), /positive integers/);
+  }
+  assert.equal(requests, 0);
+});
+
+test('HTTP 400 identifies the failing IMDb ID and episode and never caches it as absent', async () => {
+  const network = loadNetwork(request => request.onload({ status: 400, responseText: '{"error":"Invalid query params."}' }));
+  await assert.rejects(network.loadExistingSegmentsForEpisode('tt14507354|1|3'), /HTTP 400 for tt14507354 S1E3: Invalid query params/);
+  assert.equal(network.state.dedupCacheV2['tt14507354|1|3'], undefined);
+});
+
 test('failed duplicate checks reject without caching an empty result and can be retried', async () => {
   let failing = true;
   const network = loadNetwork(request => {

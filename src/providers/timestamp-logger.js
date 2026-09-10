@@ -43,5 +43,12 @@ export function logCapturedTimestamps({
       end_sec: item.end_sec,
     })),
   };
-  console.info(`[${prefix}] Captured timestamps · ${showTitle || 'Unknown series'} · ${episodeLabel}`, details);
+  // Keep capture logs in the normal Console log stream. Some DevTools setups
+  // hide the Info level by default, which made the timestamps look missing
+  // even though Prime had captured them successfully.
+  const writeLog = typeof console !== 'undefined' && typeof console.log === 'function'
+    ? console.log.bind(console)
+    : console.info.bind(console);
+  const times = details.segments.map(segment => `${segment.type}${segment.credit_part ? ` (${segment.credit_part})` : ''}: ${segment.start} → ${segment.end}`).join(' · ');
+  writeLog(`[${prefix}] Captured timestamps · ${showTitle || 'Unknown series'} · ${episodeLabel} · ${times}`, details);
 }

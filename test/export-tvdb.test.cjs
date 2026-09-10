@@ -28,13 +28,15 @@ test('export and submission stop on unknown duplicate status and allow a later r
   });
   await bootstrap.exportJSON();
   await bootstrap.submitToIntroDB();
-  assert.equal(bootstrap.calls.previews.length, 0);
+  assert.equal(bootstrap.calls.previews.length, 1);
+  assert.equal(bootstrap.calls.previews[0].items.length, 0);
+  assert.equal(bootstrap.calls.previews[0].rows[0].status, 'Unavailable');
   assert.equal(bootstrap.calls.submissions.length, 0);
   assert.equal(bootstrap.calls.confirmations.length, 0);
   assert.ok(bootstrap.calls.toasts.some(message => message.includes('timed out')));
   fail = false;
   await bootstrap.exportJSON();
-  assert.equal(bootstrap.calls.previews.length, 1);
+  assert.equal(bootstrap.calls.previews.length, 2);
 });
 
 function loadBootstrap({ mappingResult, stateOverrides = {}, existingSegmentsByKey = new Map() }) {
@@ -128,6 +130,57 @@ function loadBootstrap({ mappingResult, stateOverrides = {}, existingSegmentsByK
   };
 }
 
+test('overview retains originals and marks canonical duplicates, new items and failed checks separately', async () => {
+  const allItems = [1, 2, 3, 4].map(episode => ({
+    _eid: `episode-${episode}`, imdb_id: 'tt14507354', season: 2, episode,
+    segment_type: 'outro', start_sec: 100, end_sec: 120,
+  }));
+  const bootstrap = loadBootstrap({
+    stateOverrides: { allItems },
+    mappingResult: items => ({ success: true, method: 'title',
+      items: items.slice(0, 3).map(item => ({ ...item, season: 1 })),
+      stats: {},
+    }),
+    existingSegmentsByKey: { get(key) {
+      if (key.endsWith('|3')) throw new Error('HTTP 400 for tt14507354 S1E3');
+      return key.endsWith('|1') ? new Set(['outro']) : new Set();
+    } },
+  });
+  await bootstrap.exportJSON();
+  const view = bootstrap.calls.previews[0];
+  assert.deepEqual(Array.from(view.rows, row => row.status), ['In IntroDB', 'NEW', 'Unavailable', 'Unavailable']);
+  assert.equal(view.rows[0].item.season, 2);
+  assert.equal(view.rows[0].canonical.season, 1);
+  assert.match(view.rows[2].reason, /HTTP 400/);
+  assert.equal(view.items.length, 1);
+  assert.equal(view.items[0].episode, 2);
+  assert.equal(view.duplicateCount, 1);
+  assert.equal(view.checking, false);
+});
+
+test('overview is available without a TVDB API key', async () => {
+  const bootstrap = loadBootstrap({ stateOverrides: { tvdbApiKey: '' } });
+  await bootstrap.exportJSON();
+  const view = bootstrap.calls.previews[0];
+  assert.equal(view.rows.length, 2);
+  assert.equal(view.items.length, 0);
+  assert.equal(view.onConfirm, undefined);
+  assert.equal(view.checking, false);
+  assert.match(view.message, /key missing/);
+});
+
+test('all existing timestamps remain visible without a download', async () => {
+  const bootstrap = loadBootstrap({
+    stateOverrides: { allItems: [{ imdb_id: 'tt14507354', media_type: 'movie', segment_type: 'outro', start_sec: 100, end_sec: 120 }] },
+    existingSegmentsByKey: { get: () => new Set(['outro']) },
+  });
+  await bootstrap.exportJSON();
+  const view = bootstrap.calls.previews[0];
+  assert.equal(view.rows[0].status, 'In IntroDB');
+  assert.equal(view.items.length, 0);
+  assert.equal(view.onConfirm, undefined);
+});
+
 test('JSON export uses TVDB mapping and canonical episode numbers before deduplication', async () => {
   const mappedItem = { imdb_id: 'tt123', segment_type: 'intro', season: 1, episode: 2, start_sec: 1, end_sec: 7 };
   const bootstrap = loadBootstrap({
@@ -195,12 +248,14 @@ test('JSON export keeps separate SkyShowtime series and uses each provider catal
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items.map(item => item.imdb_id))), ['tt111', 'tt222']);
 });
 
-test('JSON export produces no preview when TVDB rejects the series mapping', async () => {
+test('timestamps remain visible when TVDB rejects the series mapping', async () => {
   const bootstrap = loadBootstrap({ mappingResult: { success: false, reason: 'episode titles are missing' } });
 
   await bootstrap.exportJSON();
 
-  assert.equal(bootstrap.calls.previews.length, 0);
+  assert.equal(bootstrap.calls.previews.length, 1);
+  assert.equal(bootstrap.calls.previews[0].rows.length, 2);
+  assert.equal(bootstrap.calls.previews[0].items.length, 0);
   assert.ok(bootstrap.calls.toasts.some(message => message.includes('nothing was exported')));
 });
 

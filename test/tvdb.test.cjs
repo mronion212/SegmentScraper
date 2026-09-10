@@ -212,7 +212,7 @@ test('matches tagged Videoland episodes against both English and Dutch TVDB titl
   ]);
 });
 
-test('requires an exact title for tagged Videoland items even when episode counts and numbers match', async () => {
+test('allows equal-count order mapping unless exact title matching is explicitly requested', async () => {
   const episodes = [{ id: 11, seasonNumber: 1, number: 1, name: 'TVDB title' }];
   const videoland = loadTvdb({ episodes });
   const videolandItem = { ...segment(1, 1, 'Series title'), _tvdbRequireTitleMatch: true };

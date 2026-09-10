@@ -207,8 +207,9 @@ export function isAlreadyInIntroDB(item) {
   return hasExistingSegment(state.dedupCacheV2[key], item);
 }
 
-async function mapCapturedItemsWithTvdb(action) {
-  const capturedItems = state.allItems.slice();
+const overviewSource = Symbol('overviewSource');
+
+async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.slice()) {
   const pendingItems = capturedItems.filter(item => !item.imdb_id || item.imdb_id === 'IMDB_PENDING');
   if (pendingItems.length) {
     toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
@@ -339,106 +340,167 @@ async function prepareJSONExport() {
     toast('No timestamps yet.');
     return;
   }
-  const requiresTvdb = hasTvItems(state.allItems);
-  if (requiresTvdb && !state.tvdbApiKey) {
-    revealApiSettings();
-    toast('Please enter your own TVDB API key before exporting JSON.');
-    setTvdbStatus('No TVDB API key configured');
-    return;
-  }
-  if (state.submitInProgress) {
-    toast('Submission in progress, please wait...');
-    return;
-  }
-
-  toast(requiresTvdb ? 'Validating JSON export against TVDB...' : 'Preparing movie JSON export...');
-  const mapped = await mapCapturedItemsWithTvdb('JSON export');
-  const mappedItems = mapped.items;
-  let items = filterShortOutputSegments(mappedItems);
-  const shortSegmentCount = mappedItems.length - items.length;
-  if (shortSegmentCount > 0) {
-    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
-  }
-  if (!items.length) {
-    if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+  const capturedItems = state.allItems.map((item, index) => ({ ...item, [overviewSource]: index }));
+  const view = {
+    items: [], fileCount: 0, duplicateCount: 0, checking: true,
+    rows: capturedItems.map(item => ({ item, status: 'Checking', reason: '' })),
+    message: 'Checking TVDB mapping and IntroDB…',
+  };
+  const refresh = showExportPreview(view);
+  try {
+    const requiresTvdb = hasTvItems(state.allItems);
+    if (requiresTvdb && !state.tvdbApiKey) {
+      revealApiSettings();
+      toast('Please enter your own TVDB API key before exporting JSON.');
+      setTvdbStatus('No TVDB API key configured');
+      view.message = 'TVDB API key missing. Timestamps remain available; JSON download is disabled.';
       return;
     }
-    const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
-    const noMappingMessage = hasTvItems(mapped.capturedItems)
-      ? 'No series has a reliable TVDB episode mapping; nothing was exported.'
-      : 'No movie has a usable IMDb ID; nothing was exported.';
-    toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
-    return;
-  }
-
-  const mediaKeys = [...new Set(
-    items
-      .map(getItemCacheKey)
-  )];
-  toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
-  const canonicalExisting = await loadCanonicalExisting(mediaKeys);
-
-  const beforeCount = items.length;
-  items = items.filter(item => {
-    const key = getItemCacheKey(item);
-    return !hasExistingSegment(canonicalExisting.get(key), item);
-  });
-  const duplicateCount = beforeCount - items.length;
-  if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
-  if (!items.length) {
-    toast('Nothing left to export after removing duplicates.');
-    return;
-  }
-
-  const exportItems = items.map(normalizeExportItem);
-  const groups = new Map();
-  for (const item of exportItems) {
-    const key = item.imdb_id || 'no_id';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
-  }
-
-  const files = [];
-  const maxItemsPerFile = 100;
-  for (const [imdbId, groupItems] of groups) {
-    const total = Math.ceil(groupItems.length / maxItemsPerFile);
-    for (let index = 0; index < total; index++) {
-      files.push({
-        imdbId,
-        part: total > 1 ? `_part${index + 1}of${total}` : '',
-        data: groupItems.slice(index * maxItemsPerFile, (index + 1) * maxItemsPerFile),
-      });
-    }
-  }
-
-  let downloaded = 0;
-  function downloadNext(index) {
-    if (index >= files.length) {
-      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+    if (state.submitInProgress) {
+      toast('Submission in progress, please wait...');
       return;
     }
-    const file = files[index];
-    const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = Object.assign(document.createElement('a'), {
-      href: url,
-      download: `timestamps_${file.imdbId}${file.part}.json`,
+
+    toast(requiresTvdb ? 'Validating JSON export against TVDB...' : 'Preparing movie JSON export...');
+    const mapped = await mapCapturedItemsWithTvdb('JSON export', capturedItems);
+    const mappedItems = mapped.items;
+    for (const row of view.rows) {
+      row.status = 'Unavailable';
+      row.reason = !row.item.imdb_id || row.item.imdb_id === 'IMDB_PENDING'
+        ? 'Missing IMDb ID' : 'No reliable TVDB mapping / excluded special';
+    }
+    for (const item of mappedItems) {
+      const row = view.rows[item[overviewSource]];
+      if (row) {
+        row.canonical = item;
+        row.status = 'Checking';
+        row.reason = '';
+        if (!filterShortOutputSegments([item]).length) {
+          row.status = 'Unavailable';
+          row.reason = 'Invalid timestamp or segment shorter than 5 seconds';
+        }
+      }
+    }
+    let items = filterShortOutputSegments(mappedItems);
+    const shortSegmentCount = mappedItems.length - items.length;
+    if (shortSegmentCount > 0) {
+      toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
+    }
+    if (!items.length) {
+      if (mappedItems.length && shortSegmentCount === mappedItems.length) {
+        toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+        return;
+      }
+      const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
+      const noMappingMessage = hasTvItems(mapped.capturedItems)
+        ? 'No series has a reliable TVDB episode mapping; nothing was exported.'
+        : 'No movie has a usable IMDb ID; nothing was exported.';
+      toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
+      return;
+    }
+
+    const mediaKeys = [...new Set(
+      items
+        .map(getItemCacheKey)
+    )];
+    toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
+    const canonicalExisting = new Map();
+    for (let index = 0; index < mediaKeys.length; index += 4) {
+      await Promise.all(mediaKeys.slice(index, index + 4).map(async key => {
+        try {
+          canonicalExisting.set(key, await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }));
+        } catch (error) {
+          canonicalExisting.set(key, { error: error?.message || 'IntroDB duplicate check failed.' });
+        }
+      }));
+    }
+
+    items = items.filter(item => {
+      const key = getItemCacheKey(item);
+      const existing = canonicalExisting.get(key);
+      const row = view.rows[item[overviewSource]];
+      const failed = Boolean(existing.error);
+      const duplicate = !failed && hasExistingSegment(existing, item);
+      if (row) {
+        row.status = failed ? 'Unavailable' : duplicate ? 'In IntroDB' : 'NEW';
+        row.reason = failed ? existing.error : '';
+        row.existingRanges = failed ? [] : existing.rangesByType?.get(item.segment_type) || [];
+      }
+      if (failed) toast(existing.error);
+      return !failed && !duplicate;
     });
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    downloaded++;
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setTimeout(() => downloadNext(index + 1), 400);
-  }
+    const duplicateCount = view.rows.filter(row => row.status === 'In IntroDB').length;
+    view.duplicateCount = duplicateCount;
+    if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
+    if (!items.length) {
+      toast('Nothing left to export after removing duplicates.');
+      return;
+    }
 
-  showExportPreview({
-    items: exportItems,
-    fileCount: files.length,
-    duplicateCount,
-    onConfirm: () => downloadNext(0),
-  });
+    const exportItems = items.map(normalizeExportItem);
+    const groups = new Map();
+    for (const item of exportItems) {
+      const key = item.imdb_id || 'no_id';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+
+    const files = [];
+    const maxItemsPerFile = 100;
+    for (const [imdbId, groupItems] of groups) {
+      const total = Math.ceil(groupItems.length / maxItemsPerFile);
+      for (let index = 0; index < total; index++) {
+        files.push({
+          imdbId,
+          part: total > 1 ? `_part${index + 1}of${total}` : '',
+          data: groupItems.slice(index * maxItemsPerFile, (index + 1) * maxItemsPerFile),
+        });
+      }
+    }
+
+    let downloaded = 0;
+    function downloadNext(index) {
+      if (index >= files.length) {
+        toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+        return;
+      }
+      const file = files[index];
+      const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = Object.assign(document.createElement('a'), {
+        href: url,
+        download: `timestamps_${file.imdbId}${file.part}.json`,
+      });
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      downloaded++;
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTimeout(() => downloadNext(index + 1), 400);
+    }
+
+    Object.assign(view, {
+      items: exportItems,
+      fileCount: files.length,
+      duplicateCount,
+      onConfirm: () => downloadNext(0),
+    });
+  } catch (error) {
+    view.message = error.message || 'Validation failed. JSON download is disabled.';
+    toast(view.message);
+  } finally {
+    view.checking = false;
+    for (const row of view.rows) {
+      if (row.status === 'Checking') {
+        row.status = 'Unavailable';
+        row.reason = view.message || 'Validation could not be completed';
+      }
+    }
+    view.message = view.items.length
+      ? 'Only verified NEW timestamps are included in the JSON download.'
+      : 'JSON download unavailable. ' + (view.message.includes('Checking') ? 'No verified new timestamps.' : view.message);
+    refresh?.(view);
+  }
 }
 
 function updateSubmitBtn(label) {

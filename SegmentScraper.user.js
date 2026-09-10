@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
-// @version      1.8.4
+// @version      1.8.5
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -36,7 +36,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const SEGMENTSCRAPER_VERSION = "1.8.4";
+  const SEGMENTSCRAPER_VERSION = "1.8.5";
   const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
@@ -447,6 +447,15 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
   
   const [imdbId, seasonOrMediaType, episode] = key.split('|');
   const isMovie = seasonOrMediaType === 'movie';
+  if (!isMovie && (!/^\d+$/.test(seasonOrMediaType || '') || Number(seasonOrMediaType) < 1
+    || !/^\d+$/.test(episode || '') || Number(episode) < 1)) {
+    throw new Error(`IntroDB cannot check ${imdbId} S${seasonOrMediaType}E${episode}: season and episode must be positive integers.`);
+  }
+  const describeHttpError = (status, body) => {
+    let detail = '';
+    try { const json = JSON.parse(body); detail = typeof json.error === 'string' ? json.error.slice(0, 200) : ''; } catch (_) {}
+    return new Error(`IntroDB duplicate check returned HTTP ${status} for ${imdbId} ${isMovie ? 'movie' : `S${seasonOrMediaType}E${episode}`}${detail ? `: ${detail}` : '.'}`);
+  };
   const url = isMovie
     ? `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}`
     : `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(seasonOrMediaType)}&episode=${encodeURIComponent(episode)}`;
@@ -523,7 +532,7 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
               if (writeCache) state.dedupCacheV2[key] = new Set();
               resolve(new Set());
             } else {
-              reject(new Error(`IntroDB duplicate check returned HTTP ${response.status}. Please try again.`));
+              reject(describeHttpError(response.status, response.responseText));
             }
           } catch (_) {
             reject(new Error('IntroDB returned an invalid response. Please try again.'));
@@ -536,9 +545,9 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
     } else {
       // Fallback to fetch (will likely fail due to CORS)
       fetch(url, { signal: AbortSignal.timeout(15000) })
-        .then(response => {
+        .then(async response => {
           if (response.status === 404) return {};
-          if (!response.ok) throw new Error(`IntroDB returned HTTP ${response.status}. Please try again.`);
+          if (!response.ok) throw describeHttpError(response.status, await response.text());
           return response.json();
         })
         .then(json => {
@@ -1870,7 +1879,14 @@ function logCapturedTimestamps({
       end_sec: item.end_sec,
     })),
   };
-  console.info(`[${prefix}] Captured timestamps · ${showTitle || 'Unknown series'} · ${episodeLabel}`, details);
+  // Keep capture logs in the normal Console log stream. Some DevTools setups
+  // hide the Info level by default, which made the timestamps look missing
+  // even though Prime had captured them successfully.
+  const writeLog = typeof console !== 'undefined' && typeof console.log === 'function'
+    ? console.log.bind(console)
+    : console.info.bind(console);
+  const times = details.segments.map(segment => `${segment.type}${segment.credit_part ? ` (${segment.credit_part})` : ''}: ${segment.start} → ${segment.end}`).join(' · ');
+  writeLog(`[${prefix}] Captured timestamps · ${showTitle || 'Unknown series'} · ${episodeLabel} · ${times}`, details);
 }
 
 /**
@@ -2069,7 +2085,7 @@ function createPanel() {
              padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
              transition:background 0.15s"
       onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">
-      Download JSON(s)
+      Show timestamps
     </button>
 
      <details id="nfe-settings"><summary>API settings</summary>
@@ -2319,7 +2335,7 @@ function toast(msg) {
  * Show the export data in a modal before files are downloaded.
  * The preview deliberately uses textContent so captured metadata cannot inject HTML.
  */
-function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
+function showExportPreview(view) {
   document.getElementById('nfe-export-preview')?.remove();
 
   const { colors: providerColors, name: providerName } = getProviderConfig(currentProvider);
@@ -2340,18 +2356,11 @@ function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   `;
 
   const heading = document.createElement('h2');
-  heading.textContent = `Review ${providerName} JSON export`;
+  heading.textContent = `${providerName} timestamps`;
   heading.style.cssText = `margin:0 0 6px; color:${providerColors.primary}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
-  const timestampLabel = items.length === 1 ? 'timestamp' : 'timestamps';
-  const fileLabel = fileCount === 1 ? 'file' : 'files';
-  const duplicateSummary = duplicateCount
-    ? `; ${duplicateCount} ${duplicateCount === 1 ? 'duplicate' : 'duplicates'} excluded`
-    : '';
-  summary.textContent = `${items.length} ${timestampLabel} in ${fileCount} ${fileLabel}${duplicateSummary}.`;
   summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
-  const preview = document.createElement('pre');
-  preview.textContent = JSON.stringify({ items }, null, 2);
+  const preview = document.createElement('div');
   preview.style.cssText = `
     overflow:auto; flex:1; min-height:180px; margin:0 0 14px; padding:12px; border-radius:8px;
     background:${colors.panelBg}; color:${colors.text}; box-sizing:border-box;
@@ -2360,34 +2369,71 @@ function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   const actions = document.createElement('div');
   actions.style.cssText = 'display:flex; justify-content:flex-end; gap:8px;';
   const cancel = document.createElement('button');
-  cancel.textContent = 'Cancel';
+  cancel.textContent = 'Close';
   cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
   const confirm = document.createElement('button');
   confirm.textContent = 'Download JSON';
   confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
 
+  const clock = value => {
+    if (value == null || !Number.isFinite(Number(value))) return '—';
+    const ms = Math.round(Number(value) * 1000);
+    const seconds = Math.floor(ms / 1000);
+    return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
+  };
+  const update = next => {
+    view = next;
+    const rows = view.rows || [];
+    summary.textContent = `${rows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${view.duplicateCount} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
+    preview.replaceChildren();
+    for (const row of rows) {
+      const item = row.item;
+      const movie = String(item.media_type || item._mediaType || '').toLowerCase() === 'movie';
+      const entry = document.createElement('div');
+      entry.style.cssText = `padding:10px 0; border-bottom:1px solid ${colors.border}; line-height:1.6;`;
+      const label = document.createElement('strong');
+      label.textContent = row.status;
+      label.style.color = row.status === 'NEW' ? '#69d89b' : colors.textSecondary;
+      const details = document.createElement('div');
+      details.textContent = `${item.imdb_id || 'IMDb pending'} · ${movie ? 'Movie' : `Provider S${item.season}E${item.episode}`} ${item._episodeTitle || ''}\n${item.segment_type}${item.credit_part ? ` (${item.credit_part})` : ''} · ${clock(item.start_sec)} → ${clock(item.end_sec)} (${item.start_sec}–${item.end_sec} sec)`;
+      if (row.canonical && !movie) details.textContent += `\nTVDB S${row.canonical.season}E${row.canonical.episode}`;
+      if (row.reason) details.textContent += `\n${row.reason}`;
+      for (const range of row.existingRanges || []) {
+        details.textContent += `\nIntroDB: ${clock(range.startSec)} → ${clock(range.endSec)}`;
+      }
+      entry.append(label, details);
+      preview.append(entry);
+    }
+    confirm.disabled = view.checking || !view.items.length || !view.onConfirm;
+    confirm.style.opacity = confirm.disabled ? '.45' : '1';
+    confirm.style.cursor = confirm.disabled ? 'not-allowed' : 'pointer';
+    confirm.textContent = view.checking ? 'Checking…' : `Download JSON (${view.fileCount})`;
+  };
+  update(view);
+
   const previousFocus = document.activeElement;
   dialog.setAttribute('role', 'dialog');
   dialog.setAttribute('aria-modal', 'true');
-  dialog.setAttribute('aria-label', 'Review JSON export');
+  dialog.setAttribute('aria-label', 'Show timestamps');
   const close = () => { overlay.remove(); if (previousFocus?.isConnected) previousFocus.focus(); };
   overlay.addEventListener('keydown', event => {
     event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); close(); }
     if (event.key === 'Tab') {
       event.preventDefault();
-      (document.activeElement === confirm ? cancel : confirm).focus();
+      (confirm.disabled || document.activeElement === confirm ? cancel : confirm).focus();
     }
   });
   cancel.addEventListener('click', close);
   overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  confirm.addEventListener('click', () => { close(); onConfirm(); });
+  confirm.addEventListener('click', () => { if (!confirm.disabled) view.onConfirm(); });
   actions.append(cancel, confirm);
   dialog.append(heading, summary, preview, actions);
   overlay.append(dialog);
   overlay.addEventListener('click', event => event.stopPropagation());
   (document.fullscreenElement || document.body).append(overlay);
-  confirm.focus();
+  cancel.focus();
+  return update;
 }
 
 /** Mount the extractor as a native control-row item, never inside a play-button wrapper. */
@@ -2747,8 +2793,9 @@ function isAlreadyInIntroDB(item) {
   return hasExistingSegment(state.dedupCacheV2[key], item);
 }
 
-async function mapCapturedItemsWithTvdb(action) {
-  const capturedItems = state.allItems.slice();
+const overviewSource = Symbol('overviewSource');
+
+async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.slice()) {
   const pendingItems = capturedItems.filter(item => !item.imdb_id || item.imdb_id === 'IMDB_PENDING');
   if (pendingItems.length) {
     toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
@@ -2879,106 +2926,167 @@ async function prepareJSONExport() {
     toast('No timestamps yet.');
     return;
   }
-  const requiresTvdb = hasTvItems(state.allItems);
-  if (requiresTvdb && !state.tvdbApiKey) {
-    revealApiSettings();
-    toast('Please enter your own TVDB API key before exporting JSON.');
-    setTvdbStatus('No TVDB API key configured');
-    return;
-  }
-  if (state.submitInProgress) {
-    toast('Submission in progress, please wait...');
-    return;
-  }
-
-  toast(requiresTvdb ? 'Validating JSON export against TVDB...' : 'Preparing movie JSON export...');
-  const mapped = await mapCapturedItemsWithTvdb('JSON export');
-  const mappedItems = mapped.items;
-  let items = filterShortOutputSegments(mappedItems);
-  const shortSegmentCount = mappedItems.length - items.length;
-  if (shortSegmentCount > 0) {
-    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
-  }
-  if (!items.length) {
-    if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+  const capturedItems = state.allItems.map((item, index) => ({ ...item, [overviewSource]: index }));
+  const view = {
+    items: [], fileCount: 0, duplicateCount: 0, checking: true,
+    rows: capturedItems.map(item => ({ item, status: 'Checking', reason: '' })),
+    message: 'Checking TVDB mapping and IntroDB…',
+  };
+  const refresh = showExportPreview(view);
+  try {
+    const requiresTvdb = hasTvItems(state.allItems);
+    if (requiresTvdb && !state.tvdbApiKey) {
+      revealApiSettings();
+      toast('Please enter your own TVDB API key before exporting JSON.');
+      setTvdbStatus('No TVDB API key configured');
+      view.message = 'TVDB API key missing. Timestamps remain available; JSON download is disabled.';
       return;
     }
-    const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
-    const noMappingMessage = hasTvItems(mapped.capturedItems)
-      ? 'No series has a reliable TVDB episode mapping; nothing was exported.'
-      : 'No movie has a usable IMDb ID; nothing was exported.';
-    toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
-    return;
-  }
-
-  const mediaKeys = [...new Set(
-    items
-      .map(getItemCacheKey)
-  )];
-  toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
-  const canonicalExisting = await loadCanonicalExisting(mediaKeys);
-
-  const beforeCount = items.length;
-  items = items.filter(item => {
-    const key = getItemCacheKey(item);
-    return !hasExistingSegment(canonicalExisting.get(key), item);
-  });
-  const duplicateCount = beforeCount - items.length;
-  if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
-  if (!items.length) {
-    toast('Nothing left to export after removing duplicates.');
-    return;
-  }
-
-  const exportItems = items.map(normalizeExportItem);
-  const groups = new Map();
-  for (const item of exportItems) {
-    const key = item.imdb_id || 'no_id';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
-  }
-
-  const files = [];
-  const maxItemsPerFile = 100;
-  for (const [imdbId, groupItems] of groups) {
-    const total = Math.ceil(groupItems.length / maxItemsPerFile);
-    for (let index = 0; index < total; index++) {
-      files.push({
-        imdbId,
-        part: total > 1 ? `_part${index + 1}of${total}` : '',
-        data: groupItems.slice(index * maxItemsPerFile, (index + 1) * maxItemsPerFile),
-      });
-    }
-  }
-
-  let downloaded = 0;
-  function downloadNext(index) {
-    if (index >= files.length) {
-      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+    if (state.submitInProgress) {
+      toast('Submission in progress, please wait...');
       return;
     }
-    const file = files[index];
-    const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = Object.assign(document.createElement('a'), {
-      href: url,
-      download: `timestamps_${file.imdbId}${file.part}.json`,
+
+    toast(requiresTvdb ? 'Validating JSON export against TVDB...' : 'Preparing movie JSON export...');
+    const mapped = await mapCapturedItemsWithTvdb('JSON export', capturedItems);
+    const mappedItems = mapped.items;
+    for (const row of view.rows) {
+      row.status = 'Unavailable';
+      row.reason = !row.item.imdb_id || row.item.imdb_id === 'IMDB_PENDING'
+        ? 'Missing IMDb ID' : 'No reliable TVDB mapping / excluded special';
+    }
+    for (const item of mappedItems) {
+      const row = view.rows[item[overviewSource]];
+      if (row) {
+        row.canonical = item;
+        row.status = 'Checking';
+        row.reason = '';
+        if (!filterShortOutputSegments([item]).length) {
+          row.status = 'Unavailable';
+          row.reason = 'Invalid timestamp or segment shorter than 5 seconds';
+        }
+      }
+    }
+    let items = filterShortOutputSegments(mappedItems);
+    const shortSegmentCount = mappedItems.length - items.length;
+    if (shortSegmentCount > 0) {
+      toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
+    }
+    if (!items.length) {
+      if (mappedItems.length && shortSegmentCount === mappedItems.length) {
+        toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+        return;
+      }
+      const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
+      const noMappingMessage = hasTvItems(mapped.capturedItems)
+        ? 'No series has a reliable TVDB episode mapping; nothing was exported.'
+        : 'No movie has a usable IMDb ID; nothing was exported.';
+      toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
+      return;
+    }
+
+    const mediaKeys = [...new Set(
+      items
+        .map(getItemCacheKey)
+    )];
+    toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
+    const canonicalExisting = new Map();
+    for (let index = 0; index < mediaKeys.length; index += 4) {
+      await Promise.all(mediaKeys.slice(index, index + 4).map(async key => {
+        try {
+          canonicalExisting.set(key, await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }));
+        } catch (error) {
+          canonicalExisting.set(key, { error: error?.message || 'IntroDB duplicate check failed.' });
+        }
+      }));
+    }
+
+    items = items.filter(item => {
+      const key = getItemCacheKey(item);
+      const existing = canonicalExisting.get(key);
+      const row = view.rows[item[overviewSource]];
+      const failed = Boolean(existing.error);
+      const duplicate = !failed && hasExistingSegment(existing, item);
+      if (row) {
+        row.status = failed ? 'Unavailable' : duplicate ? 'In IntroDB' : 'NEW';
+        row.reason = failed ? existing.error : '';
+        row.existingRanges = failed ? [] : existing.rangesByType?.get(item.segment_type) || [];
+      }
+      if (failed) toast(existing.error);
+      return !failed && !duplicate;
     });
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    downloaded++;
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setTimeout(() => downloadNext(index + 1), 400);
-  }
+    const duplicateCount = view.rows.filter(row => row.status === 'In IntroDB').length;
+    view.duplicateCount = duplicateCount;
+    if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
+    if (!items.length) {
+      toast('Nothing left to export after removing duplicates.');
+      return;
+    }
 
-  showExportPreview({
-    items: exportItems,
-    fileCount: files.length,
-    duplicateCount,
-    onConfirm: () => downloadNext(0),
-  });
+    const exportItems = items.map(normalizeExportItem);
+    const groups = new Map();
+    for (const item of exportItems) {
+      const key = item.imdb_id || 'no_id';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+
+    const files = [];
+    const maxItemsPerFile = 100;
+    for (const [imdbId, groupItems] of groups) {
+      const total = Math.ceil(groupItems.length / maxItemsPerFile);
+      for (let index = 0; index < total; index++) {
+        files.push({
+          imdbId,
+          part: total > 1 ? `_part${index + 1}of${total}` : '',
+          data: groupItems.slice(index * maxItemsPerFile, (index + 1) * maxItemsPerFile),
+        });
+      }
+    }
+
+    let downloaded = 0;
+    function downloadNext(index) {
+      if (index >= files.length) {
+        toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+        return;
+      }
+      const file = files[index];
+      const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = Object.assign(document.createElement('a'), {
+        href: url,
+        download: `timestamps_${file.imdbId}${file.part}.json`,
+      });
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      downloaded++;
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTimeout(() => downloadNext(index + 1), 400);
+    }
+
+    Object.assign(view, {
+      items: exportItems,
+      fileCount: files.length,
+      duplicateCount,
+      onConfirm: () => downloadNext(0),
+    });
+  } catch (error) {
+    view.message = error.message || 'Validation failed. JSON download is disabled.';
+    toast(view.message);
+  } finally {
+    view.checking = false;
+    for (const row of view.rows) {
+      if (row.status === 'Checking') {
+        row.status = 'Unavailable';
+        row.reason = view.message || 'Validation could not be completed';
+      }
+    }
+    view.message = view.items.length
+      ? 'Only verified NEW timestamps are included in the JSON download.'
+      : 'JSON download unavailable. ' + (view.message.includes('Checking') ? 'No verified new timestamps.' : view.message);
+    refresh?.(view);
+  }
 }
 
 function updateSubmitBtn(label) {
@@ -3484,7 +3592,7 @@ bootstrapProvider({
 /** Prime Video catalogue, playback-resource, and timestamp extraction. */
 
 
-const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
+const PRIME_VIDEO_METADATA_URL_PATTERN = /getvodplaybackresources/i;
 const PRIME_VIDEO_ID_PATTERN = /^(?:[A-Z0-9]{9,12}|amzn1\.dv\.gti\.[a-f0-9-]{20,})$/i;
 const PRIME_VIDEO_CARD_SELECTOR = '[data-testid="episode-list-item"], li[id^="av-ep-episode-"]';
 const PRIME_VIDEO_EPISODE_HEADING_PATTERN = /^\s*(\d+)\s*[.\-:]\s*(.*?)\s*$/;
@@ -3504,6 +3612,48 @@ const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set([
   'AFTER_CREDIT_SCENE',
   'POST_CREDIT_SCENE',
 ]);
+
+/** Keep Prime diagnostics in the regular Console log stream. */
+function logPrimeVideo(message, details) {
+  if (typeof console === 'undefined') return;
+  const writeLog = typeof console.log === 'function'
+    ? console.log.bind(console)
+    : typeof console.info === 'function'
+      ? console.info.bind(console)
+      : null;
+  if (!writeLog) return;
+  if (details === undefined) writeLog(`[PVE] ${message}`);
+  else writeLog(`[PVE] ${message}`, details);
+}
+
+function isPrimeVideoMetadataUrl(url) {
+  return PRIME_VIDEO_METADATA_URL_PATTERN.test(String(url || ''));
+}
+
+function readPrimeVideoRequestBody(body) {
+  if (typeof body === 'string') return body;
+  if (!body) return '';
+  try {
+    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return body.toString();
+    if (typeof FormData !== 'undefined' && body instanceof FormData && typeof body.entries === 'function') {
+      return [...body.entries()]
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+        .join('&');
+    }
+  } catch (_) {}
+  return '';
+}
+
+async function readPrimeVideoFetchRequestBody(input, init) {
+  const initBody = readPrimeVideoRequestBody(init?.body);
+  if (initBody) return initBody;
+  try {
+    if (input && typeof input === 'object' && typeof input.clone === 'function') {
+      return await input.clone().text().catch(() => '');
+    }
+  } catch (_) {}
+  return '';
+}
 
 function isPrimeVideoTitleId(value) {
   return typeof value === 'string' && PRIME_VIDEO_ID_PATTERN.test(value);
@@ -3553,6 +3703,11 @@ function extractPrimeVideoTitleId(bodyText, url) {
     if (legacyIdMatch) return legacyIdMatch[1];
   }
   if (!bodyText) return null;
+  const queryIdMatch = String(bodyText).match(/(?:^|[?&])(?:titleId|cGTI|asin|ASIN)=([^&#]+)/i);
+  if (queryIdMatch) {
+    const titleId = decodeURIComponent(queryIdMatch[1]);
+    if (isPrimeVideoTitleId(titleId)) return titleId;
+  }
   try {
     const found = findPrimeVideoTitleIdInObject(JSON.parse(bodyText));
     if (found) return found;
@@ -4138,7 +4293,7 @@ async function preloadPrimeVideoSeasonCatalogs(root = document, options = {}) {
       const found = scanPrimeVideoEpisodeCatalog(seasonDocument);
       total += found;
       if (found) {
-        console.info('[PVE] Preloaded Prime Video season catalogue:', {
+        logPrimeVideo('Preloaded Prime Video season catalogue:', {
           url: urlKey,
           episodes: found,
         });
@@ -4300,6 +4455,15 @@ function flushPrimeVideoSegmentBatch(titleId) {
   if (!batch) return;
   state.primeVideoSegmentBatches.delete(titleId);
   const items = batch.items.filter(item => !state.allItems.some(existing => existing._eid === item._eid));
+  logPrimeVideo('Flushing Prime Video segment batch:', {
+    titleId,
+    showId: batch.showId,
+    season: batch.season,
+    episode: batch.episode,
+    received: batch.items.length,
+    newItems: items.length,
+    skippedExisting: batch.items.length - items.length,
+  });
   logPrimeVideoTimestamps(titleId, batch.showId, batch.season, batch.episode, batch.episodeTitle, items);
   recordExtractedSegments(items);
 }
@@ -4472,7 +4636,7 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
     if (creditStartAvailable && schedulePrimeVideoMovieDurationPoll(titleId, movieTitle)) {
       const poll = state.primeVideoMovieDurationPolls.get(titleId);
       if (poll?.attempt === 0) {
-        console.info('[PVE] Movie credits found; waiting for Prime media duration before finalizing:', {
+        logPrimeVideo('Movie credits found; waiting for Prime media duration before finalizing:', {
           titleId,
           creditEvents,
         });
@@ -4624,6 +4788,16 @@ function finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle =
       console.warn('[PVE] Prime returned an outro event without a usable start time:', outroCandidates);
     }
   }
+  logPrimeVideo(extractedItems.length
+    ? 'Prepared Prime Video segment ranges:'
+    : 'No usable Prime Video segment ranges in playback metadata:', {
+    titleId,
+    showId,
+    season,
+    episode,
+    eventTypes: events.map(getPrimeVideoEventType),
+    segments: extractedItems.map(item => ({ type: item.segment_type, start: item.start_sec, end: item.end_sec })),
+  });
   queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle, extractedItems);
 }
 
@@ -4669,11 +4843,21 @@ function pollPrimeVideoEpisode(titleId, attempt) {
 function processPrimeVideoMetadata(data, bodyText, url) {
   ensurePrimeVideoState();
   const titleId = extractPrimeVideoTitleId(bodyText, url);
-  if (!titleId) return;
+  const events = readPrimeVideoTransitionEvents(data);
+  const eventTypes = events.map(getPrimeVideoEventType);
+  if (!titleId) {
+    logPrimeVideo('Skipped playback metadata without a recognizable title ID:', {
+      url: String(url || ''),
+      bodyLength: String(bodyText || '').length,
+      eventTypes,
+    });
+    return;
+  }
+  logPrimeVideo('Received Prime Video playback metadata:', { titleId, eventTypes });
   const movieMetadata = findPrimeVideoMovieMetadata(data);
   if (movieMetadata) {
     const movieTitle = movieMetadata.title || titleId;
-    console.info('[PVE] Movie metadata classified; skipping season/episode resolution.', {
+    logPrimeVideo('Movie metadata classified; skipping season/episode resolution.', {
       titleId,
       title: movieTitle,
       year: movieMetadata.year || '',
@@ -4693,7 +4877,7 @@ function processPrimeVideoMetadata(data, bodyText, url) {
   }
   if (isLikelyPrimeVideoMoviePlayback(titleId, data)) {
     const movieTitle = readPrimeVideoMoviePageTitle(titleId);
-    console.info('[PVE] Movie playback classified from credit events; skipping season/episode resolution.', {
+    logPrimeVideo('Movie playback classified from credit events; skipping season/episode resolution.', {
       titleId,
       title: movieTitle,
     });
@@ -4720,7 +4904,10 @@ function processPrimeVideoMetadata(data, bodyText, url) {
       }, mapped.showId);
     }
   }
-  if (!hasPrimeVideoSegmentEvents(data)) return;
+  if (!hasPrimeVideoSegmentEvents(data)) {
+    logPrimeVideo('Playback metadata contained no supported segment events:', { titleId, eventTypes });
+    return;
+  }
   if (state.primeVideoTitleMap.has(titleId)) {
     const { season, episode, episodeTitle, showId } = state.primeVideoTitleMap.get(titleId);
     setPrimeVideoActiveEpisode({ season, episode, episodeTitle, showId });
@@ -4762,7 +4949,7 @@ function processPrimeVideoMetadata(data, bodyText, url) {
   const inferredSnapshot = inferNextPrimeVideoEpisode();
   if (inferredSnapshot) {
     inferredSnapshot.episodeTitle ||= state.primeVideoEpisodeTitleByTitleId.get(titleId) || '';
-    console.info('[PVE] Inferred next episode from the scanned season boundary:', {
+    logPrimeVideo('Inferred next episode from the scanned season boundary:', {
       titleId,
       season: inferredSnapshot.season,
       episode: inferredSnapshot.episode,
@@ -4820,8 +5007,9 @@ function setupPrimeVideoInterception() {
       return originalOpen(method, requestUrl, ...rest);
     };
     xhr.send = function (body, ...rest) {
-      bodyText = typeof body === 'string' ? body : '';
-      if (url && url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+      bodyText = readPrimeVideoRequestBody(body);
+      if (isPrimeVideoMetadataUrl(url)) {
+        logPrimeVideo('Intercepted Prime Video playback XHR:', { url });
         xhr.addEventListener('load', () => {
           try { processPrimeVideoMetadata(JSON.parse(xhr.responseText), bodyText, url); }
           catch (error) { console.error('[PVE] Failed to process XHR response:', error); }
@@ -4838,20 +5026,22 @@ function setupPrimeVideoInterception() {
   const originalFetch = win.fetch.bind(win);
   win.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input?.url ? String(input.url) : String(input || ''));
-    if (!url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) return originalFetch(input, init);
+    if (!isPrimeVideoMetadataUrl(url)) return originalFetch(input, init);
 
     return (async () => {
-      let bodyText = '';
-      try {
-        if (init && typeof init.body === 'string') bodyText = init.body;
-        else if (input && typeof input === 'object' && input.clone) bodyText = await input.clone().text().catch(() => '');
-      } catch (_) {}
+      logPrimeVideo('Intercepted Prime Video playback fetch:', { url });
+      const bodyText = await readPrimeVideoFetchRequestBody(input, init);
       const response = await originalFetch(input, init);
       try { processPrimeVideoMetadata(await response.clone().json(), bodyText, url); }
       catch (error) { console.error('[PVE] Failed to process fetch response:', error); }
       return response;
     })();
   };
+  logPrimeVideo('Prime Video interception initialized.', {
+    page: String(win.location?.href || (typeof location !== 'undefined' ? location.href : '')),
+    xhr: typeof OriginalXHR === 'function',
+    fetch: typeof win.fetch === 'function',
+  });
 }
 
 /** Prime Video provider registration. */
@@ -5126,7 +5316,6 @@ function processVideolandLayout(json) {
       _episodeTitle: episodeTitle,
       _showId: showId,
       _tvdbEpisodeLanguages: ['eng', 'nld'],
-      _tvdbRequireTitleMatch: true,
       ...(useGtstAbsoluteTitleMatch ? { _tvdbAbsoluteTitleMatch: true } : {}),
       imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
       segment_type: segmentType,

@@ -96,7 +96,7 @@ test('Netflix tags timestamps and catalogs with their own series id', () => {
   assert.deepEqual(plain(netflix.catalogs.map(catalog => catalog.showId)), ['100', '200']);
   assert.deepEqual(plain(netflix.logs), [
     [
-      '[NFE] Captured timestamps · Alpha · S01E01',
+      '[NFE] Captured timestamps · Alpha · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Alpha episode',
         episodeId: 'alpha-1',
@@ -104,7 +104,7 @@ test('Netflix tags timestamps and catalogs with their own series id', () => {
       },
     ],
     [
-      '[NFE] Captured timestamps · Beta · S01E01',
+      '[NFE] Captured timestamps · Beta · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Beta episode',
         episodeId: 'beta-1',
@@ -136,13 +136,13 @@ test('Netflix logs multi-episode metadata as one timestamp entry per episode', (
     segments: details.segments,
   }))), [
     {
-      message: '[NFE] Captured timestamps · Alpha · S01E01',
+      message: '[NFE] Captured timestamps · Alpha · S01E01 · intro: 00:01.000 → 00:11.000',
       title: 'Alpha episode',
       episodeId: 'alpha-1',
       segments: [{ type: 'intro', start: '00:01.000', end: '00:11.000', start_sec: 1, end_sec: 11 }],
     },
     {
-      message: '[NFE] Captured timestamps · Alpha · S01E02',
+      message: '[NFE] Captured timestamps · Alpha · S01E02 · recap: 00:00.000 → 00:12.500 · intro: 00:12.500 → 01:28.000',
       title: 'Second episode',
       episodeId: 'alpha-2',
       segments: [
@@ -192,11 +192,11 @@ test('Videoland tags timestamps and incremental catalogs with their own program 
     ['program-b', 'tt400'],
   ]);
   assert.deepEqual(plain(videoland.state.allItems[0]._tvdbEpisodeLanguages), ['eng', 'nld']);
-  assert.equal(videoland.state.allItems[0]._tvdbRequireTitleMatch, true);
+  assert.equal(videoland.state.allItems[0]._tvdbRequireTitleMatch, undefined);
   assert.deepEqual(plain(videoland.catalogs.map(catalog => catalog.showId)), ['program-a', 'program-b']);
   assert.deepEqual(plain(videoland.logs), [
     [
-      '[VLE] Captured timestamps · Alpha · S01E01',
+      '[VLE] Captured timestamps · Alpha · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Alpha episode',
         clipId: 'clip-a',
@@ -204,7 +204,7 @@ test('Videoland tags timestamps and incremental catalogs with their own program 
       },
     ],
     [
-      '[VLE] Captured timestamps · Beta · S01E01',
+      '[VLE] Captured timestamps · Beta · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Beta episode',
         clipId: 'clip-b',

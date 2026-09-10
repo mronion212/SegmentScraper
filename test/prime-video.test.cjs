@@ -155,6 +155,10 @@ test('recognizes current Prime Video GTI identifiers in requests', () => {
     prime.extractPrimeVideoTitleId('', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`),
     ids[0]
   );
+  assert.equal(
+    prime.extractPrimeVideoTitleId(`cGTI=${encodeURIComponent(ids[1])}`, 'https://example.test/getvodplaybackresources'),
+    ids[1]
+  );
   assert.equal(prime.extractPrimeVideoTitleId(JSON.stringify({ contentId: ids[1] }), ''), ids[1]);
   assert.equal(prime.extractPrimeVideoTitleId('', 'https://example.test/GetVodPlaybackResources?asin=B012345678'), 'B012345678');
 });
@@ -258,8 +262,8 @@ test('uses a cached GTI to attach playback timestamps to the right episode', () 
     { showId: 'Example Series', title: 'The Arrival', type: 'recap', season: 2, episode: 3, start: 0, end: 12.5 },
     { showId: 'Example Series', title: 'The Arrival', type: 'intro', season: 2, episode: 3, start: 12.5, end: 88 },
   ]);
-  assert.deepEqual(plain(prime.logs), [[
-    '[PVE] Captured timestamps · Example Series · S02E03',
+  assert.deepEqual(plain(prime.logs.filter(([message]) => message.includes('Captured timestamps'))), [[
+    '[PVE] Captured timestamps · Example Series · S02E03 · recap: 00:00.000 → 00:12.500 · intro: 00:12.500 → 01:28.000',
     {
       title: 'The Arrival',
       titleId: ids[0],
@@ -708,7 +712,7 @@ test('captures Prime movie credits from END_CREDITS and ignores NEXT_UP', () => 
     year: 2025,
     mediaType: 'movie',
   }]);
-  assert.equal(prime.logs.find(([message]) => message.includes('Captured timestamps'))[0], '[PVE] Captured timestamps · Example Movie · MOVIE');
+  assert.equal(prime.logs.find(([message]) => message.includes('Captured timestamps'))[0], '[PVE] Captured timestamps · Example Movie · MOVIE · outro: 01:30:00.000 → 01:35:00.000');
 });
 
 test('captures Prime movie credits from the skipElements transition-timecode shape', () => {
@@ -1021,6 +1025,7 @@ test('batches Prime segments arriving in separate playback responses', () => {
     { type: 'outro', start: 3229, end: 3701 },
     { type: 'recap', start: 0, end: 73 },
   ]);
-  assert.equal(prime.logs.length, 1);
-  assert.equal(prime.logs[0][1].segments.length, 2);
+  const captureLogs = prime.logs.filter(([message]) => message.includes('Captured timestamps'));
+  assert.equal(captureLogs.length, 1);
+  assert.equal(captureLogs[0][1].segments.length, 2);
 });

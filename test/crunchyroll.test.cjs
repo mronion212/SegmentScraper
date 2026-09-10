@@ -196,7 +196,7 @@ test('maps Crunchyroll intro and credits to normalized intro and outro segments'
   ]);
 
   assert.deepEqual(plain(crunchyroll.logs), [[
-    '[CRE] Captured timestamps · Golden Kamuy · S01E02',
+    '[CRE] Captured timestamps · Golden Kamuy · S01E02 · intro: 01:49.000 → 03:18.000 · outro: 22:29.000 → 24:04.000',
     {
       title: 'Nopperabo',
       mediaId: 'G4GFQZWG9',
