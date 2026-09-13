@@ -1,5 +1,9 @@
 # Runtime audit benchmark
 
+The current UI uses DOM changes and native control visibility instead of a document-wide mousemove listener. The mousemove scenario therefore accepts an absent listener and reports zero event-driven work in that case. The historical baseline below remains unchanged.
+
+For browser layout and playback-control fixtures, run `node benchmark/serve-player-ui.cjs` and open `http://127.0.0.1:8096`; use `/compact` for a 360 × 480 viewport. These fixtures do not access streaming accounts or external APIs.
+
 `runtime-audit.cjs` measures runtime work rather than bundle size. It loads the
 source files in isolated VM contexts and reports deterministic operation counts
 for the audited hot paths. Wall-clock timings are included as secondary context

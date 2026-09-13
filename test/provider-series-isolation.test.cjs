@@ -96,7 +96,7 @@ test('Netflix tags timestamps and catalogs with their own series id', () => {
   assert.deepEqual(plain(netflix.catalogs.map(catalog => catalog.showId)), ['100', '200']);
   assert.deepEqual(plain(netflix.logs), [
     [
-      '[NFE] Captured timestamps · Alpha · S01E01',
+      '[NFE] Captured timestamps · Alpha · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Alpha episode',
         episodeId: 'alpha-1',
@@ -104,7 +104,7 @@ test('Netflix tags timestamps and catalogs with their own series id', () => {
       },
     ],
     [
-      '[NFE] Captured timestamps · Beta · S01E01',
+      '[NFE] Captured timestamps · Beta · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Beta episode',
         episodeId: 'beta-1',
@@ -136,13 +136,13 @@ test('Netflix logs multi-episode metadata as one timestamp entry per episode', (
     segments: details.segments,
   }))), [
     {
-      message: '[NFE] Captured timestamps · Alpha · S01E01',
+      message: '[NFE] Captured timestamps · Alpha · S01E01 · intro: 00:01.000 → 00:11.000',
       title: 'Alpha episode',
       episodeId: 'alpha-1',
       segments: [{ type: 'intro', start: '00:01.000', end: '00:11.000', start_sec: 1, end_sec: 11 }],
     },
     {
-      message: '[NFE] Captured timestamps · Alpha · S01E02',
+      message: '[NFE] Captured timestamps · Alpha · S01E02 · recap: 00:00.000 → 00:12.500 · intro: 00:12.500 → 01:28.000',
       title: 'Second episode',
       episodeId: 'alpha-2',
       segments: [
@@ -192,11 +192,11 @@ test('Videoland tags timestamps and incremental catalogs with their own program 
     ['program-b', 'tt400'],
   ]);
   assert.deepEqual(plain(videoland.state.allItems[0]._tvdbEpisodeLanguages), ['eng', 'nld']);
-  assert.equal(videoland.state.allItems[0]._tvdbRequireTitleMatch, true);
+  assert.equal(videoland.state.allItems[0]._tvdbRequireTitleMatch, undefined);
   assert.deepEqual(plain(videoland.catalogs.map(catalog => catalog.showId)), ['program-a', 'program-b']);
   assert.deepEqual(plain(videoland.logs), [
     [
-      '[VLE] Captured timestamps · Alpha · S01E01',
+      '[VLE] Captured timestamps · Alpha · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Alpha episode',
         clipId: 'clip-a',
@@ -204,7 +204,7 @@ test('Videoland tags timestamps and incremental catalogs with their own program 
       },
     ],
     [
-      '[VLE] Captured timestamps · Beta · S01E01',
+      '[VLE] Captured timestamps · Beta · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Beta episode',
         clipId: 'clip-b',
@@ -281,6 +281,26 @@ test('Videoland uses extraTitle and removes its episode-number prefix for TVDB m
 
   assert.equal(videoland.catalogs[0].episodes[0].title, 'Green Birds');
   assert.equal(videoland.state.allItems[0]._episodeTitle, 'Green Birds');
+});
+
+test('Videoland enables absolute-title TVDB matching only for GTST', () => {
+  const videoland = loadExtractor('src/providers/videoland/extractor.js', 'processVideolandLayout');
+
+  videoland.process(videolandPayload('61', 'Goede Tijden, Slechte Tijden', 'gtst-7295', {
+    episode: 7295,
+    seoEpisodeTitle: 'Goede Tijden, Slechte Tijden',
+    activeTitle: 'Goede Tijden, Slechte Tijden',
+    extraTitle: '7295. Aflevering 7295',
+  }));
+  videoland.process(videolandPayload('other', 'Andere serie', 'other-7295', {
+    episode: 7295,
+    seoEpisodeTitle: 'Andere serie',
+    activeTitle: 'Andere serie',
+    extraTitle: '7295. Aflevering 7295',
+  }));
+
+  assert.equal(videoland.state.allItems[0]._tvdbAbsoluteTitleMatch, true);
+  assert.equal('_tvdbAbsoluteTitleMatch' in videoland.state.allItems[1], false);
 });
 
 test('Prime Video keeps the series id in its title cache and on extracted timestamps', () => {

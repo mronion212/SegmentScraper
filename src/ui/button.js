@@ -1,106 +1,157 @@
-/**
- * Shared button component
- * Injects a trigger button into the player UI
- */
-
-import { getProviderConfig } from '../config/provider-config.js';
+/** Mount the extractor as a native control-row item, never inside a play-button wrapper. */
 import { togglePanel } from './panel.js';
 
-/**
- * Get the "next episode" button element (provider-specific)
- * @param {string} providerName - The provider name
- * @returns {HTMLElement|null} - The next episode button element
- */
+const PLAYER_CONTROL_ANCHORS = {
+  netflix: ['[data-uia="control-fullscreen-enter"]', '[data-uia="control-fullscreen-exit"]', '[data-uia="control-audio-subtitle"]', '[data-uia="control-play-pause-play"]', '[data-uia="control-play-pause-pause"]'],
+  'prime-video': ['.atvwebplayersdk-fullscreen-button', '.atvwebplayersdk-subtitles-button', '.atvwebplayersdk-playpause-button'],
+  videoland: ['.vjs-fullscreen-control', '.vjs-play-control', '[data-testid="fullscreen-button"]', '[data-testid="play-pause-button"]'],
+  skyshowtime: ['[data-testid="fullscreen-button"]', '[data-testid="player-fullscreen-button"]', '.vjs-fullscreen-control', '[data-testid="play-pause-button"]'],
+  crunchyroll: ['[data-testid="fullscreen-button"]', '[data-testid="vilos-fullscreen-button"]', '[data-testid="play-pause-button"]', '.vjs-fullscreen-control'],
+};
+
+// These anchors were verified against supplied player markup. Their structural
+// identity remains valid while the provider hides its controls.
+const VERIFIED_CONTROL_ANCHORS = {
+  'prime-video': '#atvwebplayersdk-skip-backward-button',
+  videoland: '#volume-bar-control',
+  skyshowtime: '[data-testid="playback-lower-controls"] [data-testid="language-settings-button"]',
+};
+let mountedPlayerControl = null;
+
 export function getNextEpBtn(providerName) {
-  // Default implementation - can be overridden by provider
-  return (
-    document.querySelector('[data-uia="control-next-episode"]') ||
-    document.querySelector('button[aria-label*="iguiente" i]') ||
-    document.querySelector('button[aria-label*="Next Episode" i]') ||
-    document.querySelector('button[aria-label*="next-episode" i]')
-  );
+  const root = document.fullscreenElement || document;
+  const verifiedSelector = VERIFIED_CONTROL_ANCHORS[providerName];
+  if (verifiedSelector) {
+    const verified = root.querySelector(verifiedSelector);
+
+    if (verified) return verified;
+  }
+  const videos = [...root.querySelectorAll('video')].map(video => video.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
+  const isPlaybackControl = anchor => {
+    if (!anchor || !anchor.matches('button, [role="button"]') || anchor.closest('[role="slider"], .vjs-progress-control, [data-uia="timeline"]')) return false;
+    const rect = anchor.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+    return videos.some(video => rect.top >= video.top + video.height / 2 && rect.top <= video.bottom + 60 && rect.left >= video.left && rect.right <= video.right + 1);
+  };
+  for (const selector of PLAYER_CONTROL_ANCHORS[providerName] || []) {
+    for (const candidate of root.querySelectorAll(selector)) {
+      const anchor = candidate.matches('button, [role="button"]') ? candidate : candidate.querySelector('button, [role="button"]');
+      if (isPlaybackControl(anchor)) return anchor;
+    }
+  }
+  for (const anchor of root.querySelectorAll('button[aria-label], button[title], [role="button"][aria-label]')) {
+    const label = anchor.getAttribute('aria-label') || anchor.title || '';
+    if (/^(play|pause|afspelen|pauzeren)(?:$|\s|\()/i.test(label.trim()) && isPlaybackControl(anchor)) return anchor;
+  }
+  return null;
 }
 
-/**
- * Inject the trigger button into the page
- * @param {string} providerName - The provider name for theming
- * @param {Function} [getNextBtn] - Optional custom function to get next button
- */
-export function injectBtn(providerName, getNextBtn) {
-  if (document.getElementById('nfe-btn')) {
-    return;
+/** Pure structural decision; wrapped native controls receive a sibling slot. */
+export function getControlMount(providerName, anchor) {
+  const parent = anchor.parentElement;
+  if (providerName === 'videoland' && anchor.id === 'volume-bar-control') {
+    // Reserve space beside the entire volume/fullscreen group. Do not enlarge a
+    // fixed-size fullscreen wrapper or depend on its changing translated label.
+    return { reference: parent.parentElement, wrapped: true, after: false };
   }
-  
-  const config = getProviderConfig(providerName);
-  if (!config) {
-    console.error('[NFE] No config found for provider:', providerName);
-    return;
+  if (providerName === 'skyshowtime' && anchor.getAttribute('data-testid') === 'language-settings-button') {
+    return { reference: anchor, wrapped: false, after: true };
   }
+  if (providerName === 'prime-video' && anchor.id === 'atvwebplayersdk-skip-backward-button') {
+    return { reference: parent, wrapped: true, after: false };
+  }
+  // Lift past single-control wrappers until reaching a row containing other
+  // native controls. Inserting inside a fixed fullscreen wrapper stacks buttons.
+  let reference = anchor;
+  for (let container = parent; container && !container.matches?.('body, html'); container = container.parentElement) {
+    const count = container.querySelectorAll?.('button:not(#nfe-btn), [role="button"]:not(#nfe-btn)').length;
+    if (count > 1) return { reference, wrapped: reference !== anchor, after: false };
+    if (count == null) break;
+    reference = container;
+  }
+  return { reference: anchor, wrapped: false, after: false };
+}
 
-  const nextBtn = getNextBtn ? getNextBtn() : getNextEpBtn(providerName);
-  console.log('[NFE] nextBtn found:', !!nextBtn);
+export function removePlayerButton() {
+  document.getElementById('nfe-button-slot')?.remove();
+  document.getElementById('nfe-btn')?.remove();
+  mountedPlayerControl = null;
+}
 
-  const btn = document.createElement('button');
-  btn.id = 'nfe-btn';
-  btn.title = 'Timestamps Extractor';
-  btn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-      xmlns="http://www.w3.org/2000/svg" style="display:block">
-    <rect x="2" y="5" width="20" height="14" rx="1.5" stroke="white" stroke-width="1.6" fill="none"/>
-    <line x1="6"  y1="5"  x2="6"  y2="19" stroke="white" stroke-width="1.6"/>
-    <line x1="18" y1="5"  x2="18" y2="19" stroke="white" stroke-width="1.6"/>
-    <line x1="2"  y1="9"  x2="6"  y2="9"  stroke="white" stroke-width="1.4"/>
-    <line x1="18" y1="9"  x2="22" y2="9"  stroke="white" stroke-width="1.4"/>
-    <line x1="2"  y1="15" x2="6"  y2="15" stroke="white" stroke-width="1.4"/>
-    <line x1="18" y1="15" x2="22" y2="15" stroke="white" stroke-width="1.4"/>
-    <polyline points="9,10 12,13.5 15,10" stroke="white" stroke-width="1.6"
-              stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-    <line x1="12" y1="8" x2="12" y2="13.5" stroke="white" stroke-width="1.6" stroke-linecap="round"/>
-  </svg>`;
-
-  if (nextBtn) {
-    btn.style.cssText = `
-      background:none; border:none; cursor:pointer; padding:0; margin:0;
-      width:40px; height:40px; display:inline-flex; align-items:center; justify-content:center;
-      opacity:0.85; transition:opacity 0.15s, transform 0.15s; flex-shrink:0; vertical-align:middle;
-      z-index:2147483000;
-    `;
-    btn.addEventListener('mouseenter', () => { 
-      btn.style.opacity = '1';    
-      btn.style.transform = 'scale(1.15)'; 
+export function injectBtn(providerName, getAnchor = getNextEpBtn) {
+  if (!document.body) return;
+  let button = document.getElementById('nfe-btn');
+  let anchor = getAnchor(providerName);
+  const root = document.fullscreenElement || document;
+  if (!anchor && mountedPlayerControl?.providerName === providerName &&
+      mountedPlayerControl.anchor.isConnected && root.contains(mountedPlayerControl.anchor)) {
+    // Zero-sized/hidden controls are not evidence that the player was removed.
+    anchor = mountedPlayerControl.anchor;
+  }
+  if (!anchor) { removePlayerButton(); return; }
+  if (!button) {
+    button = document.createElement('button');
+    button.id = 'nfe-btn';
+    button.type = 'button';
+    button.title = 'Open SegmentScraper';
+    button.setAttribute('aria-label', 'Open SegmentScraper');
+    button.setAttribute('aria-controls', 'nfe-panel');
+    button.setAttribute('aria-expanded', 'false');
+    const icon = document.createElement('span');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.style.cssText = 'display:block!important;width:28px!important;height:28px!important;pointer-events:none!important;';
+    // Provider SVG rules must not turn the filmstrip into a filled square.
+    const shadow = icon.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<style>:host{color:white}svg{display:block;width:28px;height:28px;fill:none}</style><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="5" width="20" height="14" rx="1.5" stroke="white" stroke-width="1.6" fill="none"/><path d="M6 5v14M18 5v14M2 9h4m12 0h4M2 15h4m12 0h4" stroke="white" stroke-width="1.4" fill="none"/><polyline points="9,10 12,13.5 15,10" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M12 8v5.5" stroke="white" stroke-width="1.6" stroke-linecap="round" fill="none"/></svg>';
+    button.appendChild(icon);
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      event.preventDefault();
+      togglePanel();
     });
-    btn.addEventListener('mouseleave', () => { 
-      btn.style.opacity = '0.85'; 
-      btn.style.transform = 'scale(1)';    
-    });
-    nextBtn.insertAdjacentElement('beforebegin', btn);
-    console.log('[NFE] Button inserted before nextBtn');
-  } else {
-    // Fallback: fixed floating button
-    btn.style.cssText = `
-      background:rgba(0,0,0,0.6); border:none; cursor:pointer; padding:6px; margin:0;
-      width:36px; height:36px; display:inline-flex; align-items:center; justify-content:center;
-      border-radius:6px; opacity:0.85; transition:opacity 0.15s; flex-shrink:0;
-      position:fixed; bottom:90px; right:20px; z-index:2147483000;
-    `;
-    btn.addEventListener('mouseenter', () => (btn.style.opacity = '1'));
-    btn.addEventListener('mouseleave', () => (btn.style.opacity = '0.85'));
-    document.body.appendChild(btn);
-    console.log('[NFE] Button appended to body as fallback');
+    button.addEventListener('keydown', event => event.stopPropagation());
   }
-
-  btn.addEventListener('click', e => { 
-    console.log('[NFE] Button clicked, calling togglePanel');
-    try {
-      e.stopPropagation(); 
-      e.preventDefault(); 
-      if (typeof togglePanel === 'function') {
-        togglePanel();
-      } else {
-        console.error('[NFE] togglePanel is not a function:', typeof togglePanel);
+  const { reference, after } = getControlMount(providerName, anchor);
+  button.dataset.placement = 'controls';
+  button.className = '';
+  const rect = anchor.getBoundingClientRect();
+  const height = rect.height > 0 ? Math.max(40, Math.min(64, rect.height)) : 40;
+  const buttonStyle = 'all:initial;box-sizing:border-box!important;display:flex!important;align-items:center!important;justify-content:center!important;width:40px!important;min-width:40px!important;height:' + height + 'px!important;padding:0!important;margin:0!important;border:0!important;background:transparent!important;color:white!important;cursor:pointer!important;flex:0 0 40px!important;position:static!important;transform:none!important;';
+  if (button.dataset.controlHeight !== String(height)) {
+    button.dataset.controlHeight = String(height);
+    button.style.cssText = buttonStyle;
+  }
+  let slot = document.getElementById('nfe-button-slot');
+  if (!slot) {
+    slot = document.createElement('span');
+    slot.id = 'nfe-button-slot';
+    slot.style.cssText = 'all:initial;box-sizing:border-box!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;align-self:center!important;vertical-align:middle!important;flex:0 0 48px!important;width:48px!important;min-width:48px!important;margin:0 4px!important;padding:0!important;position:static!important;';
+  }
+  if (button.parentElement !== slot) slot.appendChild(button);
+  const correctlyPlaced = after ? reference.nextElementSibling === slot : slot.nextElementSibling === reference;
+  if (slot.parentElement !== reference.parentElement || !correctlyPlaced) reference.insertAdjacentElement(after ? 'afterend' : 'beforebegin', slot);
+  if (providerName === 'netflix') {
+    // Netflix's SVG can sit above the button's box center. Match the visible
+    // native icon, including its responsive size, rather than the wrapper.
+    const nativeIcon = anchor.querySelector('svg')?.getBoundingClientRect();
+    if (nativeIcon?.width > 0 && nativeIcon.height > 0) {
+      const size = Math.max(32, Math.min(48, nativeIcon.width));
+      const box = button.getBoundingClientRect();
+      const offset = nativeIcon.top + nativeIcon.height / 2 - box.top - box.height / 2;
+      const appearance = size + ':' + offset;
+      if (button.dataset.netflixIcon !== appearance) {
+        const icon = button.firstElementChild;
+        icon.style.cssText = 'display:block!important;flex-shrink:0!important;width:' + size + 'px!important;height:' + size + 'px!important;pointer-events:none!important;transform:translateY(' + offset + 'px)!important;';
+        icon.shadowRoot.querySelector('svg').style.cssText = 'width:100%;height:100%;';
+        button.dataset.netflixIcon = appearance;
       }
-    } catch (err) {
-      console.error('[NFE] Error in button click handler:', err);
     }
-  });
-  console.log('[NFE] Button click handler attached');
+  }
+  mountedPlayerControl = { providerName, anchor };
+  if (!document.getElementById('nfe-button-style')) {
+    const style = document.createElement('style');
+    style.id = 'nfe-button-style';
+    style.textContent = '#nfe-btn:focus-visible{outline:2px solid white!important;outline-offset:2px}';
+    (document.head || document.body).appendChild(style);
+  }
 }

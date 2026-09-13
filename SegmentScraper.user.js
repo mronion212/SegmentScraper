@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
-// @version      1.5.7
+// @version      1.9.1
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -19,7 +19,6 @@
 // @match        https://play.max.com/*
 // @match        https://www.skyshowtime.com/*
 // @match        https://skyshowtime.com/*
-// @match        https://www.crunchyroll.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -28,7 +27,6 @@
 // @connect      api.introdb.app
 // @connect      api4.thetvdb.com
 // @connect      atom.skyshowtime.com
-// @connect      static.crunchyroll.com
 // @connect      raw.githubusercontent.com
 // @run-at       document-start
 // ==/UserScript==
@@ -36,7 +34,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const SEGMENTSCRAPER_VERSION = "1.5.7";
+  const SEGMENTSCRAPER_VERSION = "1.9.1";
   const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
@@ -81,6 +79,9 @@ const createState = (providerName) => ({
   interceptedCount: 0,
   panelVisible: false,
   submitInProgress: false,
+  exportInProgress: false,
+  sessionSavedAt: '',
+  sessionStorageError: false,
   submitResults: { ok: 0, fail: 0 },
   dedupCacheV2: {},
   introdbApiKey: '',
@@ -96,6 +97,58 @@ const createState = (providerName) => ({
 });
 
 const state = createState('Streaming Service');
+
+/** Tab-scoped recovery across reloads. Credentials and network caches are excluded. */
+
+let captureSessionKey = '';
+let captureSaveTimer = null;
+const CAPTURE_FIELDS = ['allItems', 'showTitle', 'showId', 'showYear', 'imdbId', 'imdbIdsByShowId', 'providerEpisodes', 'providerEpisodesByShowId', 'interceptedCount'];
+
+function saveCaptureSession() {
+  if (!captureSessionKey) return;
+  clearTimeout(captureSaveTimer);
+  captureSaveTimer = null;
+  try {
+    const data = Object.fromEntries(CAPTURE_FIELDS.map(key => [key, state[key]]));
+    const savedAt = new Date().toISOString();
+    sessionStorage.setItem(captureSessionKey, JSON.stringify({ version: 1, savedAt, data, showIds: [...state.showIds] }));
+    state.sessionSavedAt = savedAt;
+    state.sessionStorageError = false;
+  } catch (_) {
+    state.sessionStorageError = true;
+  }
+}
+
+function scheduleCaptureSave() {
+  if (!captureSessionKey || captureSaveTimer !== null) return;
+  captureSaveTimer = setTimeout(saveCaptureSession, 500);
+}
+
+function restoreCaptureSession(providerName) {
+  captureSessionKey = `segmentScraper.capture.v1.${providerName}`;
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(captureSessionKey) || 'null');
+    if (saved?.version !== 1 || !Array.isArray(saved.data?.allItems) || !Array.isArray(saved.showIds)) return false;
+    if (!saved.data.allItems.every(item => item && typeof item === 'object' && Number.isFinite(Number(item.start_sec)) && Number.isFinite(Number(item.end_sec)))) return false;
+    for (const key of CAPTURE_FIELDS) {
+      if (Object.hasOwn(saved.data, key)) state[key] = saved.data[key];
+    }
+    state.showIds = new Set(saved.showIds);
+    state.sessionSavedAt = saved.savedAt;
+    state.dbSearchDone = false;
+    return state.allItems.length > 0;
+  } catch (_) {
+    state.sessionStorageError = true;
+    return false;
+  }
+}
+
+function clearCaptureSession() {
+  clearTimeout(captureSaveTimer);
+  captureSaveTimer = null;
+  try { sessionStorage.removeItem(captureSessionKey); } catch (_) { state.sessionStorageError = true; }
+  state.sessionSavedAt = '';
+}
 
 /**
  * Required-update check for the generated userscript.
@@ -222,7 +275,7 @@ const INTRODB_BASE = 'https://api.introdb.app';
  * Get GM_xmlhttpRequest if available (Tampermonkey/Greasemonkey)
  */
 function getGmXhr() {
-  return (typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null) || 
+  return (typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null) ||
          (typeof _GM_xmlhttpRequest !== 'undefined' ? _GM_xmlhttpRequest : null) ||
          (typeof GM !== 'undefined' && GM.xmlHttpRequest ? GM.xmlHttpRequest : null);
 }
@@ -234,7 +287,7 @@ async function searchImdbByTitle(title, year, apiKey) {
   const query = encodeURIComponent(title.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim());
   const url = `https://v3.sg.media-imdb.com/suggestion/x/${query}.json`;
   console.log('[NFE] IMDb search request URL:', url, 'for title:', title, 'year:', year);
-  
+
   const gmXhr = getGmXhr();
   console.log('[NFE] GM_xmlhttpRequest available:', !!gmXhr, 'using fetch fallback');
   if (gmXhr) {
@@ -255,12 +308,12 @@ async function searchImdbByTitle(title, year, apiKey) {
             console.log('[NFE] IMDb search response data:', data);
             const results = (data.d || []).filter(r => r.qid === 'tvSeries' || r.qid === 'tvMiniSeries');
             console.log('[NFE] Filtered TV series results:', results.length);
-          
+
             if (!results.length) {
               resolve({ success: false, error: 'Not found on IMDb' });
               return;
             }
-            
+
             let best = results[0];
             if (year) {
               const byYear = results.find(r => String(r.y) === year && r.l.toLowerCase() === title.toLowerCase());
@@ -271,18 +324,18 @@ async function searchImdbByTitle(title, year, apiKey) {
               const exact = results.find(r => r.l.toLowerCase() === title.toLowerCase());
               if (exact) best = exact;
             }
-            
+
             const imdbId = best.id;
             if (!imdbId || !imdbId.startsWith('tt')) {
               resolve({ success: false, error: 'Could not obtain a valid IMDb ID' });
               return;
             }
-            
-            resolve({ 
-              success: true, 
-              imdbId, 
-              title: best.l, 
-              year: best.y 
+
+            resolve({
+              success: true,
+              imdbId,
+              title: best.l,
+              year: best.y
             });
           } catch (parseError) {
             console.error('[NFE] IMDb response parse error:', parseError);
@@ -300,19 +353,19 @@ async function searchImdbByTitle(title, year, apiKey) {
       });
     });
   }
-  
+
   console.log('[NFE] Using fetch fallback (may fail due to CORS)');
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
     const data = await response.json();
     console.log('[NFE] IMDb search response data:', data);
     const results = (data.d || []).filter(r => r.qid === 'tvSeries' || r.qid === 'tvMiniSeries');
     console.log('[NFE] Filtered TV series results:', results.length);
-    
+
     if (!results.length) {
       return { success: false, error: 'Not found on IMDb' };
     }
-    
+
     let best = results[0];
     if (year) {
       const byYear = results.find(r => String(r.y) === year && r.l.toLowerCase() === title.toLowerCase());
@@ -323,17 +376,17 @@ async function searchImdbByTitle(title, year, apiKey) {
       const exact = results.find(r => r.l.toLowerCase() === title.toLowerCase());
       if (exact) best = exact;
     }
-    
+
     const imdbId = best.id;
     if (!imdbId || !imdbId.startsWith('tt')) {
       return { success: false, error: 'Could not obtain a valid IMDb ID' };
     }
-    
-    return { 
-      success: true, 
-      imdbId, 
-      title: best.l, 
-      year: best.y 
+
+    return {
+      success: true,
+      imdbId,
+      title: best.l,
+      year: best.y
     };
   } catch (error) {
     console.error('[NFE] Fetch fallback error:', error);
@@ -344,10 +397,10 @@ async function searchImdbByTitle(title, year, apiKey) {
 /**
  * Load existing segments from IntroDB for deduplication
  * Uses GM_xmlhttpRequest to avoid CORS issues
- * 
+ *
  * This function collects unique episode keys from the currently captured items
  * and calls /segments endpoint once per unique episode.
- * 
+ *
  * @param {string} imdbId - IMDb ID to load segments for
  * @param {string} apiKey - IntroDB API key (optional)
  * @returns {Promise<Array>} - Array of { key, segmentType } objects
@@ -391,58 +444,114 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
   if (useCache && state.dedupCacheV2[key]) {
     return state.dedupCacheV2[key];
   }
-  
-  const [imdbId, season, episode] = key.split('|');
-  const url = `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(season)}&episode=${encodeURIComponent(episode)}`;
-  
+
+  const [imdbId, seasonOrMediaType, episode] = key.split('|');
+  if (!/^\d+$/.test(seasonOrMediaType || '') || Number(seasonOrMediaType) < 1
+    || !/^\d+$/.test(episode || '') || Number(episode) < 1) {
+    throw new Error(`IntroDB cannot check ${imdbId} S${seasonOrMediaType}E${episode}: season and episode must be positive integers.`);
+  }
+  const describeHttpError = (status, body) => {
+    let detail = '';
+    try { const json = JSON.parse(body); detail = typeof json.error === 'string' ? json.error.slice(0, 200) : ''; } catch (_) {}
+    return new Error(`IntroDB duplicate check returned HTTP ${status} for ${imdbId} S${seasonOrMediaType}E${episode}${detail ? `: ${detail}` : '.'}`);
+  };
+  const url = `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(seasonOrMediaType)}&episode=${encodeURIComponent(episode)}`;
+
   const gmXhr = getGmXhr();
-  
-  return new Promise((resolve) => {
+
+  const parseExistingSegments = json => {
+    if (!json || typeof json !== 'object' || json.error || json.errors) {
+      throw new Error('IntroDB returned an invalid response. Please try again.');
+    }
+    const set = new Set();
+    const rangesByType = new Map();
+    const coerceExistingSeconds = value => {
+      const number = Number(value);
+      if (Number.isFinite(number)) return number;
+      const parts = String(value || '').trim().split(':').map(Number);
+      if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
+      if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      return null;
+    };
+    const readRangeValue = (source, secondsKeys, millisecondsKey) => {
+      for (const key of secondsKeys) {
+        if (source?.[key] != null) return coerceExistingSeconds(source[key]);
+      }
+      if (source?.[millisecondsKey] != null) return Number(source[millisecondsKey]) / 1000;
+      return null;
+    };
+    const add = (segmentType, value) => {
+      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType;
+      if (!['intro', 'recap', 'outro'].includes(normalizedType) || value == null) return;
+      set.add(normalizedType);
+      const entries = Array.isArray(value) ? value : [value];
+      const ranges = entries.map(entry => {
+        const source = entry?.segment && typeof entry.segment === 'object' ? entry.segment : entry;
+        const start = readRangeValue(source, ['start_sec', 'startSec', 'start'], 'start_ms');
+        const end = readRangeValue(source, ['end_sec', 'endSec', 'end'], 'end_ms');
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+        return {
+          startSec: start,
+          endSec: end,
+        };
+      }).filter(Boolean);
+      if (ranges.length) rangesByType.set(normalizedType, [...(rangesByType.get(normalizedType) || []), ...ranges]);
+    };
+
+    if (Array.isArray(json)) {
+      json.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+    } else if (Array.isArray(json?.segments)) {
+      json.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+    }
+    for (const type of ['intro', 'recap', 'outro', 'credits']) add(type, json?.[type]);
+    Object.defineProperty(set, 'rangesByType', { value: rangesByType, enumerable: false });
+    return set;
+  };
+
+  return new Promise((resolve, reject) => {
     if (gmXhr) {
       gmXhr({
         method: 'GET',
         url: url,
+        timeout: 15000,
+        ontimeout: () => reject(new Error('IntroDB duplicate check timed out. Please try again.')),
+        onabort: () => reject(new Error('IntroDB duplicate check was interrupted. Please try again.')),
         headers: { 'Accept': 'application/json' },
         onload: (response) => {
           try {
             if (response.status === 200) {
               const json = JSON.parse(response.responseText);
-              const set = new Set();
-              for (const t of ['intro', 'recap', 'outro']) {
-                if (json && json[t] != null) set.add(t);
-              }
+              const set = parseExistingSegments(json);
               if (writeCache) state.dedupCacheV2[key] = set;
               resolve(set);
-            } else {
+            } else if (response.status === 404) {
               if (writeCache) state.dedupCacheV2[key] = new Set();
               resolve(new Set());
+            } else {
+              reject(describeHttpError(response.status, response.responseText));
             }
           } catch (_) {
-            if (writeCache) state.dedupCacheV2[key] = new Set();
-            resolve(new Set());
+            reject(new Error('IntroDB returned an invalid response. Please try again.'));
           }
         },
         onerror: () => {
-          if (writeCache) state.dedupCacheV2[key] = new Set();
-          resolve(new Set());
+          reject(new Error('IntroDB duplicate check failed. Please try again.'));
         }
       });
     } else {
       // Fallback to fetch (will likely fail due to CORS)
-      fetch(url)
-        .then(response => response.json())
+      fetch(url, { signal: AbortSignal.timeout(15000) })
+        .then(async response => {
+          if (response.status === 404) return {};
+          if (!response.ok) throw describeHttpError(response.status, await response.text());
+          return response.json();
+        })
         .then(json => {
-          const set = new Set();
-          for (const t of ['intro', 'recap', 'outro']) {
-            if (json && json[t] != null) set.add(t);
-          }
+          const set = parseExistingSegments(json);
           if (writeCache) state.dedupCacheV2[key] = set;
           resolve(set);
         })
-        .catch(() => {
-          if (writeCache) state.dedupCacheV2[key] = new Set();
-          resolve(new Set());
-        });
+        .catch(reject);
     }
   });
 }
@@ -454,12 +563,15 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
 async function submitSegment(item, apiKey) {
   const url = `${INTRODB_BASE}/submit`;
   const gmXhr = getGmXhr();
-  
+
   if (gmXhr) {
     return new Promise((resolve) => {
       gmXhr({
         method: 'POST',
         url: url,
+        timeout: 15000,
+        ontimeout: () => resolve({ success: false, status: 0 }),
+        onabort: () => resolve({ success: false, status: 0 }),
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
@@ -484,11 +596,12 @@ async function submitSegment(item, apiKey) {
       });
     });
   }
-  
+
   // Fallback to fetch
   try {
     const response = await fetch(url, {
       method: 'POST',
+      signal: AbortSignal.timeout(15000),
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': apiKey,
@@ -502,7 +615,7 @@ async function submitSegment(item, apiKey) {
         end_sec: item.end_sec,
       }),
     });
-    
+
     return {
       success: response.status >= 200 && response.status < 300,
       status: response.status
@@ -532,7 +645,7 @@ async function lookupImdbTitle(imdbId) {
             ontimeout: reject,
           });
         })
-      : await fetch(url).then(response => response.text());
+      : await fetch(url, { signal: AbortSignal.timeout(15000) }).then(response => response.text());
     const result = (JSON.parse(responseText).d || []).find(item => item.id === imdbId);
     return result ? { success: true, title: result.l, year: result.y } : { success: false };
   } catch (_) {
@@ -584,10 +697,13 @@ const TVDB_STORAGE = {
 const TOKEN_MAX_AGE_MS = 29 * 24 * 60 * 60 * 1000;
 const TVDB_EPISODE_LANGUAGE = 'eng';
 const TVDB_SEASON_TYPE = 'default';
+const GTST_IMDB_ID = 'tt0096597';
 const TVDB_EPISODE_ENDPOINT_SHAPE = `${TVDB_BASE}/series/{seriesId}/episodes/{seasonType}/{language}?page={page}`;
 let loginPromise = null;
 const episodeListCache = new Map();
+const episodeBaseCache = new Map();
 const episodeTranslationCache = new Map();
+const seriesExtendedCache = new Map();
 
 function getStoredValue(key, fallback = '') {
   try {
@@ -636,6 +752,7 @@ function tvdbRequest({ method = 'GET', path, token = '', data }) {
   }
 
   return fetch(url, {
+    signal: AbortSignal.timeout(15000),
     method,
     headers,
     body: data === undefined ? undefined : JSON.stringify(data),
@@ -732,6 +849,27 @@ async function fetchTvdbEpisodeTranslation(episodeId, language = TVDB_EPISODE_LA
   return cachedTvdbGet(episodeTranslationCache, cacheKey, path);
 }
 
+async function fetchTvdbEpisodeBase(episodeId) {
+  const cacheKey = `episode:${episodeId}|base`;
+  const path = `/episodes/${encodeURIComponent(episodeId)}`;
+  return cachedTvdbGet(episodeBaseCache, cacheKey, path);
+}
+
+async function fetchTvdbSeriesExtended(seriesId) {
+  const encodedSeriesId = encodeURIComponent(seriesId);
+  const cacheKey = `series:${seriesId}|extended`;
+  const path = `/series/${encodedSeriesId}/extended`;
+  return cachedTvdbGet(seriesExtendedCache, cacheKey, path);
+}
+
+async function fetchTvdbSeasonEpisodeList(seriesId, season) {
+  const encodedSeriesId = encodeURIComponent(seriesId);
+  const cacheKey = `series:${seriesId}|seasonType:${TVDB_SEASON_TYPE}|season:${season}|page:0`;
+  const path = `/series/${encodedSeriesId}/episodes/${TVDB_SEASON_TYPE}?page=0&season=${encodeURIComponent(season)}`;
+  const data = await cachedTvdbGet(episodeListCache, cacheKey, path);
+  return data?.episodes || data?.series?.episodes || [];
+}
+
 function normalizeTitle(value) {
   return String(value || '')
     .normalize('NFKD')
@@ -760,10 +898,180 @@ function describeSkipReasons(reasons) {
     noExactMatch: 'no exact normalized TVDB match',
     ambiguousTvdbTitle: 'ambiguous TVDB titles',
     reusedTvdbEpisode: 'TVDB episode already matched',
+    missingAbsoluteNumber: 'titles without an absolute episode number',
+    absoluteEpisodeNotFound: 'absolute TVDB episodes not found',
+    ambiguousAbsoluteEpisode: 'ambiguous absolute TVDB episodes',
+    invalidCanonicalEpisode: 'TVDB episodes without canonical default numbering',
   };
   return Object.entries(reasons)
     .map(([reason, count]) => `${labels[reason] || reason}: ${count}`)
     .join(', ');
+}
+
+function extractAbsoluteEpisodeNumber(value) {
+  const match = /^(?:aflevering|episode)\s+(\d+)$/.exec(normalizeTitle(value));
+  if (!match) return null;
+  const number = Number(match[1]);
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+function extractEpisodeTitleNumber(value) {
+  const match = /^(?:aflevering|episode)\s+(\d+)\b/.exec(normalizeTitle(value));
+  if (!match) return null;
+  const number = Number(match[1]);
+  return Number.isSafeInteger(number) && number > 0 ? number : null;
+}
+
+function getOfficialSeasonNumbers(series) {
+  const seasons = Array.isArray(series?.seasons) ? series.seasons : [];
+  const official = seasons.filter(season => {
+    const typeId = Number(season?.type?.id ?? season?.typeId);
+    const type = normalizeTitle(season?.type?.type || season?.type?.name || season?.typeName);
+    return typeId === 1 || type === 'official' || type === 'aired order' || type === 'default';
+  });
+  const selected = official.length ? official : seasons;
+  return [...new Set(selected
+    .map(season => Number(season?.number))
+    .filter(number => Number.isInteger(number) && number > 0))]
+    .sort((a, b) => a - b);
+}
+
+async function findGtstEpisodeByTitleNumber(tvdbSeriesId, absoluteNumber) {
+  const series = await fetchTvdbSeriesExtended(tvdbSeriesId);
+  const seasons = getOfficialSeasonNumbers(series);
+  let low = 0;
+  let high = seasons.length - 1;
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const season = seasons[middle];
+    const episodes = await fetchTvdbSeasonEpisodeList(tvdbSeriesId, season);
+    const numberedEpisodes = episodes
+      .map(episode => ({ episode, titleNumber: extractEpisodeTitleNumber(episode?.name) }))
+      .filter(entry => entry.titleNumber != null)
+      .sort((a, b) => a.titleNumber - b.titleNumber);
+    if (!numberedEpisodes.length) return [];
+
+    const first = numberedEpisodes[0].titleNumber;
+    const last = numberedEpisodes[numberedEpisodes.length - 1].titleNumber;
+    if (absoluteNumber < first) {
+      high = middle - 1;
+      continue;
+    }
+    if (absoluteNumber > last) {
+      low = middle + 1;
+      continue;
+    }
+    return numberedEpisodes
+      .filter(entry => entry.titleNumber === absoluteNumber)
+      .map(entry => entry.episode);
+  }
+  return [];
+}
+
+async function fetchTvdbEpisodeTitles(episode, languages) {
+  const titles = [String(episode?.name || '').trim()].filter(Boolean);
+  for (const language of languages) {
+    try {
+      const translation = await fetchTvdbEpisodeTranslation(episode.id, language);
+      const title = String(translation?.name || '').trim();
+      if (title && !titles.some(existing => normalizeTitle(existing) === normalizeTitle(title))) titles.push(title);
+    } catch (error) {
+      console.warn('[TVDB] GTST episode translation request failed', {
+        episodeId: episode.id,
+        requestedLanguage: language,
+        reason: error?.message || String(error),
+      });
+    }
+  }
+  return titles;
+}
+
+async function mapGtstAbsoluteTitleEpisodes(providerEpisodes, tvdbSeriesId, languages) {
+  const mapping = new Map();
+  const skipReasons = {};
+  const usedTvdbIds = new Set();
+
+  for (const providerEpisode of providerEpisodes) {
+    const absoluteNumber = extractAbsoluteEpisodeNumber(providerEpisode.title);
+    if (absoluteNumber == null) {
+      incrementReason(skipReasons, 'missingAbsoluteNumber');
+      continue;
+    }
+
+    const absoluteMatches = await findGtstEpisodeByTitleNumber(tvdbSeriesId, absoluteNumber);
+    if (!absoluteMatches.length) {
+      incrementReason(skipReasons, 'absoluteEpisodeNotFound');
+      continue;
+    }
+    if (absoluteMatches.length !== 1) {
+      incrementReason(skipReasons, 'ambiguousAbsoluteEpisode');
+      continue;
+    }
+
+    const absoluteEpisode = absoluteMatches[0];
+    if (absoluteEpisode?.id == null) {
+      incrementReason(skipReasons, 'absoluteEpisodeNotFound');
+      continue;
+    }
+    const canonicalEpisode = await fetchTvdbEpisodeBase(absoluteEpisode.id);
+    const canonicalSeason = Number(canonicalEpisode?.seasonNumber);
+    const canonicalNumber = Number(canonicalEpisode?.number);
+    if (!Number.isInteger(canonicalSeason) || canonicalSeason < 1 ||
+        !Number.isInteger(canonicalNumber) || canonicalNumber < 1) {
+      incrementReason(skipReasons, 'invalidCanonicalEpisode');
+      continue;
+    }
+
+    const titles = await fetchTvdbEpisodeTitles(
+      { ...canonicalEpisode, name: absoluteEpisode.name || canonicalEpisode.name },
+      languages,
+    );
+    const providerTitle = normalizeTitle(providerEpisode.title);
+    const exactTitles = titles.filter(title =>
+      extractAbsoluteEpisodeNumber(title) === absoluteNumber &&
+      normalizeTitle(title) === providerTitle
+    );
+    if (!exactTitles.length) {
+      incrementReason(skipReasons, 'noExactMatch');
+      continue;
+    }
+    if (usedTvdbIds.has(String(canonicalEpisode.id))) {
+      incrementReason(skipReasons, 'reusedTvdbEpisode');
+      continue;
+    }
+
+    usedTvdbIds.add(String(canonicalEpisode.id));
+    mapping.set(`${providerEpisode.season}|${providerEpisode.episode}`, {
+      id: canonicalEpisode.id,
+      season: canonicalSeason,
+      episode: canonicalNumber,
+      title: exactTitles[0],
+    });
+  }
+
+  const matchStats = {
+    matched: mapping.size,
+    skipped: providerEpisodes.length - mapping.size,
+    skipReasons,
+  };
+  const reasonSummary = describeSkipReasons(skipReasons);
+  if (!mapping.size) {
+    return {
+      success: false,
+      mapping,
+      method: 'absolute-title',
+      reason: `no reliable GTST absolute-number and exact-title mappings exist${reasonSummary ? ` (${reasonSummary})` : ''}`,
+      matchStats,
+    };
+  }
+  return {
+    success: true,
+    mapping,
+    method: 'absolute-title',
+    reason: `GTST absolute-number lookup with exact title verification; ${mapping.size} matched and ${matchStats.skipped} skipped${reasonSummary ? ` (${reasonSummary})` : ''}`,
+    matchStats,
+  };
 }
 
 function normalizeProviderEpisodes(episodes) {
@@ -1079,37 +1387,54 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
   try {
     const tvdbSeriesId = await resolveTvdbSeriesId(imdbId);
     const requireTitleMatch = regularItems.every(item => item._tvdbRequireTitleMatch === true);
-    const episodeList = await fetchTvdbEpisodeList(tvdbSeriesId, TVDB_EPISODE_LANGUAGE);
-    const localizedEpisodes = await ensureTvdbEpisodeNameLanguage(episodeList, providerEpisodes, TVDB_EPISODE_LANGUAGE);
-    logTvdbEpisodeLanguageAudit(tvdbSeriesId, TVDB_EPISODE_LANGUAGE, episodeList, localizedEpisodes);
-    const tvdbCatalog = cleanTvdbEpisodes(localizedEpisodes);
-    const tvdbEpisodes = tvdbCatalog.episodes;
-    if (requireTitleMatch || providerEpisodes.length !== tvdbEpisodes.length) {
-      const additionalLanguages = [...new Set(items.flatMap(item =>
-        Array.isArray(item._tvdbEpisodeLanguages) ? item._tvdbEpisodeLanguages : []
-      ).map(language => String(language || '').trim().toLowerCase()))]
-        .filter(language => language && language !== TVDB_EPISODE_LANGUAGE);
-      const alternateCatalogs = [];
-      for (const language of additionalLanguages) {
-        const alternateList = await fetchTvdbEpisodeList(tvdbSeriesId, language);
-        const alternateLocalized = await ensureTvdbEpisodeNameLanguage(alternateList, providerEpisodes, language);
-        logTvdbEpisodeLanguageAudit(tvdbSeriesId, language, alternateList, alternateLocalized);
-        alternateCatalogs.push(cleanTvdbEpisodes(alternateLocalized));
+    const episodeLanguages = [...new Set(items.flatMap(item =>
+      Array.isArray(item._tvdbEpisodeLanguages) ? item._tvdbEpisodeLanguages : []
+    ).map(language => String(language || '').trim().toLowerCase()))]
+      .filter(Boolean);
+    const useGtstAbsoluteTitleMatch = imdbId === GTST_IMDB_ID &&
+      regularItems.every(item => item._tvdbAbsoluteTitleMatch === true);
+
+    let result;
+    let tvdbEpisodes = [];
+    let tvdbSpecialsExcluded = 0;
+    if (useGtstAbsoluteTitleMatch) {
+      result = await mapGtstAbsoluteTitleEpisodes(
+        providerEpisodes,
+        tvdbSeriesId,
+        [...new Set([TVDB_EPISODE_LANGUAGE, ...episodeLanguages])],
+      );
+    } else {
+      const episodeList = await fetchTvdbEpisodeList(tvdbSeriesId, TVDB_EPISODE_LANGUAGE);
+      const localizedEpisodes = await ensureTvdbEpisodeNameLanguage(episodeList, providerEpisodes, TVDB_EPISODE_LANGUAGE);
+      logTvdbEpisodeLanguageAudit(tvdbSeriesId, TVDB_EPISODE_LANGUAGE, episodeList, localizedEpisodes);
+      const tvdbCatalog = cleanTvdbEpisodes(localizedEpisodes);
+      tvdbEpisodes = tvdbCatalog.episodes;
+      tvdbSpecialsExcluded = tvdbCatalog.specialsExcluded;
+      if (requireTitleMatch || providerEpisodes.length !== tvdbEpisodes.length) {
+        const additionalLanguages = episodeLanguages
+          .filter(language => language !== TVDB_EPISODE_LANGUAGE);
+        const alternateCatalogs = [];
+        for (const language of additionalLanguages) {
+          const alternateList = await fetchTvdbEpisodeList(tvdbSeriesId, language);
+          const alternateLocalized = await ensureTvdbEpisodeNameLanguage(alternateList, providerEpisodes, language);
+          logTvdbEpisodeLanguageAudit(tvdbSeriesId, language, alternateList, alternateLocalized);
+          alternateCatalogs.push(cleanTvdbEpisodes(alternateLocalized));
+        }
+        mergeTvdbEpisodeTitles(tvdbCatalog, alternateCatalogs);
       }
-      mergeTvdbEpisodeTitles(tvdbCatalog, alternateCatalogs);
+      logTvdbEpisodeMatchTitles(tvdbSeriesId, providerEpisodes, tvdbEpisodes);
+      if (!tvdbEpisodes.length) return { success: false, reason: 'TVDB returned no usable episode metadata' };
+      const duplicateTvdbNumber = findDuplicateNumber(tvdbEpisodes);
+      if (duplicateTvdbNumber) {
+        return { success: false, reason: `TVDB metadata has duplicate regular episode number ${duplicateTvdbNumber.replace('|', 'x')}` };
+      }
+      result = mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch });
     }
-    logTvdbEpisodeMatchTitles(tvdbSeriesId, providerEpisodes, tvdbEpisodes);
-    if (!tvdbEpisodes.length) return { success: false, reason: 'TVDB returned no usable episode metadata' };
-    const duplicateTvdbNumber = findDuplicateNumber(tvdbEpisodes);
-    if (duplicateTvdbNumber) {
-      return { success: false, reason: `TVDB metadata has duplicate regular episode number ${duplicateTvdbNumber.replace('|', 'x')}` };
-    }
-    const result = mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch });
     const stats = {
       providerRegular: providerEpisodes.length,
-      tvdbRegular: tvdbEpisodes.length,
+      tvdbRegular: useGtstAbsoluteTitleMatch ? result.matchStats?.matched ?? 0 : tvdbEpisodes.length,
       providerSpecialsExcluded,
-      tvdbSpecialsExcluded: tvdbCatalog.specialsExcluded,
+      tvdbSpecialsExcluded,
       capturedSpecialsExcluded,
       regularEpisodesMatched: result.matchStats?.matched ?? 0,
       regularEpisodesSkipped: result.matchStats?.skipped ?? providerEpisodes.length,
@@ -1121,7 +1446,15 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
     for (const item of regularItems) {
       const match = result.mapping.get(`${item.season}|${item.episode}`);
       if (!match) continue;
-      const { _eid, _episodeTitle, _showId, _tvdbEpisodeLanguages, _tvdbRequireTitleMatch, ...submissionItem } = item;
+      const {
+        _eid,
+        _episodeTitle,
+        _showId,
+        _tvdbEpisodeLanguages,
+        _tvdbRequireTitleMatch,
+        _tvdbAbsoluteTitleMatch,
+        ...submissionItem
+      } = item;
       mappedItems.push({ ...submissionItem, season: match.season, episode: match.episode });
     }
     stats.capturedRegularSegmentsMatched = mappedItems.length;
@@ -1178,8 +1511,8 @@ const PANEL_COLORS = {
   panelBg: '#181818',
   border: '#2c2c2c',
   text: '#fff',
-  textSecondary: '#777',
-  textMuted: '#444',
+  textSecondary: '#b0b0b0',
+  textMuted: '#999',
   accent: '#E50914',
 };
 
@@ -1284,22 +1617,6 @@ const PROVIDER_CONFIGS = {
       title: 'SegmentScraper',
     },
     captureHint: 'All available seasons and episodes are captured automatically from SkyShowtime catalogue metadata.',
-  },
-  crunchyroll: {
-    name: 'Crunchyroll',
-    match: 'https://www.crunchyroll.com/*',
-    colors: {
-      primary: '#f47521',
-      primaryDark: '#c85d17',
-      secondary: '#1565c0',
-      secondaryDark: '#0d47a1',
-    },
-    nameColor: '#f47521',
-    infoAccent: '#f47521',
-    branding: {
-      title: 'SegmentScraper',
-    },
-    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
   },
 };
 
@@ -1474,7 +1791,14 @@ function logCapturedTimestamps({
       end_sec: item.end_sec,
     })),
   };
-  console.info(`[${prefix}] Captured timestamps · ${showTitle || 'Unknown series'} · ${episodeLabel}`, details);
+  // Keep capture logs in the normal Console log stream. Some DevTools setups
+  // hide the Info level by default, which made the timestamps look missing
+  // even though Prime had captured them successfully.
+  const writeLog = typeof console !== 'undefined' && typeof console.log === 'function'
+    ? console.log.bind(console)
+    : console.info.bind(console);
+  const times = details.segments.map(segment => `${segment.type}: ${segment.start} → ${segment.end}`).join(' · ');
+  writeLog(`[${prefix}] Captured timestamps · ${showTitle || 'Unknown series'} · ${episodeLabel} · ${times}`, details);
 }
 
 /**
@@ -1485,6 +1809,7 @@ function logCapturedTimestamps({
 
 // Default provider name
 let currentProvider = 'netflix';
+let panelReturnFocus = null;
 
 /**
  * Set the current provider name
@@ -1561,12 +1886,17 @@ function createPanel() {
 
   const panel = document.createElement('div');
   panel.id = 'nfe-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', 'SegmentScraper');
+  panel.tabIndex = -1;
   panel.style.cssText = `
     position:fixed; z-index:2147483647; width:308px; max-width:calc(100vw - 40px);
     background:${colors.background}; border:1px solid ${colors.border}; border-radius:12px;
     padding:16px; color:${colors.text}; font-family:-apple-system,Arial,sans-serif;
     font-size:13px; line-height:normal; box-sizing:border-box; box-shadow:0 16px 48px rgba(0,0,0,0.85);
     transition:opacity 0.18s; user-select:none; display:none; opacity:0;
+    max-height:calc(100dvh - 40px); overflow:auto; overscroll-behavior:contain;
+    scrollbar-width:thin; scrollbar-color:#555 #181818;
   `;
 
   if (state.updateRequired) {
@@ -1588,7 +1918,7 @@ function createPanel() {
       </div>
     `;
 
-    document.body.appendChild(panel);
+    (document.fullscreenElement || document.body).appendChild(panel);
     panel.addEventListener('click', event => event.stopPropagation());
     panel.addEventListener('mousedown', event => event.stopPropagation());
     console.warn(`[NFE] Update required: v${state.currentVersion} -> v${state.latestVersion}`);
@@ -1607,10 +1937,12 @@ function createPanel() {
         appearance:none; -webkit-appearance:none;
       }
       #nfe-panel button, #nfe-panel input { min-height:0; }
+      #nfe-panel :focus-visible { outline:2px solid white; outline-offset:2px; }
+      #nfe-panel summary { cursor:pointer; padding:8px 0; font-size:12px; font-weight:700; }
     </style>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <span style="font-size:13px;font-weight:700;color:${nameColor}">${config.name} ${branding.title}</span>
-      <button id="nfe-close" style="background:none;border:none;color:${colors.textMuted};font-size:18px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s"
+      <button id="nfe-close" aria-label="Close SegmentScraper" style="background:none;border:none;color:${colors.textMuted};font-size:18px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s"
         onmouseenter="this.style.color='${colors.text}'" onmouseleave="this.style.color='${colors.textMuted}'">✕</button>
     </div>
 
@@ -1619,7 +1951,7 @@ function createPanel() {
     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
       <div id="nfe-imdb-status" style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">IMDb ID: ${state.imdbId || 'Not set'}</div>
       <div style="display:flex;gap:4px">
-        <input id="nfe-imdb-input" type="text" placeholder="ID (e.g. tt123456)..." value="${state.imdbId}"
+        <input id="nfe-imdb-input" aria-label="IMDb ID or search title" type="text" placeholder="ID (e.g. tt123456)..." value="${state.imdbId}"
           style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
                  padding:6px 8px;font-size:12px;outline:none;transition:border-color 0.15s"
           onfocus="this.style.borderColor='${colors.accent}'" onblur="this.style.borderColor='#303030'"/>
@@ -1634,6 +1966,7 @@ function createPanel() {
       </div>
     </div>
 
+    <div id="nfe-imdb-feedback" role="status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:8px;line-height:1.4"></div>
     <div style="display:flex;gap:6px;margin-bottom:8px">
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
         <div id="nfe-cnt-ts"    style="font-size:20px;font-weight:700;color:#fff;line-height:1">0</div>
@@ -1664,9 +1997,10 @@ function createPanel() {
              padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
              transition:background 0.15s"
       onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">
-      Download JSON(s)
+      Show timestamps
     </button>
 
+     <details id="nfe-settings"><summary>API settings</summary>
      <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
        <div style="flex:1;height:1px;background:#222"></div>
        <span style="font-size:10px;color:${colors.textMuted};font-weight:600;letter-spacing:0.5px">TVDB</span>
@@ -1675,11 +2009,11 @@ function createPanel() {
 
      <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
        <div style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:5px">Your TVDB API Key</div>
-       <input id="nfe-tvdb-apikey-input" type="password" placeholder="Enter your TVDB API key..."
+       <input id="nfe-tvdb-apikey-input" aria-label="TheTVDB API key" type="password" placeholder="Enter your TVDB API key..."
          style="width:100%;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
                 padding:6px 8px;font-size:12px;outline:none;margin-bottom:5px"/>
        <div style="display:flex;gap:4px">
-         <input id="nfe-tvdb-pin-input" type="password" placeholder="Subscriber PIN (optional)"
+         <input id="nfe-tvdb-pin-input" aria-label="TheTVDB subscriber PIN" type="password" placeholder="Subscriber PIN (optional)"
            style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
                   padding:6px 8px;font-size:12px;outline:none"/>
          <button id="nfe-tvdb-set"
@@ -1699,7 +2033,7 @@ function createPanel() {
      <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
        <div style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:5px">API Key</div>
        <div style="display:flex;gap:4px">
-         <input id="nfe-apikey-input" type="password" placeholder="Enter your IntroDB API key..."
+         <input id="nfe-apikey-input" aria-label="IntroDB API key" type="password" placeholder="Enter your IntroDB API key..."
            style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
                   padding:6px 8px;font-size:12px;outline:none;transition:border-color 0.15s"
            onfocus="this.style.borderColor='${colors.accent}'" onblur="this.style.borderColor='#303030'"/>
@@ -1710,7 +2044,9 @@ function createPanel() {
        </div>
      </div>
 
-     <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
+     </details>
+     <div id="nfe-session-status" role="status" style="font-size:11px;color:#aaa;margin:8px 0;line-height:1.4"></div>
+     <div id="nfe-introdb-status" role="status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
 
      <button id="nfe-submit"
        style="width:100%;background:${providerColors.secondary};border:none;border-radius:8px;color:#fff;
@@ -1733,10 +2069,15 @@ function createPanel() {
   console.log('[NFE] Panel created and appended to body');
 
   setupPanelEventListeners();
+  const feedback = document.getElementById('nfe-imdb-feedback');
+  if (feedback) feedback.textContent = state.dbStatusMsg || '';
 
   panel.addEventListener('click', e => e.stopPropagation());
   panel.addEventListener('mousedown', e => e.stopPropagation());
-  panel.addEventListener('keydown', e => e.stopPropagation());
+  panel.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.key === 'Escape') { event.preventDefault(); closePanel(); }
+  });
 }
 
 /**
@@ -1773,9 +2114,13 @@ function openPanel() {
     return;
   }
   console.log('[NFE] Panel found, positioning and showing');
+  panelReturnFocus = document.activeElement;
   positionPanel(panel);
+  panel.style.pointerEvents = 'auto';
+  document.getElementById('nfe-btn')?.setAttribute('aria-expanded', 'true');
   state.panelVisible = true;
   panel.style.display = 'block';
+  panel.focus();
   requestAnimationFrame(() => (panel.style.opacity = '1'));
   updateCounters();
   updatePanelTitle();
@@ -1789,6 +2134,8 @@ function closePanel() {
   const panel = document.getElementById('nfe-panel');
   if (!panel) return;
   state.panelVisible = false;
+  document.getElementById('nfe-btn')?.setAttribute('aria-expanded', 'false');
+  if (panelReturnFocus?.isConnected) panelReturnFocus.focus();
   panel.style.opacity = '0';
   panel.style.pointerEvents = 'none';
   setTimeout(() => {
@@ -1811,6 +2158,10 @@ function showRequiredUpdate() {
  */
 function updateCounters() {
   const $ = id => document.getElementById(id);
+  const session = $('nfe-session-status');
+  if (session) session.textContent = state.sessionStorageError
+    ? 'Session recovery is unavailable. Download your data before reloading.'
+    : state.sessionSavedAt ? 'Session saved in this tab: ' + new Date(state.sessionSavedAt).toLocaleString('en-GB') : 'Captured data is saved in this tab for recovery after reload.';
   const ts = $('nfe-cnt-ts');
   if (ts) ts.textContent = state.allItems.length;
   const segmentsLabel = $('nfe-cnt-segments-label');
@@ -1879,7 +2230,8 @@ function toast(msg) {
     z-index:2147483647; box-shadow:0 4px 20px rgba(0,0,0,0.7);
     pointer-events:none; transition:opacity 0.3s;
   `;
-  document.body.appendChild(t);
+  t.setAttribute('role', 'status');
+  (document.fullscreenElement || document.body).appendChild(t);
   setTimeout(() => {
     t.style.opacity = '0';
     setTimeout(() => t.remove(), 350);
@@ -1890,7 +2242,7 @@ function toast(msg) {
  * Show the export data in a modal before files are downloaded.
  * The preview deliberately uses textContent so captured metadata cannot inject HTML.
  */
-function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
+function showExportPreview(view) {
   document.getElementById('nfe-export-preview')?.remove();
 
   const { colors: providerColors, name: providerName } = getProviderConfig(currentProvider);
@@ -1911,18 +2263,11 @@ function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   `;
 
   const heading = document.createElement('h2');
-  heading.textContent = `Review ${providerName} JSON export`;
+  heading.textContent = `${providerName} timestamps`;
   heading.style.cssText = `margin:0 0 6px; color:${providerColors.primary}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
-  const timestampLabel = items.length === 1 ? 'timestamp' : 'timestamps';
-  const fileLabel = fileCount === 1 ? 'file' : 'files';
-  const duplicateSummary = duplicateCount
-    ? `; ${duplicateCount} ${duplicateCount === 1 ? 'duplicate' : 'duplicates'} excluded`
-    : '';
-  summary.textContent = `${items.length} ${timestampLabel} in ${fileCount} ${fileLabel}${duplicateSummary}.`;
   summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
-  const preview = document.createElement('pre');
-  preview.textContent = JSON.stringify({ items }, null, 2);
+  const preview = document.createElement('div');
   preview.style.cssText = `
     overflow:auto; flex:1; min-height:180px; margin:0 0 14px; padding:12px; border-radius:8px;
     background:${colors.panelBg}; color:${colors.text}; box-sizing:border-box;
@@ -1931,126 +2276,227 @@ function showExportPreview({ items, fileCount, duplicateCount, onConfirm }) {
   const actions = document.createElement('div');
   actions.style.cssText = 'display:flex; justify-content:flex-end; gap:8px;';
   const cancel = document.createElement('button');
-  cancel.textContent = 'Cancel';
+  cancel.textContent = 'Close';
   cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
   const confirm = document.createElement('button');
   confirm.textContent = 'Download JSON';
   confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
 
-  const close = () => overlay.remove();
+  const clock = value => {
+    if (value == null || !Number.isFinite(Number(value))) return '—';
+    const ms = Math.round(Number(value) * 1000);
+    const seconds = Math.floor(ms / 1000);
+    return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
+  };
+  const update = next => {
+    view = next;
+    const rows = view.rows || [];
+    summary.textContent = `${rows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${view.duplicateCount} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
+    preview.replaceChildren();
+    for (const row of rows) {
+      const item = row.item;
+      const entry = document.createElement('div');
+      entry.style.cssText = `padding:10px 0; border-bottom:1px solid ${colors.border}; line-height:1.6;`;
+      const label = document.createElement('strong');
+      label.textContent = row.status;
+      label.style.color = row.status === 'NEW' ? '#69d89b' : colors.textSecondary;
+      const details = document.createElement('div');
+      details.textContent = `${item.imdb_id || 'IMDb pending'} · Provider S${item.season}E${item.episode} ${item._episodeTitle || ''}\n${item.segment_type} · ${clock(item.start_sec)} → ${clock(item.end_sec)} (${item.start_sec}–${item.end_sec} sec)`;
+      if (row.canonical) details.textContent += `\nTVDB S${row.canonical.season}E${row.canonical.episode}`;
+      if (row.reason) details.textContent += `\n${row.reason}`;
+      for (const range of row.existingRanges || []) {
+        details.textContent += `\nIntroDB: ${clock(range.startSec)} → ${clock(range.endSec)}`;
+      }
+      entry.append(label, details);
+      preview.append(entry);
+    }
+    confirm.disabled = view.checking || !view.items.length || !view.onConfirm;
+    confirm.style.opacity = confirm.disabled ? '.45' : '1';
+    confirm.style.cursor = confirm.disabled ? 'not-allowed' : 'pointer';
+    confirm.textContent = view.checking ? 'Checking…' : `Download JSON (${view.fileCount})`;
+  };
+  update(view);
+
+  const previousFocus = document.activeElement;
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-label', 'Show timestamps');
+  const close = () => { overlay.remove(); if (previousFocus?.isConnected) previousFocus.focus(); };
+  overlay.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.key === 'Escape') { event.preventDefault(); close(); }
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      (confirm.disabled || document.activeElement === confirm ? cancel : confirm).focus();
+    }
+  });
   cancel.addEventListener('click', close);
   overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  confirm.addEventListener('click', () => { close(); onConfirm(); });
+  confirm.addEventListener('click', () => { if (!confirm.disabled) view.onConfirm(); });
   actions.append(cancel, confirm);
   dialog.append(heading, summary, preview, actions);
   overlay.append(dialog);
-  document.body.append(overlay);
-  confirm.focus();
+  overlay.addEventListener('click', event => event.stopPropagation());
+  (document.fullscreenElement || document.body).append(overlay);
+  cancel.focus();
+  return update;
 }
 
-/**
- * Shared button component
- * Injects a trigger button into the player UI
- */
+/** Mount the extractor as a native control-row item, never inside a play-button wrapper. */
 
+const PLAYER_CONTROL_ANCHORS = {
+  netflix: ['[data-uia="control-fullscreen-enter"]', '[data-uia="control-fullscreen-exit"]', '[data-uia="control-audio-subtitle"]', '[data-uia="control-play-pause-play"]', '[data-uia="control-play-pause-pause"]'],
+  'prime-video': ['.atvwebplayersdk-fullscreen-button', '.atvwebplayersdk-subtitles-button', '.atvwebplayersdk-playpause-button'],
+  videoland: ['.vjs-fullscreen-control', '.vjs-play-control', '[data-testid="fullscreen-button"]', '[data-testid="play-pause-button"]'],
+  skyshowtime: ['[data-testid="fullscreen-button"]', '[data-testid="player-fullscreen-button"]', '.vjs-fullscreen-control', '[data-testid="play-pause-button"]'],
+  crunchyroll: ['[data-testid="fullscreen-button"]', '[data-testid="vilos-fullscreen-button"]', '[data-testid="play-pause-button"]', '.vjs-fullscreen-control'],
+};
 
-/**
- * Get the "next episode" button element (provider-specific)
- * @param {string} providerName - The provider name
- * @returns {HTMLElement|null} - The next episode button element
- */
+// These anchors were verified against supplied player markup. Their structural
+// identity remains valid while the provider hides its controls.
+const VERIFIED_CONTROL_ANCHORS = {
+  'prime-video': '#atvwebplayersdk-skip-backward-button',
+  videoland: '#volume-bar-control',
+  skyshowtime: '[data-testid="playback-lower-controls"] [data-testid="language-settings-button"]',
+};
+let mountedPlayerControl = null;
+
 function getNextEpBtn(providerName) {
-  // Default implementation - can be overridden by provider
-  return (
-    document.querySelector('[data-uia="control-next-episode"]') ||
-    document.querySelector('button[aria-label*="iguiente" i]') ||
-    document.querySelector('button[aria-label*="Next Episode" i]') ||
-    document.querySelector('button[aria-label*="next-episode" i]')
-  );
+  const root = document.fullscreenElement || document;
+  const verifiedSelector = VERIFIED_CONTROL_ANCHORS[providerName];
+  if (verifiedSelector) {
+    const verified = root.querySelector(verifiedSelector);
+
+    if (verified) return verified;
+  }
+  const videos = [...root.querySelectorAll('video')].map(video => video.getBoundingClientRect()).filter(rect => rect.width > 0 && rect.height > 0);
+  const isPlaybackControl = anchor => {
+    if (!anchor || !anchor.matches('button, [role="button"]') || anchor.closest('[role="slider"], .vjs-progress-control, [data-uia="timeline"]')) return false;
+    const rect = anchor.getBoundingClientRect();
+    if (!rect.width || !rect.height) return false;
+    return videos.some(video => rect.top >= video.top + video.height / 2 && rect.top <= video.bottom + 60 && rect.left >= video.left && rect.right <= video.right + 1);
+  };
+  for (const selector of PLAYER_CONTROL_ANCHORS[providerName] || []) {
+    for (const candidate of root.querySelectorAll(selector)) {
+      const anchor = candidate.matches('button, [role="button"]') ? candidate : candidate.querySelector('button, [role="button"]');
+      if (isPlaybackControl(anchor)) return anchor;
+    }
+  }
+  for (const anchor of root.querySelectorAll('button[aria-label], button[title], [role="button"][aria-label]')) {
+    const label = anchor.getAttribute('aria-label') || anchor.title || '';
+    if (/^(play|pause|afspelen|pauzeren)(?:$|\s|\()/i.test(label.trim()) && isPlaybackControl(anchor)) return anchor;
+  }
+  return null;
 }
 
-/**
- * Inject the trigger button into the page
- * @param {string} providerName - The provider name for theming
- * @param {Function} [getNextBtn] - Optional custom function to get next button
- */
-function injectBtn(providerName, getNextBtn) {
-  if (document.getElementById('nfe-btn')) {
-    return;
+/** Pure structural decision; wrapped native controls receive a sibling slot. */
+function getControlMount(providerName, anchor) {
+  const parent = anchor.parentElement;
+  if (providerName === 'videoland' && anchor.id === 'volume-bar-control') {
+    // Reserve space beside the entire volume/fullscreen group. Do not enlarge a
+    // fixed-size fullscreen wrapper or depend on its changing translated label.
+    return { reference: parent.parentElement, wrapped: true, after: false };
   }
-  
-  const config = getProviderConfig(providerName);
-  if (!config) {
-    console.error('[NFE] No config found for provider:', providerName);
-    return;
+  if (providerName === 'skyshowtime' && anchor.getAttribute('data-testid') === 'language-settings-button') {
+    return { reference: anchor, wrapped: false, after: true };
   }
+  if (providerName === 'prime-video' && anchor.id === 'atvwebplayersdk-skip-backward-button') {
+    return { reference: parent, wrapped: true, after: false };
+  }
+  // Lift past single-control wrappers until reaching a row containing other
+  // native controls. Inserting inside a fixed fullscreen wrapper stacks buttons.
+  let reference = anchor;
+  for (let container = parent; container && !container.matches?.('body, html'); container = container.parentElement) {
+    const count = container.querySelectorAll?.('button:not(#nfe-btn), [role="button"]:not(#nfe-btn)').length;
+    if (count > 1) return { reference, wrapped: reference !== anchor, after: false };
+    if (count == null) break;
+    reference = container;
+  }
+  return { reference: anchor, wrapped: false, after: false };
+}
 
-  const nextBtn = getNextBtn ? getNextBtn() : getNextEpBtn(providerName);
-  console.log('[NFE] nextBtn found:', !!nextBtn);
+function removePlayerButton() {
+  document.getElementById('nfe-button-slot')?.remove();
+  document.getElementById('nfe-btn')?.remove();
+  mountedPlayerControl = null;
+}
 
-  const btn = document.createElement('button');
-  btn.id = 'nfe-btn';
-  btn.title = 'Timestamps Extractor';
-  btn.innerHTML = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-      xmlns="http://www.w3.org/2000/svg" style="display:block">
-    <rect x="2" y="5" width="20" height="14" rx="1.5" stroke="white" stroke-width="1.6" fill="none"/>
-    <line x1="6"  y1="5"  x2="6"  y2="19" stroke="white" stroke-width="1.6"/>
-    <line x1="18" y1="5"  x2="18" y2="19" stroke="white" stroke-width="1.6"/>
-    <line x1="2"  y1="9"  x2="6"  y2="9"  stroke="white" stroke-width="1.4"/>
-    <line x1="18" y1="9"  x2="22" y2="9"  stroke="white" stroke-width="1.4"/>
-    <line x1="2"  y1="15" x2="6"  y2="15" stroke="white" stroke-width="1.4"/>
-    <line x1="18" y1="15" x2="22" y2="15" stroke="white" stroke-width="1.4"/>
-    <polyline points="9,10 12,13.5 15,10" stroke="white" stroke-width="1.6"
-              stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-    <line x1="12" y1="8" x2="12" y2="13.5" stroke="white" stroke-width="1.6" stroke-linecap="round"/>
-  </svg>`;
-
-  if (nextBtn) {
-    btn.style.cssText = `
-      background:none; border:none; cursor:pointer; padding:0; margin:0;
-      width:40px; height:40px; display:inline-flex; align-items:center; justify-content:center;
-      opacity:0.85; transition:opacity 0.15s, transform 0.15s; flex-shrink:0; vertical-align:middle;
-      z-index:2147483000;
-    `;
-    btn.addEventListener('mouseenter', () => { 
-      btn.style.opacity = '1';    
-      btn.style.transform = 'scale(1.15)'; 
+function injectBtn(providerName, getAnchor = getNextEpBtn) {
+  if (!document.body) return;
+  let button = document.getElementById('nfe-btn');
+  let anchor = getAnchor(providerName);
+  const root = document.fullscreenElement || document;
+  if (!anchor && mountedPlayerControl?.providerName === providerName &&
+      mountedPlayerControl.anchor.isConnected && root.contains(mountedPlayerControl.anchor)) {
+    // Zero-sized/hidden controls are not evidence that the player was removed.
+    anchor = mountedPlayerControl.anchor;
+  }
+  if (!anchor) { removePlayerButton(); return; }
+  if (!button) {
+    button = document.createElement('button');
+    button.id = 'nfe-btn';
+    button.type = 'button';
+    button.title = 'Open SegmentScraper';
+    button.setAttribute('aria-label', 'Open SegmentScraper');
+    button.setAttribute('aria-controls', 'nfe-panel');
+    button.setAttribute('aria-expanded', 'false');
+    const icon = document.createElement('span');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.style.cssText = 'display:block!important;width:28px!important;height:28px!important;pointer-events:none!important;';
+    // Provider SVG rules must not turn the filmstrip into a filled square.
+    const shadow = icon.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<style>:host{color:white}svg{display:block;width:28px;height:28px;fill:none}</style><svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="5" width="20" height="14" rx="1.5" stroke="white" stroke-width="1.6" fill="none"/><path d="M6 5v14M18 5v14M2 9h4m12 0h4M2 15h4m12 0h4" stroke="white" stroke-width="1.4" fill="none"/><polyline points="9,10 12,13.5 15,10" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M12 8v5.5" stroke="white" stroke-width="1.6" stroke-linecap="round" fill="none"/></svg>';
+    button.appendChild(icon);
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      event.preventDefault();
+      togglePanel();
     });
-    btn.addEventListener('mouseleave', () => { 
-      btn.style.opacity = '0.85'; 
-      btn.style.transform = 'scale(1)';    
-    });
-    nextBtn.insertAdjacentElement('beforebegin', btn);
-    console.log('[NFE] Button inserted before nextBtn');
-  } else {
-    // Fallback: fixed floating button
-    btn.style.cssText = `
-      background:rgba(0,0,0,0.6); border:none; cursor:pointer; padding:6px; margin:0;
-      width:36px; height:36px; display:inline-flex; align-items:center; justify-content:center;
-      border-radius:6px; opacity:0.85; transition:opacity 0.15s; flex-shrink:0;
-      position:fixed; bottom:90px; right:20px; z-index:2147483000;
-    `;
-    btn.addEventListener('mouseenter', () => (btn.style.opacity = '1'));
-    btn.addEventListener('mouseleave', () => (btn.style.opacity = '0.85'));
-    document.body.appendChild(btn);
-    console.log('[NFE] Button appended to body as fallback');
+    button.addEventListener('keydown', event => event.stopPropagation());
   }
-
-  btn.addEventListener('click', e => { 
-    console.log('[NFE] Button clicked, calling togglePanel');
-    try {
-      e.stopPropagation(); 
-      e.preventDefault(); 
-      if (typeof togglePanel === 'function') {
-        togglePanel();
-      } else {
-        console.error('[NFE] togglePanel is not a function:', typeof togglePanel);
+  const { reference, after } = getControlMount(providerName, anchor);
+  button.dataset.placement = 'controls';
+  button.className = '';
+  const rect = anchor.getBoundingClientRect();
+  const height = rect.height > 0 ? Math.max(40, Math.min(64, rect.height)) : 40;
+  const buttonStyle = 'all:initial;box-sizing:border-box!important;display:flex!important;align-items:center!important;justify-content:center!important;width:40px!important;min-width:40px!important;height:' + height + 'px!important;padding:0!important;margin:0!important;border:0!important;background:transparent!important;color:white!important;cursor:pointer!important;flex:0 0 40px!important;position:static!important;transform:none!important;';
+  if (button.dataset.controlHeight !== String(height)) {
+    button.dataset.controlHeight = String(height);
+    button.style.cssText = buttonStyle;
+  }
+  let slot = document.getElementById('nfe-button-slot');
+  if (!slot) {
+    slot = document.createElement('span');
+    slot.id = 'nfe-button-slot';
+    slot.style.cssText = 'all:initial;box-sizing:border-box!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;align-self:center!important;vertical-align:middle!important;flex:0 0 48px!important;width:48px!important;min-width:48px!important;margin:0 4px!important;padding:0!important;position:static!important;';
+  }
+  if (button.parentElement !== slot) slot.appendChild(button);
+  const correctlyPlaced = after ? reference.nextElementSibling === slot : slot.nextElementSibling === reference;
+  if (slot.parentElement !== reference.parentElement || !correctlyPlaced) reference.insertAdjacentElement(after ? 'afterend' : 'beforebegin', slot);
+  if (providerName === 'netflix') {
+    // Netflix's SVG can sit above the button's box center. Match the visible
+    // native icon, including its responsive size, rather than the wrapper.
+    const nativeIcon = anchor.querySelector('svg')?.getBoundingClientRect();
+    if (nativeIcon?.width > 0 && nativeIcon.height > 0) {
+      const size = Math.max(32, Math.min(48, nativeIcon.width));
+      const box = button.getBoundingClientRect();
+      const offset = nativeIcon.top + nativeIcon.height / 2 - box.top - box.height / 2;
+      const appearance = size + ':' + offset;
+      if (button.dataset.netflixIcon !== appearance) {
+        const icon = button.firstElementChild;
+        icon.style.cssText = 'display:block!important;flex-shrink:0!important;width:' + size + 'px!important;height:' + size + 'px!important;pointer-events:none!important;transform:translateY(' + offset + 'px)!important;';
+        icon.shadowRoot.querySelector('svg').style.cssText = 'width:100%;height:100%;';
+        button.dataset.netflixIcon = appearance;
       }
-    } catch (err) {
-      console.error('[NFE] Error in button click handler:', err);
     }
-  });
-  console.log('[NFE] Button click handler attached');
+  }
+  mountedPlayerControl = { providerName, anchor };
+  if (!document.getElementById('nfe-button-style')) {
+    const style = document.createElement('style');
+    style.id = 'nfe-button-style';
+    style.textContent = '#nfe-btn:focus-visible{outline:2px solid white!important;outline-offset:2px}';
+    (document.head || document.body).appendChild(style);
+  }
 }
 
 /**
@@ -2059,15 +2505,16 @@ function injectBtn(providerName, getNextBtn) {
  */
 
 
-const BUTTON_IDLE_DELAY_MS = 3000;
+
 let activeProviderConfig = getProviderConfig('netflix');
-let buttonHideTimer;
+
 
 function getItemShowId(item) {
   return item?._showId != null ? String(item._showId) : '';
 }
 
 function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
+  scheduleCaptureSave();
   const normalizedShowId = showId != null ? String(showId) : '';
   const hasTaggedItems = state.allItems.some(item => getItemShowId(item));
   state.allItems.forEach(item => {
@@ -2085,6 +2532,8 @@ function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
 
 function setDbStatus(msg) {
   state.dbStatusMsg = msg;
+  const feedback = document.getElementById('nfe-imdb-feedback');
+  if (feedback) feedback.textContent = msg;
   const el = document.getElementById('nfe-imdb-status');
   if (el) el.textContent = `IMDb ID: ${state.imdbId || 'Not set'}`;
 }
@@ -2149,7 +2598,7 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
     updateImdbInput();
     setDbStatus(`Manual override applied · ID: ${imdbOverride}`);
     updateCounters();
-    loadExistingSegments(imdbOverride);
+    loadExistingSegments(imdbOverride).catch(error => setIntrodbStatus(error.message));
     return;
   }
 
@@ -2161,7 +2610,7 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
       updateImdbInput();
       setDbStatus(`Found: ${result.imdbId}`);
       updateCounters();
-      loadExistingSegments(result.imdbId);
+      loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
     } else {
       if (!isCurrentShow()) return;
       setDbStatus(`IMDb lookup failed: ${result.error}`);
@@ -2174,10 +2623,23 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
 }
 
 /** Store extractor output and update the shared counters/toast identically. */
+function capturedSegmentKey(item) {
+  return JSON.stringify([item._showId, item._eid, item.season, item.episode, item.segment_type, item.start_sec, item.end_sec]);
+}
+
 function recordExtractedSegments(items) {
   if (state.updateRequired) return;
   if (!items.length) return;
+  const keys = new Set(state.allItems.map(capturedSegmentKey));
+  items = items.filter(item => {
+    const key = capturedSegmentKey(item);
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  });
+  if (!items.length) return;
   state.allItems.push(...items);
+  scheduleCaptureSave();
   state.interceptedCount++;
   updateCounters();
   toast(`+${items.length} timestamps captured · total: ${state.allItems.length}`);
@@ -2188,8 +2650,26 @@ function isAlreadyInIntroDB(item) {
   return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
 }
 
-async function mapCapturedItemsWithTvdb(action) {
-  const capturedItems = state.allItems.slice();
+function hasExistingSegment(existing, item) {
+  if (!existing) return false;
+  const ranges = existing.rangesByType?.get(item.segment_type);
+  if (ranges?.length) {
+    const start = Number(item.start_sec);
+    const end = Number(item.end_sec);
+    return ranges.some(range => {
+      const sameRange = Number.isFinite(start) && Number.isFinite(end) &&
+        Math.abs(Number(range.startSec) - start) < 0.01 &&
+        Math.abs(Number(range.endSec) - end) < 0.01;
+      if (!sameRange) return false;
+      return true;
+    });
+  }
+  return existing.has?.(item.segment_type) ?? false;
+}
+
+const overviewSource = Symbol('overviewSource');
+
+async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.slice()) {
   const pendingItems = capturedItems.filter(item => !item.imdb_id || item.imdb_id === 'IMDB_PENDING');
   if (pendingItems.length) {
     toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
@@ -2211,6 +2691,10 @@ async function mapCapturedItemsWithTvdb(action) {
     noExactMatch: 'no exact normalized TVDB match',
     ambiguousTvdbTitle: 'ambiguous TVDB title',
     reusedTvdbEpisode: 'TVDB episode already matched',
+    missingAbsoluteNumber: 'title without an absolute episode number',
+    absoluteEpisodeNotFound: 'absolute TVDB episode not found',
+    ambiguousAbsoluteEpisode: 'ambiguous absolute TVDB episode',
+    invalidCanonicalEpisode: 'TVDB episode without canonical default numbering',
   };
   const describeReasons = reasons => Object.entries(reasons || {})
     .map(([reason, count]) => `${reasonLabels[reason] || reason}: ${count}`)
@@ -2236,6 +2720,8 @@ async function mapCapturedItemsWithTvdb(action) {
       console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts match (${stats.providerRegular}); mapped by TVDB order. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
     } else if (mapped.method === 'title') {
       console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts differ (provider ${stats.providerRegular}, TVDB ${stats.tvdbRegular}); retained reliable exact normalized one-to-one title mappings. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
+    } else if (mapped.method === 'absolute-title') {
+      console.info(`[NFE-TVDB] ${action} series ${imdbId}: GTST episodes mapped by absolute episode number and verified by exact normalized TVDB title. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}.`);
     } else {
       console.info(`[NFE-TVDB] ${action} series ${imdbId}: no regular segments included (${mapped.reason}); captured special segments omitted: ${stats?.capturedSpecialsExcluded || 0}.`);
     }
@@ -2266,108 +2752,194 @@ function filterShortOutputSegments(items) {
   });
 }
 
+async function loadCanonicalExisting(episodeKeys) {
+  const results = new Map();
+  // Avoid bursts of hundreds of requests for large captured catalogues.
+  for (let index = 0; index < episodeKeys.length; index += 4) {
+    const batch = await Promise.all(episodeKeys.slice(index, index + 4).map(async key => [
+      key, await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
+    ]));
+    for (const [key, value] of batch) results.set(key, value);
+  }
+  return results;
+}
+
 async function exportJSON() {
+  if (state.exportInProgress || state.submitInProgress) {
+    toast('An operation is already in progress. Please wait.');
+    return;
+  }
+  state.exportInProgress = true;
+  try { await prepareJSONExport(); }
+  catch (error) {
+    toast(error.message || 'Export failed. Please try again.');
+    setIntrodbStatus('Export stopped. Please try again when the connection is available.');
+  } finally { state.exportInProgress = false; }
+}
+
+async function prepareJSONExport() {
   if (!state.allItems.length) {
     toast('No timestamps yet.');
     return;
   }
-  if (!state.tvdbApiKey) {
-    toast('Please enter your own TVDB API key before exporting JSON.');
-    setTvdbStatus('No TVDB API key configured');
-    return;
-  }
-  if (state.submitInProgress) {
-    toast('Submission in progress, please wait...');
-    return;
-  }
-
-  toast('Validating JSON export against TVDB...');
-  const mapped = await mapCapturedItemsWithTvdb('JSON export');
-  const mappedItems = mapped.items;
-  let items = filterShortOutputSegments(mappedItems);
-  const shortSegmentCount = mappedItems.length - items.length;
-  if (shortSegmentCount > 0) {
-    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
-  }
-  if (!items.length) {
-    if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+  const capturedItems = state.allItems.map((item, index) => ({ ...item, [overviewSource]: index }));
+  const view = {
+    items: [], fileCount: 0, duplicateCount: 0, checking: true,
+    rows: capturedItems.map(item => ({ item, status: 'Checking', reason: '' })),
+    message: 'Checking TVDB mapping and IntroDB…',
+  };
+  const refresh = showExportPreview(view);
+  try {
+    if (!state.tvdbApiKey) {
+      revealApiSettings();
+      toast('Please enter your own TVDB API key before exporting JSON.');
+      setTvdbStatus('No TVDB API key configured');
+      view.message = 'TVDB API key missing. Timestamps remain available; JSON download is disabled.';
       return;
     }
-    const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
-    toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : 'No series has a reliable TVDB episode mapping; nothing was exported.');
-    return;
-  }
-
-  const episodeKeys = [...new Set(
-    items
-      .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
-  )];
-  toast(`Checking IntroDB for existing segments (${episodeKeys.length} canonical episode(s))...`);
-  const canonicalExisting = new Map(await Promise.all(episodeKeys.map(async key => [
-    key,
-    await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
-  ])));
-
-  const beforeCount = items.length;
-  items = items.filter(item => {
-    const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-    return !canonicalExisting.get(key)?.has(item.segment_type);
-  });
-  const duplicateCount = beforeCount - items.length;
-  if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
-  if (!items.length) {
-    toast('Nothing left to export after removing duplicates.');
-    return;
-  }
-
-  const groups = new Map();
-  for (const item of items) {
-    const key = item.imdb_id || 'no_id';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
-  }
-
-  const files = [];
-  const maxItemsPerFile = 100;
-  for (const [imdbId, groupItems] of groups) {
-    const total = Math.ceil(groupItems.length / maxItemsPerFile);
-    for (let index = 0; index < total; index++) {
-      files.push({
-        imdbId,
-        part: total > 1 ? `_part${index + 1}of${total}` : '',
-        data: groupItems.slice(index * maxItemsPerFile, (index + 1) * maxItemsPerFile),
-      });
-    }
-  }
-
-  let downloaded = 0;
-  function downloadNext(index) {
-    if (index >= files.length) {
-      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${items.length} entries`);
+    if (state.submitInProgress) {
+      toast('Submission in progress, please wait...');
       return;
     }
-    const file = files[index];
-    const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = Object.assign(document.createElement('a'), {
-      href: url,
-      download: `timestamps_${file.imdbId}${file.part}.json`,
+
+    toast('Validating JSON export against TVDB...');
+    const mapped = await mapCapturedItemsWithTvdb('JSON export', capturedItems);
+    const mappedItems = mapped.items;
+    for (const row of view.rows) {
+      row.status = 'Unavailable';
+      row.reason = !row.item.imdb_id || row.item.imdb_id === 'IMDB_PENDING'
+        ? 'Missing IMDb ID' : 'No reliable TVDB mapping / excluded special';
+    }
+    for (const item of mappedItems) {
+      const row = view.rows[item[overviewSource]];
+      if (row) {
+        row.canonical = item;
+        row.status = 'Checking';
+        row.reason = '';
+        if (!filterShortOutputSegments([item]).length) {
+          row.status = 'Unavailable';
+          row.reason = 'Invalid timestamp or segment shorter than 5 seconds';
+        }
+      }
+    }
+    let items = filterShortOutputSegments(mappedItems);
+    const shortSegmentCount = mappedItems.length - items.length;
+    if (shortSegmentCount > 0) {
+      toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
+    }
+    if (!items.length) {
+      if (mappedItems.length && shortSegmentCount === mappedItems.length) {
+        toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+        return;
+      }
+      const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
+      const noMappingMessage = 'No series has a reliable TVDB episode mapping; nothing was exported.';
+      toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
+      return;
+    }
+
+    const episodeKeys = [...new Set(
+      items
+        .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
+    )];
+    toast(`Checking IntroDB for existing segments (${episodeKeys.length} media item(s))...`);
+    const canonicalExisting = new Map();
+    for (let index = 0; index < episodeKeys.length; index += 4) {
+      await Promise.all(episodeKeys.slice(index, index + 4).map(async key => {
+        try {
+          canonicalExisting.set(key, await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }));
+        } catch (error) {
+          canonicalExisting.set(key, { error: error?.message || 'IntroDB duplicate check failed.' });
+        }
+      }));
+    }
+
+    items = items.filter(item => {
+      const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
+      const existing = canonicalExisting.get(key);
+      const row = view.rows[item[overviewSource]];
+      const failed = Boolean(existing.error);
+      const duplicate = !failed && hasExistingSegment(existing, item);
+      if (row) {
+        row.status = failed ? 'Unavailable' : duplicate ? 'In IntroDB' : 'NEW';
+        row.reason = failed ? existing.error : '';
+        row.existingRanges = failed ? [] : existing.rangesByType?.get(item.segment_type) || [];
+      }
+      if (failed) toast(existing.error);
+      return !failed && !duplicate;
     });
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    downloaded++;
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setTimeout(() => downloadNext(index + 1), 400);
-  }
+    const duplicateCount = view.rows.filter(row => row.status === 'In IntroDB').length;
+    view.duplicateCount = duplicateCount;
+    if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
+    if (!items.length) {
+      toast('Nothing left to export after removing duplicates.');
+      return;
+    }
 
-  showExportPreview({
-    items,
-    fileCount: files.length,
-    duplicateCount,
-    onConfirm: () => downloadNext(0),
-  });
+    const exportItems = items;
+    const groups = new Map();
+    for (const item of exportItems) {
+      const key = item.imdb_id || 'no_id';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+
+    const files = [];
+    const maxItemsPerFile = 100;
+    for (const [imdbId, groupItems] of groups) {
+      const total = Math.ceil(groupItems.length / maxItemsPerFile);
+      for (let index = 0; index < total; index++) {
+        files.push({
+          imdbId,
+          part: total > 1 ? `_part${index + 1}of${total}` : '',
+          data: groupItems.slice(index * maxItemsPerFile, (index + 1) * maxItemsPerFile),
+        });
+      }
+    }
+
+    let downloaded = 0;
+    function downloadNext(index) {
+      if (index >= files.length) {
+        toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+        return;
+      }
+      const file = files[index];
+      const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = Object.assign(document.createElement('a'), {
+        href: url,
+        download: `timestamps_${file.imdbId}${file.part}.json`,
+      });
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      downloaded++;
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTimeout(() => downloadNext(index + 1), 400);
+    }
+
+    Object.assign(view, {
+      items: exportItems,
+      fileCount: files.length,
+      duplicateCount,
+      onConfirm: () => downloadNext(0),
+    });
+  } catch (error) {
+    view.message = error.message || 'Validation failed. JSON download is disabled.';
+    toast(view.message);
+  } finally {
+    view.checking = false;
+    for (const row of view.rows) {
+      if (row.status === 'Checking') {
+        row.status = 'Unavailable';
+        row.reason = view.message || 'Validation could not be completed';
+      }
+    }
+    view.message = view.items.length
+      ? 'Only verified NEW timestamps are included in the JSON download.'
+      : 'JSON download unavailable. ' + (view.message.includes('Checking') ? 'No verified new timestamps.' : view.message);
+    refresh?.(view);
+  }
 }
 
 function updateSubmitBtn(label) {
@@ -2376,17 +2948,33 @@ function updateSubmitBtn(label) {
 }
 
 async function submitToIntroDB() {
+  if (state.exportInProgress || state.submitInProgress) {
+    toast('An operation is already in progress. Please wait.');
+    return;
+  }
+  try { await prepareIntroDBSubmission(); }
+  catch (error) {
+    state.submitInProgress = false;
+    updateSubmitBtn('Submit to IntroDB');
+    toast(error.message || 'Submission failed. Please try again.');
+    setIntrodbStatus('Submission stopped. Please try again when the connection is available.');
+  }
+}
+
+async function prepareIntroDBSubmission() {
   if (!state.allItems.length) {
     toast('No timestamps to submit.');
     return;
   }
   if (!state.introdbApiKey) {
-    toast('Please enter your IntroDB API key in the panel above.');
+    revealApiSettings();
+    toast('Please enter your IntroDB API key in API settings.');
     setIntrodbStatus('No API key configured');
     return;
   }
   if (!state.tvdbApiKey) {
-    toast('Please enter your own TVDB API key in the panel above.');
+    revealApiSettings();
+    toast('Please enter your own TVDB API key in API settings.');
     setTvdbStatus('No TVDB API key configured');
     return;
   }
@@ -2429,11 +3017,8 @@ async function submitToIntroDB() {
       .filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')
       .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
   )];
-  toast(`Checking IntroDB for existing segments (${episodeKeys.length} canonical episode(s))...`);
-  const canonicalExisting = new Map(await Promise.all(episodeKeys.map(async key => [
-    key,
-    await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
-  ])));
+  toast(`Checking IntroDB for existing segments (${episodeKeys.length} media item(s))...`);
+  const canonicalExisting = await loadCanonicalExisting(episodeKeys);
 
   const items = allMapped.filter(item => {
     const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
@@ -2491,17 +3076,25 @@ async function submitToIntroDB() {
 }
 
 function clearData() {
+  if (state.submitInProgress || state.exportInProgress) { toast('Please wait until the current operation finishes.'); return; }
   if (!confirm('Delete all captured timestamps?')) return;
   const introdbApiKey = state.introdbApiKey;
+  const panelVisible = state.panelVisible;
   const { apiKey: tvdbApiKey, pin: tvdbPin } = loadTvdbSettings();
   for (const key of Object.keys(state)) delete state[key];
-  Object.assign(state, createState(activeProviderConfig.name), { introdbApiKey, tvdbApiKey, tvdbPin });
+  Object.assign(state, createState(activeProviderConfig.name), { introdbApiKey, tvdbApiKey, tvdbPin, panelVisible });
+  clearCaptureSession();
   updateCounters();
   updatePanelTitle();
   setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
   setIntrodbStatus('');
   updateImdbInput();
   toast('Data cleared');
+}
+
+function revealApiSettings() {
+  const settings = document.getElementById('nfe-settings');
+  if (settings) settings.open = true;
 }
 
 function configurePanelCallbacks() {
@@ -2518,7 +3111,7 @@ function configurePanelCallbacks() {
       state.dedupCacheV2 = {};
       setDbStatus(`ID saved: ${value}`);
       updateCounters();
-      loadExistingSegments(value);
+      loadExistingSegments(value).catch(error => setIntrodbStatus(error.message));
       lookupImdbTitle(value).then(result => {
         if (!result.success) return;
         state.showTitle = result.title;
@@ -2541,7 +3134,7 @@ function configurePanelCallbacks() {
           updateImdbInput();
           setDbStatus(`Found: ${result.imdbId}`);
           updateCounters();
-          loadExistingSegments(result.imdbId);
+          loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
         } else {
           setDbStatus(`IMDb lookup failed: ${result.error}`);
         }
@@ -2580,6 +3173,7 @@ function configurePanelCallbacks() {
 
 function setupPanelHandler() {
   document.addEventListener('click', event => {
+    if (event.target.closest?.('#nfe-export-preview')) return;
     const panel = document.getElementById('nfe-panel');
     const button = document.getElementById('nfe-btn');
     if (panel && state.panelVisible && !panel.contains(event.target) && !button?.contains(event.target)) closePanel();
@@ -2587,88 +3181,32 @@ function setupPanelHandler() {
 }
 
 function syncVisibility() {
-  if (!state.panelVisible) return;
-  if (state.updateRequired) {
-    const panel = document.getElementById('nfe-panel');
-    if (panel) {
-      panel.style.opacity = '1';
-      panel.style.pointerEvents = 'auto';
-    }
-    return;
+  const panel = document.getElementById("nfe-panel");
+  if (panel && state.panelVisible) {
+    panel.style.opacity = "1";
+    panel.style.pointerEvents = "auto";
   }
-  const controls =
-    document.querySelector('[data-uia="controls-standard"]') ||
-    document.querySelector('[class*="PlayerControls"]') ||
-    document.querySelector('.watch-video--bottom-controls-container');
-  if (!controls) return;
-  const panel = document.getElementById('nfe-panel');
-  if (!panel) return;
-  const visible = parseFloat(getComputedStyle(controls).opacity) > 0.05;
-  const opacity = visible ? '1' : '0';
-  const pointerEvents = visible ? 'auto' : 'none';
-  if (panel.style.opacity !== opacity) panel.style.opacity = opacity;
-  if (panel.style.pointerEvents !== pointerEvents) panel.style.pointerEvents = pointerEvents;
-}
-
-function setButtonVisibility(visible) {
-  const button = document.getElementById('nfe-btn');
-  if (!button) return;
-  const opacity = visible ? '0.85' : '0';
-  const pointerEvents = visible ? 'auto' : 'none';
-  if (button.style.opacity !== opacity) button.style.opacity = opacity;
-  if (button.style.pointerEvents !== pointerEvents) button.style.pointerEvents = pointerEvents;
-}
-
-function resetButtonIdleTimer() {
-  clearTimeout(buttonHideTimer);
-  setButtonVisibility(true);
-  buttonHideTimer = setTimeout(() => {
-    buttonHideTimer = null;
-    setButtonVisibility(false);
-  }, BUTTON_IDLE_DELAY_MS);
-}
-
-function setupControlVisibilityHandler() {
-  let framePending = false;
-  let trailingSyncTimer = null;
-  const scheduleFrame = typeof requestAnimationFrame === 'function'
-    ? requestAnimationFrame
-    : callback => setTimeout(callback, 0);
-
-  document.addEventListener('mousemove', () => {
-    if (framePending) return;
-    framePending = true;
-    scheduleFrame(() => {
-      framePending = false;
-      resetButtonIdleTimer();
-      syncVisibility();
-      if (trailingSyncTimer != null) clearTimeout(trailingSyncTimer);
-      trailingSyncTimer = setTimeout(() => {
-        trailingSyncTimer = null;
-        syncVisibility();
-      }, 250);
-    });
-  }, true);
 }
 
 function bootstrapProvider({
   providerName,
   setupInterception,
-  isPlayerPage = () => true,
+  isPlayerPage = () => Boolean(document.querySelector('video')),
 }) {
   activeProviderConfig = getProviderConfig(providerName);
   Object.assign(state, createState(activeProviderConfig.name));
+  restoreCaptureSession(providerName);
+  window.addEventListener('pagehide', saveCaptureSession);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) saveCaptureSession(); });
   loadIntrodbSettings();
   loadTvdbSettings();
   setProviderName(providerName);
   configurePanelCallbacks();
   setupInterception();
   setupPanelHandler();
-  setupControlVisibilityHandler();
   checkForRequiredUpdate().then(result => {
     if (!result.required) return;
-    state.allItems = [];
-    state.interceptedCount = 0;
+    saveCaptureSession();
     const showNotice = () => {
       if (document.body) showRequiredUpdate();
       else setTimeout(showNotice, 50);
@@ -2677,31 +3215,51 @@ function bootstrapProvider({
   });
 
   let lastPath = location.pathname;
-  setInterval(() => {
+  let refreshTimer = null;
+  const refreshControls = () => {
+    refreshTimer = null;
+    if (!document.body) return;
     if (state.updateRequired) {
-      if (!document.getElementById('nfe-panel') && document.body) showRequiredUpdate();
-      syncVisibility();
+      if (!document.getElementById('nfe-panel')) showRequiredUpdate();
       return;
     }
-
     const inPlayer = isPlayerPage();
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
-      document.getElementById('nfe-btn')?.remove();
+      scheduleCaptureSave();
       if (!inPlayer) {
         document.getElementById('nfe-panel')?.remove();
         state.panelVisible = false;
       }
     }
-    if (inPlayer) {
-      const buttonMissing = !document.getElementById('nfe-btn');
-      if (buttonMissing) {
-        injectBtn(providerName, getNextEpBtn);
-        resetButtonIdleTimer();
-      }
-      syncVisibility();
+    if (inPlayer) injectBtn(providerName, getNextEpBtn);
+    else removePlayerButton();
+    const host = document.fullscreenElement || document.body;
+    for (const id of ['nfe-panel', 'nfe-export-preview', 'nfe-toast']) {
+      const element = document.getElementById(id);
+      if (element && element.parentElement !== host) host.appendChild(element);
     }
-  }, 1000);
+    syncVisibility();
+  };
+  const scheduleRefresh = () => {
+    if (refreshTimer === null) refreshTimer = setTimeout(refreshControls, 100);
+  };
+  const observePlayer = () => {
+    refreshControls();
+    if (typeof MutationObserver !== 'function') return;
+    const observer = new MutationObserver(records => {
+      if (records.every(record => record.target.closest?.('[id^="nfe-"]'))) return;
+      scheduleRefresh();
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  };
+  if (document.documentElement) observePlayer();
+  else document.addEventListener('DOMContentLoaded', observePlayer, { once: true });
+  document.addEventListener('fullscreenchange', refreshControls);
+  window.addEventListener('popstate', scheduleRefresh);
+  window.addEventListener('resize', scheduleRefresh);
+  // Backstop for history changes that do not mutate the player DOM.
+  setInterval(() => { if (!document.hidden) refreshControls(); }, 5000);
 
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
   win.__segmentScraper = {
@@ -2883,16 +3441,58 @@ bootstrapProvider({
 /** Prime Video catalogue, playback-resource, and timestamp extraction. */
 
 
-const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
+const PRIME_VIDEO_METADATA_URL_PATTERN = /getvodplaybackresources/i;
 const PRIME_VIDEO_ID_PATTERN = /^(?:[A-Z0-9]{9,12}|amzn1\.dv\.gti\.[a-f0-9-]{20,})$/i;
 const PRIME_VIDEO_CARD_SELECTOR = '[data-testid="episode-list-item"], li[id^="av-ep-episode-"]';
 const PRIME_VIDEO_EPISODE_HEADING_PATTERN = /^\s*(\d+)\s*[.\-:]\s*(.*?)\s*$/;
 const PRIME_VIDEO_POLL_INTERVAL_MS = 250;
 const PRIME_VIDEO_MAX_POLL_ATTEMPTS = 40;
 const PRIME_VIDEO_SELECTION_TTL_MS = 60000;
-const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 1000;
+const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 5000;
 const PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS = 500;
 const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set(['SKIP_RECAP', 'SKIP_INTRO', 'END_CREDITS', 'NEXT_UP']);
+
+/** Keep Prime diagnostics in the regular Console log stream. */
+function logPrimeVideo(message, details) {
+  if (typeof console === 'undefined') return;
+  const writeLog = typeof console.log === 'function'
+    ? console.log.bind(console)
+    : typeof console.info === 'function'
+      ? console.info.bind(console)
+      : null;
+  if (!writeLog) return;
+  if (details === undefined) writeLog(`[PVE] ${message}`);
+  else writeLog(`[PVE] ${message}`, details);
+}
+
+function isPrimeVideoMetadataUrl(url) {
+  return PRIME_VIDEO_METADATA_URL_PATTERN.test(String(url || ''));
+}
+
+function readPrimeVideoRequestBody(body) {
+  if (typeof body === 'string') return body;
+  if (!body) return '';
+  try {
+    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return body.toString();
+    if (typeof FormData !== 'undefined' && body instanceof FormData && typeof body.entries === 'function') {
+      return [...body.entries()]
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+        .join('&');
+    }
+  } catch (_) {}
+  return '';
+}
+
+async function readPrimeVideoFetchRequestBody(input, init) {
+  const initBody = readPrimeVideoRequestBody(init?.body);
+  if (initBody) return initBody;
+  try {
+    if (input && typeof input === 'object' && typeof input.clone === 'function') {
+      return await input.clone().text().catch(() => '');
+    }
+  } catch (_) {}
+  return '';
+}
 
 function isPrimeVideoTitleId(value) {
   return typeof value === 'string' && PRIME_VIDEO_ID_PATTERN.test(value);
@@ -2939,6 +3539,11 @@ function extractPrimeVideoTitleId(bodyText, url) {
     if (legacyIdMatch) return legacyIdMatch[1];
   }
   if (!bodyText) return null;
+  const queryIdMatch = String(bodyText).match(/(?:^|[?&])(?:titleId|cGTI|asin|ASIN)=([^&#]+)/i);
+  if (queryIdMatch) {
+    const titleId = decodeURIComponent(queryIdMatch[1]);
+    if (isPrimeVideoTitleId(titleId)) return titleId;
+  }
   try {
     const found = findPrimeVideoTitleIdInObject(JSON.parse(bodyText));
     if (found) return found;
@@ -3362,13 +3967,13 @@ async function preloadPrimeVideoSeasonCatalogs(root = document, options = {}) {
     if (readPrimeVideoDetailId(urlKey) === currentDetailId) return;
 
     try {
-      const response = await fetchImpl(urlKey, { credentials: 'same-origin' });
+      const response = await fetchImpl(urlKey, { credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
       if (!response?.ok) throw new Error(`HTTP ${response?.status || 'error'}`);
       const seasonDocument = parseHtml(await response.text());
       const found = scanPrimeVideoEpisodeCatalog(seasonDocument);
       total += found;
       if (found) {
-        console.info('[PVE] Preloaded Prime Video season catalogue:', {
+        logPrimeVideo('Preloaded Prime Video season catalogue:', {
           url: urlKey,
           episodes: found,
         });
@@ -3484,6 +4089,15 @@ function flushPrimeVideoSegmentBatch(titleId) {
   if (!batch) return;
   state.primeVideoSegmentBatches.delete(titleId);
   const items = batch.items.filter(item => !state.allItems.some(existing => existing._eid === item._eid));
+  logPrimeVideo('Flushing Prime Video segment batch:', {
+    titleId,
+    showId: batch.showId,
+    season: batch.season,
+    episode: batch.episode,
+    received: batch.items.length,
+    newItems: items.length,
+    skippedExisting: batch.items.length - items.length,
+  });
   logPrimeVideoTimestamps(titleId, batch.showId, batch.season, batch.episode, batch.episodeTitle, items);
   recordExtractedSegments(items);
 }
@@ -3530,6 +4144,25 @@ function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episod
     end_sec: endTimeMs / 1000,
   });
   return true;
+}
+
+function normalizePrimeVideoEventType(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  return {
+    INTRO: 'SKIP_INTRO',
+    RECAP: 'SKIP_RECAP',
+    CREDITS: 'END_CREDITS',
+    CREDIT: 'END_CREDIT',
+  }[normalized] || normalized;
+}
+
+function getPrimeVideoEventType(event) {
+  return normalizePrimeVideoEventType(
+    event?.eventType || event?.elementType || event?.type || event?.name
+  );
 }
 
 function pollPrimeVideoOutroDuration(titleId, showId, season, episode, episodeTitle, startTimeMs, attempt = 0) {
@@ -3607,6 +4240,16 @@ function finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle =
       console.warn('[PVE] Prime returned an outro event without a usable start time:', outroCandidates);
     }
   }
+  logPrimeVideo(extractedItems.length
+    ? 'Prepared Prime Video segment ranges:'
+    : 'No usable Prime Video segment ranges in playback metadata:', {
+    titleId,
+    showId,
+    season,
+    episode,
+    eventTypes: events.map(getPrimeVideoEventType),
+    segments: extractedItems.map(item => ({ type: item.segment_type, start: item.start_sec, end: item.end_sec })),
+  });
   queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle, extractedItems);
 }
 
@@ -3647,7 +4290,12 @@ function pollPrimeVideoEpisode(titleId, attempt) {
 function processPrimeVideoMetadata(data, bodyText, url) {
   ensurePrimeVideoState();
   const titleId = extractPrimeVideoTitleId(bodyText, url);
-  if (!titleId) return;
+  const eventTypes = (data?.transitionTimecodes?.result?.events || []).map(getPrimeVideoEventType);
+  if (!titleId) {
+    logPrimeVideo('Skipped playback metadata without a recognizable title ID:', { url: String(url || ''), bodyLength: String(bodyText || '').length, eventTypes });
+    return;
+  }
+  logPrimeVideo('Received Prime Video playback metadata:', { titleId, eventTypes });
   const responseMetadata = findPrimeVideoEpisodeMetadata(data);
   const expectedShowTitle = responseMetadata?.seriesTitle || state.showId || readPrimeVideoSeriesTitle(document);
   const responseEpisodeTitle = responseMetadata?.episodeTitle || findPrimeVideoEpisodeTitle(data, expectedShowTitle);
@@ -3667,7 +4315,10 @@ function processPrimeVideoMetadata(data, bodyText, url) {
       }, mapped.showId);
     }
   }
-  if (!hasPrimeVideoSegmentEvents(data)) return;
+  if (!hasPrimeVideoSegmentEvents(data)) {
+    logPrimeVideo('Playback metadata contained no supported segment events:', { titleId, eventTypes: (data?.transitionTimecodes?.result?.events || []).map(getPrimeVideoEventType) });
+    return;
+  }
   if (state.primeVideoTitleMap.has(titleId)) {
     const { season, episode, episodeTitle, showId } = state.primeVideoTitleMap.get(titleId);
     setPrimeVideoActiveEpisode({ season, episode, episodeTitle, showId });
@@ -3709,7 +4360,7 @@ function processPrimeVideoMetadata(data, bodyText, url) {
   const inferredSnapshot = inferNextPrimeVideoEpisode();
   if (inferredSnapshot) {
     inferredSnapshot.episodeTitle ||= state.primeVideoEpisodeTitleByTitleId.get(titleId) || '';
-    console.info('[PVE] Inferred next episode from the scanned season boundary:', {
+    logPrimeVideo('Inferred next episode from the scanned season boundary:', {
       titleId,
       season: inferredSnapshot.season,
       episode: inferredSnapshot.episode,
@@ -3726,6 +4377,7 @@ function processPrimeVideoMetadata(data, bodyText, url) {
 function setupPrimeVideoInterception() {
   ensurePrimeVideoState();
   const scanCatalog = () => {
+    if (document.hidden) return;
     try {
       scanPrimeVideoEpisodeCatalog();
       preloadPrimeVideoSeasonCatalogs();
@@ -3736,9 +4388,10 @@ function setupPrimeVideoInterception() {
   setInterval(scanCatalog, PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS);
   if (typeof MutationObserver === 'function') {
     let scanTimer = null;
-    const observer = new MutationObserver(() => {
-      if (scanTimer != null) clearTimeout(scanTimer);
-      scanTimer = setTimeout(scanCatalog, PRIME_VIDEO_POLL_INTERVAL_MS);
+    const observer = new MutationObserver(records => {
+      if (records.every(record => record.target.closest?.('[id^="nfe-"]'))) return;
+      if (scanTimer != null) return;
+      scanTimer = setTimeout(() => { scanTimer = null; scanCatalog(); }, PRIME_VIDEO_POLL_INTERVAL_MS);
     });
     observer.observe(document.documentElement || document.body, {
       subtree: true,
@@ -3765,8 +4418,9 @@ function setupPrimeVideoInterception() {
       return originalOpen(method, requestUrl, ...rest);
     };
     xhr.send = function (body, ...rest) {
-      bodyText = typeof body === 'string' ? body : '';
-      if (url && url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+      bodyText = readPrimeVideoRequestBody(body);
+      if (isPrimeVideoMetadataUrl(url)) {
+        logPrimeVideo('Intercepted Prime Video playback XHR:', { url });
         xhr.addEventListener('load', () => {
           try { processPrimeVideoMetadata(JSON.parse(xhr.responseText), bodyText, url); }
           catch (error) { console.error('[PVE] Failed to process XHR response:', error); }
@@ -3783,20 +4437,22 @@ function setupPrimeVideoInterception() {
   const originalFetch = win.fetch.bind(win);
   win.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input?.url ? String(input.url) : String(input || ''));
-    if (!url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) return originalFetch(input, init);
+    if (!isPrimeVideoMetadataUrl(url)) return originalFetch(input, init);
 
     return (async () => {
-      let bodyText = '';
-      try {
-        if (init && typeof init.body === 'string') bodyText = init.body;
-        else if (input && typeof input === 'object' && input.clone) bodyText = await input.clone().text().catch(() => '');
-      } catch (_) {}
+      logPrimeVideo('Intercepted Prime Video playback fetch:', { url });
+      const bodyText = await readPrimeVideoFetchRequestBody(input, init);
       const response = await originalFetch(input, init);
       try { processPrimeVideoMetadata(await response.clone().json(), bodyText, url); }
       catch (error) { console.error('[PVE] Failed to process fetch response:', error); }
       return response;
     })();
   };
+  logPrimeVideo('Prime Video interception initialized.', {
+    page: String(win.location?.href || (typeof location !== 'undefined' ? location.href : '')),
+    xhr: typeof OriginalXHR === 'function',
+    fetch: typeof win.fetch === 'function',
+  });
 }
 
 /** Prime Video provider registration. */
@@ -3880,6 +4536,15 @@ function normalizeVideolandEpisodeTitle(value) {
   return String(value || '').trim().replace(/^\d+\s*\.\s*/, '').trim();
 }
 
+function isVideolandGtstSeries(value) {
+  return String(value || '')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim() === 'goede tijden slechte tijden';
+}
+
 function chooseVideolandEpisodeTitle(rootMeta, activeItem, programTitle) {
   const candidates = [
     rootMeta?.entity?.extraTitle,
@@ -3943,6 +4608,7 @@ function processVideolandLayout(json) {
     });
   }
   const showId = updateVideolandTitle(title, rootMeta.programId);
+  const useGtstAbsoluteTitleMatch = isVideolandGtstSeries(title);
   state.clipMap.set(clipId, { season, episode, title, showId });
 
   if (season != null && episode != null) {
@@ -3966,7 +4632,7 @@ function processVideolandLayout(json) {
       _episodeTitle: episodeTitle,
       _showId: showId,
       _tvdbEpisodeLanguages: ['eng', 'nld'],
-      _tvdbRequireTitleMatch: true,
+      ...(useGtstAbsoluteTitleMatch ? { _tvdbAbsoluteTitleMatch: true } : {}),
       imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
       segment_type: segmentType,
       season,
@@ -4506,274 +5172,6 @@ bootstrapProvider({
   providerName: 'skyshowtime',
   setupInterception: setupSkyShowtimeInterception,
   isPlayerPage: isSkyShowtimePlayerPage,
-});
-  }
-
-  if (location.hostname === 'crunchyroll.com' || location.hostname.endsWith('.crunchyroll.com')) {
-
-/** Crunchyroll page metadata and skip-event extraction. */
-
-
-const CRUNCHYROLL_SKIP_EVENTS_BASE = 'https://static.crunchyroll.com/skip-events/production';
-const CRUNCHYROLL_SCAN_INTERVAL_MS = 750;
-const crunchyrollStructuredDataCache = new WeakMap();
-
-function ensureCrunchyrollState() {
-  if (!(state.crunchyrollRegisteredEpisodes instanceof Set)) state.crunchyrollRegisteredEpisodes = new Set();
-  if (!(state.crunchyrollRequestedWatchIds instanceof Set)) state.crunchyrollRequestedWatchIds = new Set();
-}
-
-function coerceCrunchyrollInteger(value, { allowZero = false } = {}) {
-  const number = Number(value);
-  if (!Number.isInteger(number)) return null;
-  return number > 0 || (allowZero && number === 0) ? number : null;
-}
-
-function hasSchemaType(item, type) {
-  const types = Array.isArray(item?.['@type']) ? item['@type'] : [item?.['@type']];
-  return types.includes(type);
-}
-
-function flattenStructuredData(value, output = []) {
-  if (!value || typeof value !== 'object') return output;
-  if (Array.isArray(value)) {
-    value.forEach(item => flattenStructuredData(item, output));
-    return output;
-  }
-  output.push(value);
-  if (Array.isArray(value['@graph'])) flattenStructuredData(value['@graph'], output);
-  return output;
-}
-
-function readCrunchyrollStructuredData(script) {
-  const serialized = script.textContent || '';
-  const cached = crunchyrollStructuredDataCache.get(script);
-  if (cached?.serialized === serialized) return cached.items;
-
-  const items = [];
-  try { flattenStructuredData(JSON.parse(serialized), items); }
-  catch (_) {}
-  crunchyrollStructuredDataCache.set(script, { serialized, items });
-  return items;
-}
-
-function extractCrunchyrollSeriesId(value) {
-  const match = String(value || '').match(/\/series\/([A-Z0-9]+)/i);
-  return match ? match[1].toUpperCase() : null;
-}
-
-function normalizeCrunchyrollEpisodeTitle(value, episodeNumber) {
-  const title = String(value || '').trim();
-  if (!title) return '';
-  return title
-    .replace(/^.*?\|\s*E(?:pisode\s*)?\d+(?:\.\d+)?\s*[-:|]\s*/i, '')
-    .replace(new RegExp(`^E(?:pisode\\s*)?${episodeNumber}\\s*[-:|]\\s*`, 'i'), '')
-    .trim();
-}
-
-/** Return the Crunchyroll watch identifier from normal and localized player paths. */
-function getCrunchyrollWatchId(pathname = location.pathname) {
-  const match = String(pathname || '').match(/(?:^|\/)watch\/([A-Z0-9]+)(?:\/|$)/i);
-  return match ? match[1].toUpperCase() : null;
-}
-
-/**
- * Read the current episode from Crunchyroll's server-rendered schema.org data.
- * Keeping this independent of player internals makes it work before playback
- * starts and across both the legacy and current web players.
- */
-function readCrunchyrollPageMetadata(doc = document, pathname = location.pathname) {
-  const watchId = getCrunchyrollWatchId(pathname);
-  if (!watchId || !doc?.querySelectorAll) return null;
-
-  const structuredData = [];
-  for (const script of doc.querySelectorAll('script[type="application/ld+json"]')) {
-    structuredData.push(...readCrunchyrollStructuredData(script));
-  }
-
-  const episodeData = structuredData.find(item => {
-    if (!hasSchemaType(item, 'TVEpisode')) return false;
-    const itemWatchId = getCrunchyrollWatchId(item['@id'] || item.url || '');
-    return !itemWatchId || itemWatchId === watchId;
-  });
-  if (!episodeData) return null;
-
-  const season = coerceCrunchyrollInteger(episodeData.partOfSeason?.seasonNumber, { allowZero: true });
-  const episode = coerceCrunchyrollInteger(episodeData.episodeNumber);
-  const seriesUrl = episodeData.partOfSeries?.['@id'] || episodeData.partOfSeason?.['@id'];
-  const showId = extractCrunchyrollSeriesId(seriesUrl);
-  const seriesTitle = String(episodeData.partOfSeries?.name || '').trim();
-  if (!showId || !seriesTitle || season == null || episode == null) return null;
-
-  const videoData = structuredData.find(item => hasSchemaType(item, 'VideoObject'));
-  const episodeTitle = normalizeCrunchyrollEpisodeTitle(
-    videoData?.name || episodeData.name,
-    episode
-  );
-  const publishedYear = String(episodeData.datePublished || '').match(/^(\d{4})/);
-  const seasonLabel = String(episodeData.partOfSeason?.name || '').trim().toLowerCase();
-
-  return {
-    watchId,
-    providerId: watchId,
-    showId,
-    seriesTitle,
-    season,
-    episode,
-    episodeTitle,
-    year: season === 1 ? publishedYear?.[1] || '' : '',
-    isSpecial: season === 0 || /\b(?:specials?|extras?|bonus|trailers?)\b/.test(seasonLabel),
-  };
-}
-
-function registerCrunchyrollEpisode(metadata) {
-  ensureCrunchyrollState();
-  handleDetectedShow({
-    title: metadata.seriesTitle,
-    showId: metadata.showId,
-    year: metadata.year,
-  });
-
-  const registrationKey = `${metadata.showId}|${metadata.season}|${metadata.episode}`;
-  if (state.crunchyrollRegisteredEpisodes.has(registrationKey)) return;
-  state.crunchyrollRegisteredEpisodes.add(registrationKey);
-  recordProviderEpisode({
-    providerId: metadata.providerId || metadata.watchId,
-    season: metadata.season,
-    episode: metadata.episode,
-    title: metadata.episodeTitle,
-    isSpecial: metadata.isSpecial,
-  }, metadata.showId);
-}
-
-function addCrunchyrollSegment(extractedItems, metadata, skipEvents, providerSegmentType, marker) {
-  const startSec = Number(marker?.start);
-  const endSec = Number(marker?.end);
-  if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || startSec < 0 || endSec <= startSec) return;
-
-  const mediaId = skipEvents?.mediaId || metadata.providerId || metadata.watchId;
-  const episodeId = `${mediaId}:${providerSegmentType}`;
-  const normalizedType = providerSegmentType === 'credits' ? 'outro' : providerSegmentType;
-  const isDuplicate = item => item._eid === episodeId || (
-    String(item._showId || '') === String(metadata.showId) &&
-    item.season === metadata.season &&
-    item.episode === metadata.episode &&
-    item.segment_type === normalizedType
-  );
-  if (state.allItems.some(isDuplicate) || extractedItems.some(isDuplicate)) return;
-
-  const item = createNormalizedSegment({
-    providerName: 'crunchyroll',
-    providerSegmentType,
-    episodeId,
-    showId: metadata.showId,
-    season: metadata.season,
-    episode: metadata.episode,
-    imdbId: state.imdbIdsByShowId?.[metadata.showId] || 'IMDB_PENDING',
-    episodeTitle: metadata.episodeTitle,
-    startSec,
-    endSec,
-  });
-  if (!item) return;
-  item._tvdbEpisodeLanguages = ['eng'];
-  item._tvdbRequireTitleMatch = true;
-  extractedItems.push(item);
-}
-
-/** Register one episode and normalize its public Crunchyroll skip-event payload. */
-function processCrunchyrollEpisode(metadata, skipEvents = {}) {
-  if (!metadata?.showId || !metadata?.seriesTitle) return 0;
-  if (coerceCrunchyrollInteger(metadata.season, { allowZero: true }) == null || coerceCrunchyrollInteger(metadata.episode) == null) return 0;
-  registerCrunchyrollEpisode(metadata);
-
-  const extractedItems = [];
-  addCrunchyrollSegment(extractedItems, metadata, skipEvents, 'recap', skipEvents.recap);
-  addCrunchyrollSegment(extractedItems, metadata, skipEvents, 'intro', skipEvents.intro);
-  addCrunchyrollSegment(extractedItems, metadata, skipEvents, 'credits', skipEvents.credits);
-  logCapturedTimestamps({
-    prefix: 'CRE',
-    showTitle: metadata.seriesTitle,
-    season: metadata.season,
-    episode: metadata.episode,
-    episodeTitle: metadata.episodeTitle,
-    providerIdLabel: 'mediaId',
-    providerId: skipEvents.mediaId || metadata.providerId || metadata.watchId,
-    items: extractedItems,
-  });
-  recordExtractedSegments(extractedItems);
-  return extractedItems.length;
-}
-
-function getGmRequest() {
-  return (typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null) ||
-    (typeof _GM_xmlhttpRequest !== 'undefined' ? _GM_xmlhttpRequest : null) ||
-    (typeof GM !== 'undefined' && GM.xmlHttpRequest ? GM.xmlHttpRequest : null);
-}
-
-function loadCrunchyrollSkipEvents(metadata, originalFetch) {
-  const url = `${CRUNCHYROLL_SKIP_EVENTS_BASE}/${metadata.watchId}.json`;
-  const gmRequest = getGmRequest();
-  if (gmRequest) {
-    gmRequest({
-      method: 'GET',
-      url,
-      headers: { Accept: 'application/json, text/plain, */*' },
-      timeout: 15000,
-      onload: response => {
-        if (response.status === 404) return;
-        if (response.status < 200 || response.status >= 300) {
-          console.warn(`[CRE] Skip-event request returned HTTP ${response.status}.`);
-          return;
-        }
-        try { processCrunchyrollEpisode(metadata, JSON.parse(response.responseText)); }
-        catch (error) { console.warn('[CRE] Failed to parse skip-event response:', error); }
-      },
-      onerror: () => console.warn('[CRE] Skip-event request failed.'),
-      ontimeout: () => console.warn('[CRE] Skip-event request timed out.'),
-    });
-    return;
-  }
-
-  if (originalFetch) {
-    originalFetch(url)
-      .then(response => response.status === 404 ? null : response.json())
-      .then(data => { if (data) processCrunchyrollEpisode(metadata, data); })
-      .catch(error => console.warn('[CRE] Skip-event fetch failed:', error));
-  }
-}
-
-function isCrunchyrollPlayerPage() {
-  return Boolean(getCrunchyrollWatchId(location.pathname));
-}
-
-function setupCrunchyrollInterception() {
-  ensureCrunchyrollState();
-  const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
-  const originalFetch = typeof win.fetch === 'function' ? win.fetch.bind(win) : null;
-
-  const scanCurrentEpisode = () => {
-    const watchId = getCrunchyrollWatchId(location.pathname);
-    if (!watchId || state.crunchyrollRequestedWatchIds?.has(watchId)) return;
-    const metadata = readCrunchyrollPageMetadata(document, location.pathname);
-    if (!metadata) return;
-    processCrunchyrollEpisode(metadata);
-    if (state.crunchyrollRequestedWatchIds.has(metadata.watchId)) return;
-    state.crunchyrollRequestedWatchIds.add(metadata.watchId);
-    loadCrunchyrollSkipEvents(metadata, originalFetch);
-  };
-
-  scanCurrentEpisode();
-  document.addEventListener('DOMContentLoaded', scanCurrentEpisode, { once: true });
-  setInterval(scanCurrentEpisode, CRUNCHYROLL_SCAN_INTERVAL_MS);
-}
-
-/** Crunchyroll provider registration. */
-
-
-bootstrapProvider({
-  providerName: 'crunchyroll',
-  setupInterception: setupCrunchyrollInterception,
-  isPlayerPage: isCrunchyrollPlayerPage,
 });
   }
 })();

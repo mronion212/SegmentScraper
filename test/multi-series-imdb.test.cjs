@@ -34,6 +34,7 @@ function loadShowHandler(searches) {
     console: { log: noop, info: noop, warn: noop, error: noop },
     searchImdbByTitle: title => searches[title].promise,
     loadExistingSegments: async () => [],
+    scheduleCaptureSave: noop,
     updatePanelTitle: noop,
     updateImdbInput: noop,
     updateCounters: noop,

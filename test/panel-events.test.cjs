@@ -12,6 +12,8 @@ class FakeElement {
     this.innerHTML = '';
   }
 
+  setAttribute(name, value) { this[name] = value; }
+
   addEventListener(type, listener) {
     const listeners = this.listeners.get(type) || [];
     listeners.push(listener);

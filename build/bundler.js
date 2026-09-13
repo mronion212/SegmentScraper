@@ -35,7 +35,6 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @match        https://play.max.com/*
 // @match        https://www.skyshowtime.com/*
 // @match        https://skyshowtime.com/*
-// @match        https://www.crunchyroll.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -44,7 +43,6 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @connect      api.introdb.app
 // @connect      api4.thetvdb.com
 // @connect      atom.skyshowtime.com
-// @connect      static.crunchyroll.com
 // @connect      raw.githubusercontent.com
 // @run-at       document-start
 // ==/UserScript==
@@ -95,6 +93,7 @@ function bundle() {
   // Define file order for proper dependency resolution
   const commonFileOrder = [
     'core/state.js',
+    'core/capture-session.js',
     'core/update-check.js',
     'core/network.js',
     'core/introdb-settings.js',
@@ -123,10 +122,6 @@ function bundle() {
     {
       condition: "location.hostname === 'skyshowtime.com' || location.hostname.endsWith('.skyshowtime.com')",
       files: ['providers/skyshowtime/extractor.js', 'providers/skyshowtime/index.js'],
-    },
-    {
-      condition: "location.hostname === 'crunchyroll.com' || location.hostname.endsWith('.crunchyroll.com')",
-      files: ['providers/crunchyroll/extractor.js', 'providers/crunchyroll/index.js'],
     },
   ];
   
