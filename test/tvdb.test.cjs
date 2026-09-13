@@ -232,54 +232,59 @@ test('allows equal-count order mapping unless exact title matching is explicitly
   assert.equal(mappedByExistingProviderBehavior.method, 'order');
 });
 
-test('maps only tagged GTST episodes through TVDB absolute number and exact title', async () => {
-  const tvdb = loadTvdb({
-    seriesSeasons: [
-      { number: 34, type: { id: 1, name: 'Aired Order' } },
-      { number: 35, type: { id: 1, name: 'Aired Order' } },
-      { number: 36, type: { id: 1, name: 'Aired Order' } },
-    ],
-    episodesBySeason: {
-      35: [
-        { id: 700000, seasonNumber: 35, number: 1, name: 'Aflevering 6956' },
-        { id: 715900, seasonNumber: 35, number: 160, name: 'Aflevering 7115' },
+for (const captureMode of ['tagged', 'legacy', 'mixed']) {
+  test(`maps ${captureMode} GTST captures through absolute numbers instead of provider seasons`, async () => {
+    const tvdb = loadTvdb({
+      seriesSeasons: [
+        { number: 34, type: { id: 1, name: 'Aired Order' } },
+        { number: 35, type: { id: 1, name: 'Aired Order' } },
+        { number: 36, type: { id: 1, name: 'Aired Order' } },
       ],
-      36: [
-        { id: 711600, seasonNumber: 36, number: 1, name: 'Aflevering 7116' },
-        { id: 729500, seasonNumber: 36, number: 180, name: 'Aflevering 7295' },
-      ],
-    },
-    episodeDetails: {
-      729500: { id: 729500, seasonNumber: 36, number: 180, name: 'Episode 7295' },
-    },
-    translations: {
-      729500: { name: 'Aflevering 7295', language: 'nld' },
-    },
-  });
-  const item = {
-    ...segment(56, 7295, 'Aflevering 7295'),
-    imdb_id: 'tt0096597',
-    _tvdbEpisodeLanguages: ['eng', 'nld'],
-    _tvdbRequireTitleMatch: true,
-    _tvdbAbsoluteTitleMatch: true,
-  };
-  const result = await tvdb.mapSeriesItemsToTvdb(
-    [item],
-    [{ providerId: 'gtst-7295', season: 56, episode: 7295, title: 'Aflevering 7295' }],
-  );
+      episodesBySeason: {
+        35: [
+          { id: 700000, seasonNumber: 35, number: 1, name: 'Aflevering 6956' },
+          { id: 715900, seasonNumber: 35, number: 160, name: 'Aflevering 7115' },
+        ],
+        36: [
+          { id: 711600, seasonNumber: 36, number: 1, name: 'Aflevering 7116' },
+          { id: 729500, seasonNumber: 36, number: 180, name: 'Aflevering 7295' },
+        ],
+      },
+      episodeDetails: {
+        729500: { id: 729500, seasonNumber: 36, number: 180, name: 'Episode 7295' },
+      },
+      translations: {
+        729500: { name: 'Aflevering 7295', language: 'nld' },
+      },
+    });
+    const item = {
+      ...segment(56, 7295, 'Aflevering 7295'),
+      imdb_id: 'tt0096597',
+      _tvdbEpisodeLanguages: ['eng', 'nld'],
+      _tvdbRequireTitleMatch: true,
+      _tvdbAbsoluteTitleMatch: true,
+    };
+    const legacyItem = { ...item, segment_type: 'outro' };
+    delete legacyItem._tvdbAbsoluteTitleMatch;
+    const capturedItems = captureMode === 'legacy' ? [legacyItem] : captureMode === 'mixed' ? [item, legacyItem] : [item];
+    const result = await tvdb.mapSeriesItemsToTvdb(
+      capturedItems,
+      [{ providerId: 'gtst-7295', season: 56, episode: 7295, title: 'Aflevering 7295' }],
+    );
 
-  assert.equal(result.success, true);
-  assert.equal(result.method, 'absolute-title');
-  assert.deepEqual(plain(result.items.map(mapped => [mapped.season, mapped.episode])), [[36, 180]]);
-  assert.equal('_tvdbAbsoluteTitleMatch' in result.items[0], false);
-  assert.equal(tvdb.requests.some(request =>
-    request.url.endsWith('/series/101/episodes/default?page=0&season=35')
-  ), true);
-  assert.equal(tvdb.requests.some(request =>
-    request.url.endsWith('/series/101/episodes/default?page=0&season=36')
-  ), true);
-  assert.equal(tvdb.requests.some(request => request.url.includes('/series/101/episodes/default/')), false);
-});
+    assert.equal(result.success, true);
+    assert.equal(result.method, 'absolute-title');
+    assert.deepEqual(plain(result.items.map(mapped => [mapped.season, mapped.episode])), capturedItems.map(() => [36, 180]));
+    assert.equal('_tvdbAbsoluteTitleMatch' in result.items[0], false);
+    assert.equal(tvdb.requests.some(request =>
+      request.url.endsWith('/series/101/episodes/default?page=0&season=35')
+    ), true);
+    assert.equal(tvdb.requests.some(request =>
+      request.url.endsWith('/series/101/episodes/default?page=0&season=36')
+    ), true);
+    assert.equal(tvdb.requests.some(request => request.url.includes('/series/101/episodes/default/')), false);
+  });
+}
 
 test('blocks GTST absolute-number lookup when the TVDB title does not exactly match', async () => {
   const tvdb = loadTvdb({
