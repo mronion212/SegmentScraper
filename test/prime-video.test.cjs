@@ -767,7 +767,7 @@ test('captures Prime movie credits from an endCreditsStart-only response', () =>
   assert.deepEqual(plain(prime.state.allItems.map(item => [item.start_sec, item.end_sec])), [[5400, 6000]]);
 });
 
-test('stores Prime movie credits on both sides of an after-credits scene separately', () => {
+test('captures Prime movie outro and post-credits scene separately', () => {
   const { document } = primeDetailDocument();
   const titleId = 'amzn1.dv.gti.13345678-1234-4abc-8def-123456789012';
   const prime = loadPrimeVideoExtractor(document);
@@ -793,8 +793,8 @@ test('stores Prime movie credits on both sides of an after-credits scene separat
     start: item.start_sec,
     end: item.end_sec,
   }))), [
-    { id: `${titleId}_movie_outro_before_after_credits_scene`, part: 'before_after_credits_scene', start: 5400, end: 5600 },
-    { id: `${titleId}_movie_outro_after_after_credits_scene`, part: 'after_after_credits_scene', start: 5800, end: 6000 },
+    { id: `${titleId}_movie_outro`, start: 5400, end: 6000 },
+    { id: `${titleId}_movie_post-credits`, start: 5600, end: 5800 },
   ]);
 });
 
@@ -826,8 +826,8 @@ test('re-splits Prime movie credits when the after-credits event arrives later',
     start: item.start_sec,
     end: item.end_sec,
   }))), [
-    { part: 'before_after_credits_scene', start: 5400, end: 5600 },
-    { part: 'after_after_credits_scene', start: 5800, end: 6000 },
+    { start: 5400, end: 6000 },
+    { start: 5600, end: 5800 },
   ]);
 });
 
@@ -1021,4 +1021,38 @@ test('batches Prime segments arriving in separate playback responses', () => {
   ]);
   assert.equal(prime.logs.length, 1);
   assert.equal(prime.logs[0][1].segments.length, 2);
+});
+
+test('Prime combines credits around a scene regardless of provider event order', () => {
+  const { document } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document);
+  const titleId = 'amzn1.dv.gti.13345678-1234-4abc-8def-123456789012';
+  const url = `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`;
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { type: 'MOVIE', title: 'Out of order credits' } },
+    transitionTimecodes: { result: { events: [
+      { eventType: 'END_CREDITS', startTimeMs: 5800000, endTimeMs: 6000000 },
+      { eventType: 'AFTER_CREDITS', startTimeMs: 5600000, endTimeMs: 5800000 },
+      { eventType: 'END_CREDITS', startTimeMs: 5400000, endTimeMs: 5600000 },
+    ] } },
+  }, '', url);
+  assert.deepEqual(plain(prime.state.allItems.map(item => [item.segment_type, item.start_sec, item.end_sec])), [
+    ['outro', 5400, 6000], ['post-credits', 5600, 5800],
+  ]);
+});
+
+test('Prime removes an earlier candidate when later scene metadata proves it starts too late', () => {
+  const { document } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document);
+  const titleId = 'amzn1.dv.gti.13345678-1234-4abc-8def-123456789012';
+  const url = `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`;
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { type: 'MOVIE', title: 'Late credits' } },
+    transitionTimecodes: { result: { events: [{ eventType: 'END_CREDITS', startTimeMs: 5800000, endTimeMs: 6000000 }] } },
+  }, '', url);
+  assert.equal(prime.state.allItems.length, 1);
+  prime.processPrimeVideoMetadata({ transitionTimecodes: { result: { events: [
+    { eventType: 'AFTER_CREDITS', startTimeMs: 5600000, endTimeMs: 5700000 },
+  ] } } }, '', url);
+  assert.equal(prime.state.allItems.length, 0);
 });

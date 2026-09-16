@@ -200,29 +200,27 @@ test('captures SkyShowtime movie credits only with an explicit end marker', () =
   }]);
   assert.deepEqual(plain(sky.state.providerEpisodes), []);
   assert.deepEqual(plain(sky.state.allItems), [{
-    _eid: 'movie-123::movie::outro::before_after_credits_scene',
+    _eid: 'movie-123::movie::outro',
     _episodeTitle: 'Example Movie',
     _showId: 'movie-123',
     media_type: 'movie',
-    credit_part: 'before_after_credits_scene',
     imdb_id: 'IMDB_PENDING',
     segment_type: 'outro',
     season: null,
     episode: null,
     start_sec: 5400,
-    end_sec: 5680,
+    end_sec: 6000,
   }, {
-    _eid: 'movie-123::movie::outro::after_after_credits_scene',
+    _eid: 'movie-123::movie::post-credits',
     _episodeTitle: 'Example Movie',
     _showId: 'movie-123',
     media_type: 'movie',
-    credit_part: 'after_after_credits_scene',
     imdb_id: 'IMDB_PENDING',
-    segment_type: 'outro',
+    segment_type: 'post-credits',
     season: null,
     episode: null,
-    start_sec: 5800,
-    end_sec: 6000,
+    start_sec: 5680,
+    end_sec: 5800,
   }]);
 });
 

@@ -393,7 +393,7 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
   const [imdbId, seasonOrMediaType, episode] = key.split('|');
   const isMovie = seasonOrMediaType === 'movie';
   const url = isMovie
-    ? `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}`
+    ? `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&is_movie=true`
     : `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(seasonOrMediaType)}&episode=${encodeURIComponent(episode)}`;
   
   const gmXhr = getGmXhr();
@@ -417,8 +417,8 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
       return null;
     };
     const add = (segmentType, value) => {
-      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType;
-      if (!['intro', 'recap', 'outro'].includes(normalizedType) || value == null) return;
+      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType === 'post_credits' ? 'post-credits' : segmentType;
+      if (!['intro', 'recap', 'outro', 'post-credits'].includes(normalizedType) || value == null) return;
       set.add(normalizedType);
       const entries = Array.isArray(value) ? value : [value];
       const ranges = entries.map(entry => {
@@ -440,7 +440,7 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
     } else if (Array.isArray(json?.segments)) {
       json.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
     }
-    for (const type of ['intro', 'recap', 'outro', 'credits']) add(type, json?.[type]);
+    for (const type of ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits']) add(type, json?.[type]);
     Object.defineProperty(set, 'rangesByType', { value: rangesByType, enumerable: false });
     return set;
   };
@@ -504,7 +504,7 @@ async function submitSegment(item, apiKey) {
     end_sec: item.end_sec,
   };
   if (isMovie) {
-    data.media_type = 'movie';
+    data.is_movie = true;
   } else {
     data.season = item.season;
     data.episode = item.episode;
@@ -1592,63 +1592,34 @@ const SEGMENT_TYPES = {
   INTRO: 'intro',
   RECAP: 'recap',
   OUTRO: 'outro',
-};
-
-/** Labels used when a movie's credits are split around an after-credits scene. */
-const CREDIT_PARTS = {
-  BEFORE_AFTER_CREDITS_SCENE: 'before_after_credits_scene',
-  AFTER_AFTER_CREDITS_SCENE: 'after_after_credits_scene',
+  POST_CREDITS: 'post-credits',
 };
 
 /**
- * Split a movie credit range around a provider-reported after-credits scene.
- *
- * The scene itself is deliberately omitted. If its end is unknown, only the
- * safe part before the scene is returned; guessing the post-scene start would
- * risk including the scene in the credits segment.
+ * Build a full movie outro plus an optional, explicitly timed extra scene.
+ * A credits marker after a known scene cannot identify the full outro.
  */
 function splitCreditRange({
   startSec,
   endSec,
+  runtimeSec = null,
   afterCreditsStartSec = null,
   afterCreditsEndSec = null,
   afterCreditsDetected = false,
 }) {
-  const start = Number(startSec);
-  const end = Number(endSec);
+  const start = startSec == null ? NaN : Number(startSec);
+  const end = runtimeSec == null ? Number(endSec) : Number(runtimeSec);
+  if (endSec == null && runtimeSec == null) return [];
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) return [];
-
   const sceneStart = afterCreditsStartSec == null ? null : Number(afterCreditsStartSec);
   const sceneEnd = afterCreditsEndSec == null ? null : Number(afterCreditsEndSec);
-  const hasScene = afterCreditsDetected || Number.isFinite(sceneStart) || Number.isFinite(sceneEnd);
-
-  if (!hasScene) return [{ startSec: start, endSec: end, creditPart: null }];
-  if (!Number.isFinite(sceneStart)) return [];
-
-  // If all credits finish before the scene, they are still the pre-scene
-  // portion and should remain clearly labelled as such.
-  if (sceneStart >= end) return [{
-    startSec: start,
-    endSec: end,
-    creditPart: CREDIT_PARTS.BEFORE_AFTER_CREDITS_SCENE,
-  }];
-  if (sceneStart <= start) return [];
-
-  const parts = [{
-    startSec: start,
-    endSec: sceneStart,
-    creditPart: CREDIT_PARTS.BEFORE_AFTER_CREDITS_SCENE,
-  }];
-
-  // Without a trustworthy scene end there is no safe post-scene range.
-  if (!Number.isFinite(sceneEnd) || sceneEnd <= sceneStart) return parts;
-  const postSceneStart = Math.min(sceneEnd, end);
-  if (postSceneStart < end) {
-    parts.push({
-      startSec: postSceneStart,
-      endSec: end,
-      creditPart: CREDIT_PARTS.AFTER_AFTER_CREDITS_SCENE,
-    });
+  const hasScene = afterCreditsDetected || sceneStart !== null || sceneEnd !== null;
+  if (hasScene && (!Number.isFinite(sceneStart) || sceneStart <= start || sceneStart >= end)) return [];
+  if (Number.isFinite(sceneEnd) && (sceneEnd <= sceneStart || sceneEnd > end)) return [];
+  const parts = [{ startSec: start, endSec: end, creditPart: null }];
+  // Runtime is an outro boundary only, never a substitute for the scene end.
+  if (hasScene && Number.isFinite(sceneEnd)) {
+    parts.push({ startSec: sceneStart, endSec: sceneEnd, segmentType: SEGMENT_TYPES.POST_CREDITS, creditPart: null });
   }
   return parts;
 }
@@ -2436,6 +2407,22 @@ function hasExistingSegment(existing, item) {
   return existing.has?.(item.segment_type) ?? false;
 }
 
+// Existing scene timestamps are a warning signal, never copied into a submission.
+function filterConflictingMovieOutros(items, existingByKey) {
+  return items.filter(item => {
+    if (!isMovieItem(item) || item.segment_type !== 'outro') return true;
+    const key = getItemCacheKey(item);
+    const starts = [
+      ...items.filter(scene => isMovieItem(scene) && getItemCacheKey(scene) === key
+        && scene.segment_type === 'post-credits').map(scene => Number(scene.start_sec)),
+      ...(existingByKey.get(key)?.rangesByType?.get('post-credits') || []).map(scene => Number(scene.startSec)),
+    ].filter(Number.isFinite);
+    if (!starts.some(start => Number(item.start_sec) >= start)) return true;
+    toast(`Movie ${item.imdb_id}: outro starts after a known extra scene; skipped for playback review.`);
+    return false;
+  });
+}
+
 function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
   const normalizedShowId = showId != null ? String(showId) : '';
   const hasTaggedItems = state.allItems.some(item => getItemShowId(item));
@@ -2654,16 +2641,18 @@ function filterShortOutputSegments(items) {
     const end = Number(item?.end_sec);
     return Number.isFinite(start)
       && Number.isFinite(end)
-      && end - start >= MIN_OUTPUT_SEGMENT_DURATION_SECONDS;
+      && start >= 0
+      && end - start >= MIN_OUTPUT_SEGMENT_DURATION_SECONDS
+      && (!isMovieItem(item) || (['outro', 'post-credits'].includes(item.segment_type)
+        && end - start <= (item.segment_type === 'outro' ? 900 : 600)));
   });
 }
 
 function normalizeMovieExportItem(item) {
   return {
     imdb_id: item.imdb_id,
-    media_type: 'movie',
+    is_movie: true,
     segment_type: item.segment_type,
-    ...(item.credit_part ? { credit_part: item.credit_part } : {}),
     start_sec: item.start_sec,
     end_sec: item.end_sec,
   };
@@ -2695,11 +2684,11 @@ async function exportJSON() {
   let items = filterShortOutputSegments(mappedItems);
   const shortSegmentCount = mappedItems.length - items.length;
   if (shortSegmentCount > 0) {
-    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
+    toast(`${shortSegmentCount} invalid or unsupported segment(s) removed from export.`);
   }
   if (!items.length) {
     if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+      toast(`All mapped segments have invalid durations or unsupported movie types; nothing was exported.`);
       return;
     }
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
@@ -2720,6 +2709,11 @@ async function exportJSON() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
+  items = filterConflictingMovieOutros(items, canonicalExisting);
+  if (!items.length) {
+    toast('No safe movie timestamps to export; verify the first credits in playback.');
+    return;
+  }
   const beforeCount = items.length;
   items = items.filter(item => {
     const key = getItemCacheKey(item);
@@ -2821,11 +2815,11 @@ async function submitToIntroDB() {
   const allMapped = filterShortOutputSegments(mappedItems);
   const shortSegmentCount = mappedItems.length - allMapped.length;
   if (shortSegmentCount > 0) {
-    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds skipped.`);
+    toast(`${shortSegmentCount} invalid or unsupported segment(s) skipped.`);
   }
   if (!allMapped.length) {
     if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was submitted.`);
+      toast(`All mapped segments have invalid durations or unsupported movie types; nothing was submitted.`);
       setIntrodbStatus(`Nothing submitted: segments must be at least ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds`);
       stopSubmission();
       return;
@@ -2851,7 +2845,13 @@ async function submitToIntroDB() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  const items = allMapped.filter(item => {
+  const safeMapped = filterConflictingMovieOutros(allMapped, canonicalExisting);
+  if (!safeMapped.length) {
+    setIntrodbStatus('Nothing submitted: movie credits need playback review');
+    stopSubmission();
+    return;
+  }
+  const items = safeMapped.filter(item => {
     const key = getItemCacheKey(item);
     return !hasExistingSegment(canonicalExisting.get(key), item);
   });
@@ -3158,6 +3158,20 @@ function processNetflixMetadata(data) {
   if (!video) return;
 
   const showId = video.id != null ? String(video.id) : null;
+  if (String(video.type || '').toLowerCase() === 'movie') {
+    handleDetectedShow({ title: video.title, showId, year: video.year || '', mediaType: 'movie' });
+    // Netflix's single creditsOffset is not evidence of the FIRST credits.
+    // Keep movie candidates out of submissions until their meaning is verified.
+    console.info('[NFE] Netflix movie markers require playback verification', {
+      title: video.title,
+      movieId: showId,
+      creditsOffset: video.creditsOffset ?? null,
+      runtime: video.runtime ?? null,
+      skipMarkers: video.skipMarkers ?? {},
+    });
+    setDbStatus('Netflix movie: creditsOffset alone is unverified; no timestamps captured. Check the movie markers in the console.');
+    return;
+  }
   const year = video.seasons?.[0]?.year || '';
   handleDetectedShow({
     title: video.title,
@@ -4152,7 +4166,7 @@ function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episod
     item.segment_type === segmentType &&
     (item.credit_part || null) === (creditPart || null)
   );
-  if (state.allItems.some(alreadyCaptured) || extractedItems.some(alreadyCaptured)) return false;
+  if ((!isMovie && state.allItems.some(alreadyCaptured)) || extractedItems.some(alreadyCaptured)) return false;
   extractedItems.push({
     _eid: episodeId,
     _episodeTitle: episodeTitle,
@@ -4267,13 +4281,17 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
   const events = readPrimeVideoTransitionEvents(data);
   const extractedItems = [];
   const runtimeMs = runtimeMsOverride ?? findPrimeVideoRuntimeMs(data, []) ?? readPrimeVideoMediaDurationMs();
-  const creditRange = events
+  const creditRanges = events
     .filter(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)))
     .map(event => ({
       startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
       endTimeMs: readPrimeVideoEventTimeMs(event, 'end') ?? runtimeMs,
     }))
-    .find(range => range.startTimeMs != null && range.endTimeMs != null && range.endTimeMs > range.startTimeMs);
+    .filter(range => range.startTimeMs != null && range.endTimeMs != null && range.endTimeMs > range.startTimeMs);
+  const creditRange = creditRanges.length ? {
+    startTimeMs: Math.min(...creditRanges.map(range => range.startTimeMs)),
+    endTimeMs: Math.max(...creditRanges.map(range => range.endTimeMs)),
+  } : null;
 
   if (!creditRange) {
     const creditEvents = events
@@ -4315,10 +4333,12 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
       startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
       endTimeMs: readPrimeVideoEventTimeMs(event, 'end'),
     }))
-    .find(range => range.startTimeMs != null && range.startTimeMs > creditRange.startTimeMs);
+    .filter(range => range.startTimeMs != null)
+    .sort((a, b) => a.startTimeMs - b.startTimeMs)[0];
   const ranges = splitCreditRange({
     startSec: creditRange.startTimeMs / 1000,
     endSec: creditRange.endTimeMs / 1000,
+    runtimeSec: runtimeMs == null ? null : runtimeMs / 1000,
     afterCreditsDetected: afterCreditsEvents.length > 0,
     afterCreditsStartSec: afterCreditsEvent?.startTimeMs == null ? null : afterCreditsEvent.startTimeMs / 1000,
     afterCreditsEndSec: afterCreditsEvent?.endTimeMs == null ? null : afterCreditsEvent.endTimeMs / 1000,
@@ -4331,19 +4351,19 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
       null,
       null,
       movieTitle,
-      'outro',
+      range.segmentType || 'outro',
       range.startSec * 1000,
       range.endSec * 1000,
       'movie',
       range.creditPart
     );
   }
-  if (!extractedItems.length) return;
+  if (!ranges.length) console.warn('[PVE] Movie credits conflict with scene markers; withholding timestamps.', { titleId, creditRange, afterCreditsEvent });
 
   const existingMovieItems = state.allItems.filter(item =>
     String(item?._showId || '') === String(titleId) &&
     String(item?.media_type || '').toLowerCase() === 'movie' &&
-    item.segment_type === 'outro'
+    ['outro', 'post-credits'].includes(item.segment_type)
   );
   const sameAsExisting = existingMovieItems.length === extractedItems.length && extractedItems.every(item =>
     existingMovieItems.some(existing =>
@@ -4872,8 +4892,16 @@ function processVideolandLayout(json) {
       'post_credits_scene',
       'postcreditsscene',
     ].includes(String(chapter.type || '').trim().toLowerCase()));
-    const afterCreditsChapter = afterCreditsChapters[0];
-    for (const chapter of chapters) {
+    const afterCreditsChapter = afterCreditsChapters.slice().sort((a, b) => Number(a.tcStart) - Number(b.tcStart))[0];
+    const creditChapters = chapters.filter(chapter => isVideolandMovieCreditsType(chapter.type)
+      && coerceVideolandNumber(chapter.tcStart) != null && coerceVideolandNumber(chapter.tcEnd) != null
+      && Number(chapter.tcEnd) > Number(chapter.tcStart));
+    const fullCredits = creditChapters.length ? [{
+      type: creditChapters[0].type,
+      tcStart: Math.min(...creditChapters.map(chapter => Number(chapter.tcStart))),
+      tcEnd: Math.max(...creditChapters.map(chapter => Number(chapter.tcEnd))),
+    }] : [];
+    for (const chapter of fullCredits) {
       const chapterType = String(chapter.type || '').trim().toLowerCase();
       if (!isVideolandMovieCreditsType(chapterType)) continue;
       const startSec = coerceVideolandNumber(chapter.tcStart);
@@ -4888,7 +4916,7 @@ function processVideolandLayout(json) {
         afterCreditsEndSec: coerceVideolandNumber(afterCreditsChapter?.tcEnd),
       });
       for (const range of ranges) {
-        const episodeId = `${clipId}_movie_outro${range.creditPart ? `_${range.creditPart}` : ''}`;
+        const episodeId = `${clipId}_movie_${range.segmentType || 'outro'}${range.creditPart ? `_${range.creditPart}` : ''}`;
         if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
         extractedItems.push({
           _eid: episodeId,
@@ -4897,7 +4925,7 @@ function processVideolandLayout(json) {
           media_type: 'movie',
           ...(range.creditPart ? { credit_part: range.creditPart } : {}),
           imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
-          segment_type: 'outro',
+          segment_type: range.segmentType || 'outro',
           season: null,
           episode: null,
           start_sec: range.startSec,
@@ -5307,7 +5335,6 @@ function getSkyShowtimeMovieCreditRange(movie, format) {
     format?.runtimeSeconds,
   ].map(coerceSkyShowtimeNumber).find(value => value != null) ?? null;
   const durationMs = durationMilliseconds ?? (durationSeconds == null ? null : durationSeconds * 1000);
-  if (endMs == null && afterCreditsStartMs != null) endMs = afterCreditsStartMs;
   if (endMs == null) endMs = durationMs;
   if (startMs == null || endMs == null || endMs <= startMs) return null;
   if (durationMs != null) {
@@ -5315,7 +5342,7 @@ function getSkyShowtimeMovieCreditRange(movie, format) {
     endMs = Math.min(endMs, durationMs);
   }
   if (endMs <= startMs) return null;
-  return { startMs, endMs, afterCreditsStartMs, afterCreditsEndMs, afterCreditsDetected };
+  return { startMs, endMs, durationMs, afterCreditsStartMs, afterCreditsEndMs, afterCreditsDetected };
 }
 
 function isSkyShowtimeSpecialEpisode(episode) {
@@ -5480,6 +5507,7 @@ function processSkyShowtimeMetadata(data, sourceUrl = '') {
     const ranges = splitCreditRange({
       startSec: creditRange.startMs / 1000,
       endSec: creditRange.endMs / 1000,
+      runtimeSec: creditRange.durationMs == null ? null : creditRange.durationMs / 1000,
       afterCreditsDetected: creditRange.afterCreditsDetected,
       afterCreditsStartSec: creditRange.afterCreditsStartMs == null ? null : creditRange.afterCreditsStartMs / 1000,
       afterCreditsEndSec: creditRange.afterCreditsEndMs == null ? null : creditRange.afterCreditsEndMs / 1000,
@@ -5488,7 +5516,7 @@ function processSkyShowtimeMetadata(data, sourceUrl = '') {
       addSkyShowtimeSegment(
         movieItems,
         common,
-        'outro',
+        range.segmentType || 'outro',
         range.startSec * 1000,
         range.endSec * 1000,
         'movie',

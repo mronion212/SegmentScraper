@@ -217,7 +217,7 @@ test('JSON export removes segments shorter than five seconds and keeps exact bou
   await bootstrap.exportJSON();
 
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [boundaryItem]);
-  assert.ok(bootstrap.calls.toasts.some(message => message.includes('shorter than 5 seconds removed')));
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('invalid or unsupported segment(s) removed')));
 });
 
 test('IntroDB submission removes segments shorter than five seconds', async () => {
@@ -238,7 +238,7 @@ test('IntroDB submission removes segments shorter than five seconds', async () =
 
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.submissions)), [eligibleItem]);
   assert.match(bootstrap.calls.confirmations[0], /Submit 1 timestamp/);
-  assert.ok(bootstrap.calls.toasts.some(message => message.includes('shorter than 5 seconds skipped')));
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('invalid or unsupported segment(s) skipped')));
 });
 
 test('movie JSON export bypasses TVDB and uses a movie deduplication key', async () => {
@@ -269,7 +269,7 @@ test('movie JSON export bypasses TVDB and uses a movie deduplication key', async
   assert.deepEqual(bootstrap.calls.dedup.map(call => call.key), ['ttmovie1|movie']);
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [{
     imdb_id: 'ttmovie1',
-    media_type: 'movie',
+    is_movie: true,
     segment_type: 'outro',
     start_sec: 5400,
     end_sec: 5700,
@@ -316,7 +316,7 @@ test('movie export keeps the credit part that is not already present in IntroDB'
   const after = {
     ...before,
     _eid: 'after',
-    credit_part: 'after_after_credits_scene',
+    segment_type: 'post-credits',
     start_sec: 5800,
     end_sec: 6000,
   };
@@ -340,11 +340,34 @@ test('movie export keeps the credit part that is not already present in IntroDB'
 
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [{
     imdb_id: 'ttmovie3',
-    media_type: 'movie',
-    segment_type: 'outro',
-    credit_part: 'after_after_credits_scene',
+    is_movie: true,
+    segment_type: 'post-credits',
     start_sec: 5800,
     end_sec: 6000,
   }]);
   assert.ok(bootstrap.calls.toasts.some(message => message.includes('1 duplicate')));
+});
+
+test('movie export enforces documented segment types and inclusive duration limits', async () => {
+  const rows = [
+    ['outro', 5], ['outro', 900], ['post-credits', 5], ['post-credits', 600],
+    ['outro', 901], ['post-credits', 601], ['post-credits', 4], ['intro', 30],
+  ].map(([segment_type, duration], index) => ({ imdb_id: `tt123456${index}`,  media_type: 'movie', segment_type, start_sec: 100, end_sec: 100 + duration }));
+  const bootstrap = loadBootstrap({ stateOverrides: { allItems: rows, tvdbApiKey: '' } });
+  await bootstrap.exportJSON();
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), rows.slice(0, 4).map(({ media_type, ...row }) => ({ ...row, is_movie: true })));
+  assert.equal(bootstrap.calls.map.length, 0);
+});
+
+test('an existing scene blocks a movie outro that starts too late', async () => {
+  const existing = new Set(['post-credits']);
+  existing.rangesByType = new Map([['post-credits', [{ startSec: 5600, endSec: 5700 }]]]);
+  const bootstrap = loadBootstrap({ stateOverrides: { tvdbApiKey: '', allItems: [
+    { media_type: 'movie', imdb_id: 'tt1234567', segment_type: 'outro', start_sec: 5800, end_sec: 6000 },
+  ] }, existingSegmentsByKey: new Map([['tt1234567|movie', existing]]) });
+  await bootstrap.exportJSON();
+  await bootstrap.submitToIntroDB();
+  assert.equal(bootstrap.calls.previews.length, 0);
+  assert.equal(bootstrap.calls.submissions.length, 0);
+  assert.equal(bootstrap.calls.confirmations.length, 0);
 });

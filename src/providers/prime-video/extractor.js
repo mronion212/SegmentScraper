@@ -859,7 +859,7 @@ function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episod
     item.segment_type === segmentType &&
     (item.credit_part || null) === (creditPart || null)
   );
-  if (state.allItems.some(alreadyCaptured) || extractedItems.some(alreadyCaptured)) return false;
+  if ((!isMovie && state.allItems.some(alreadyCaptured)) || extractedItems.some(alreadyCaptured)) return false;
   extractedItems.push({
     _eid: episodeId,
     _episodeTitle: episodeTitle,
@@ -974,13 +974,17 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
   const events = readPrimeVideoTransitionEvents(data);
   const extractedItems = [];
   const runtimeMs = runtimeMsOverride ?? findPrimeVideoRuntimeMs(data, []) ?? readPrimeVideoMediaDurationMs();
-  const creditRange = events
+  const creditRanges = events
     .filter(event => ['END_CREDITS', 'END_CREDIT'].includes(getPrimeVideoEventType(event)))
     .map(event => ({
       startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
       endTimeMs: readPrimeVideoEventTimeMs(event, 'end') ?? runtimeMs,
     }))
-    .find(range => range.startTimeMs != null && range.endTimeMs != null && range.endTimeMs > range.startTimeMs);
+    .filter(range => range.startTimeMs != null && range.endTimeMs != null && range.endTimeMs > range.startTimeMs);
+  const creditRange = creditRanges.length ? {
+    startTimeMs: Math.min(...creditRanges.map(range => range.startTimeMs)),
+    endTimeMs: Math.max(...creditRanges.map(range => range.endTimeMs)),
+  } : null;
 
   if (!creditRange) {
     const creditEvents = events
@@ -1022,10 +1026,12 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
       startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
       endTimeMs: readPrimeVideoEventTimeMs(event, 'end'),
     }))
-    .find(range => range.startTimeMs != null && range.startTimeMs > creditRange.startTimeMs);
+    .filter(range => range.startTimeMs != null)
+    .sort((a, b) => a.startTimeMs - b.startTimeMs)[0];
   const ranges = splitCreditRange({
     startSec: creditRange.startTimeMs / 1000,
     endSec: creditRange.endTimeMs / 1000,
+    runtimeSec: runtimeMs == null ? null : runtimeMs / 1000,
     afterCreditsDetected: afterCreditsEvents.length > 0,
     afterCreditsStartSec: afterCreditsEvent?.startTimeMs == null ? null : afterCreditsEvent.startTimeMs / 1000,
     afterCreditsEndSec: afterCreditsEvent?.endTimeMs == null ? null : afterCreditsEvent.endTimeMs / 1000,
@@ -1038,19 +1044,19 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
       null,
       null,
       movieTitle,
-      'outro',
+      range.segmentType || 'outro',
       range.startSec * 1000,
       range.endSec * 1000,
       'movie',
       range.creditPart
     );
   }
-  if (!extractedItems.length) return;
+  if (!ranges.length) console.warn('[PVE] Movie credits conflict with scene markers; withholding timestamps.', { titleId, creditRange, afterCreditsEvent });
 
   const existingMovieItems = state.allItems.filter(item =>
     String(item?._showId || '') === String(titleId) &&
     String(item?.media_type || '').toLowerCase() === 'movie' &&
-    item.segment_type === 'outro'
+    ['outro', 'post-credits'].includes(item.segment_type)
   );
   const sameAsExisting = existingMovieItems.length === extractedItems.length && extractedItems.every(item =>
     existingMovieItems.some(existing =>

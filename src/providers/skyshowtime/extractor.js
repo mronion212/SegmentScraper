@@ -296,7 +296,6 @@ function getSkyShowtimeMovieCreditRange(movie, format) {
     format?.runtimeSeconds,
   ].map(coerceSkyShowtimeNumber).find(value => value != null) ?? null;
   const durationMs = durationMilliseconds ?? (durationSeconds == null ? null : durationSeconds * 1000);
-  if (endMs == null && afterCreditsStartMs != null) endMs = afterCreditsStartMs;
   if (endMs == null) endMs = durationMs;
   if (startMs == null || endMs == null || endMs <= startMs) return null;
   if (durationMs != null) {
@@ -304,7 +303,7 @@ function getSkyShowtimeMovieCreditRange(movie, format) {
     endMs = Math.min(endMs, durationMs);
   }
   if (endMs <= startMs) return null;
-  return { startMs, endMs, afterCreditsStartMs, afterCreditsEndMs, afterCreditsDetected };
+  return { startMs, endMs, durationMs, afterCreditsStartMs, afterCreditsEndMs, afterCreditsDetected };
 }
 
 function isSkyShowtimeSpecialEpisode(episode) {
@@ -469,6 +468,7 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
     const ranges = splitCreditRange({
       startSec: creditRange.startMs / 1000,
       endSec: creditRange.endMs / 1000,
+      runtimeSec: creditRange.durationMs == null ? null : creditRange.durationMs / 1000,
       afterCreditsDetected: creditRange.afterCreditsDetected,
       afterCreditsStartSec: creditRange.afterCreditsStartMs == null ? null : creditRange.afterCreditsStartMs / 1000,
       afterCreditsEndSec: creditRange.afterCreditsEndMs == null ? null : creditRange.afterCreditsEndMs / 1000,
@@ -477,7 +477,7 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
       addSkyShowtimeSegment(
         movieItems,
         common,
-        'outro',
+        range.segmentType || 'outro',
         range.startSec * 1000,
         range.endSec * 1000,
         'movie',

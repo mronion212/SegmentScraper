@@ -3,7 +3,7 @@
 import { state } from '../../core/state.js';
 import { createNormalizedSegment } from '../../normalization/segment-mapper.js';
 import { setProviderEpisodeCatalog } from '../../core/tvdb.js';
-import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
+import { handleDetectedShow, recordExtractedSegments, setDbStatus } from '../bootstrap.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 export const NETFLIX_TITLE_OVERRIDES = {
@@ -30,6 +30,20 @@ export function processNetflixMetadata(data) {
   if (!video) return;
 
   const showId = video.id != null ? String(video.id) : null;
+  if (String(video.type || '').toLowerCase() === 'movie') {
+    handleDetectedShow({ title: video.title, showId, year: video.year || '', mediaType: 'movie' });
+    // Netflix's single creditsOffset is not evidence of the FIRST credits.
+    // Keep movie candidates out of submissions until their meaning is verified.
+    console.info('[NFE] Netflix movie markers require playback verification', {
+      title: video.title,
+      movieId: showId,
+      creditsOffset: video.creditsOffset ?? null,
+      runtime: video.runtime ?? null,
+      skipMarkers: video.skipMarkers ?? {},
+    });
+    setDbStatus('Netflix movie: creditsOffset alone is unverified; no timestamps captured. Check the movie markers in the console.');
+    return;
+  }
   const year = video.seasons?.[0]?.year || '';
   handleDetectedShow({
     title: video.title,

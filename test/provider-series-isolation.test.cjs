@@ -18,6 +18,7 @@ function loadExtractor(relativePath, exportName, globals = {}) {
   const catalogs = [];
   const logs = [];
   let source = [
+    fs.readFileSync(path.join(__dirname, '..', 'src/normalization/segment-mapper.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8'),
   ].join('\n')
@@ -362,4 +363,30 @@ test('Prime Video prefers response episode metadata while the player DOM is stal
 
   assert.deepEqual(plain(prime.catalogs.map(catalog => [catalog.episodes[0].season, catalog.episodes[0].episode])), [[2, 1], [2, 2]]);
   assert.deepEqual(plain(prime.state.allItems.map(item => [item.season, item.episode, item._episodeTitle])), [[2, 1, 'First'], [2, 2, 'Second']]);
+});
+
+test('Videoland keeps the full outro and the marked scene separately', () => {
+  const videoland = loadExtractor('src/providers/videoland/extractor.js', 'processVideolandLayout');
+  const payload = videolandPayload('movie-a', 'Movie', 'clip-a');
+  payload.type = 'movie';
+  delete payload.seo.video.season;
+  delete payload.seo.video.episode;
+  payload.content.itemContent.video.chapters = [
+    { type: 'ending_credits', tcStart: 5400, tcEnd: 6000 },
+    { type: 'post_credits_scene', tcStart: 5600, tcEnd: 5700 },
+  ];
+  videoland.process(payload);
+  assert.deepEqual(plain(videoland.state.allItems.map(item => [item.segment_type, item.start_sec, item.end_sec])), [
+    ['outro', 5400, 6000], ['post-credits', 5600, 5700],
+  ]);
+});
+
+test('Netflix movie creditsOffset is logged as unverified rather than uploaded', () => {
+  const statuses = [];
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus: value => statuses.push(value) });
+  netflix.process({ video: { id: 'movie-test', type: 'movie', title: 'Movie fixture', creditsOffset: 7800, runtime: 7900, skipMarkers: {} } });
+  assert.equal(netflix.detectedShows[0].mediaType, 'movie');
+  assert.equal(netflix.state.allItems.length, 0);
+  assert.equal(statuses.length, 1);
+  assert.equal(netflix.logs[0][1].creditsOffset, 7800);
 });

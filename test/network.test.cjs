@@ -39,7 +39,7 @@ test('movie deduplication requests omit TV season and episode parameters', async
 
   const existing = await network.loadExistingSegments('ttmovie', 'key');
 
-  assert.equal(requests[0].url, 'https://api.introdb.app/segments?imdb_id=ttmovie');
+  assert.equal(requests[0].url, 'https://api.introdb.app/segments?imdb_id=ttmovie&is_movie=true');
   assert.deepEqual(plain(existing), [{ key: 'ttmovie|movie', segmentType: 'outro' }]);
 });
 
@@ -99,9 +99,27 @@ test('movie submissions include media type and omit TV fields', async () => {
   assert.deepEqual(plain(result), { success: true, status: 201 });
   assert.deepEqual(JSON.parse(requests[0].data), {
     imdb_id: 'ttmovie',
-    media_type: 'movie',
+    is_movie: true,
     segment_type: 'outro',
     start_sec: 5400,
     end_sec: 5700,
   });
+});
+
+test('movie duplicate checks recognize the documented post_credits response key', async () => {
+  const network = loadNetwork(request => request.onload({ status: 200, responseText: JSON.stringify({
+    media_type: 'movie', post_credits: { start_sec: 5600, end_sec: 5700 }, outro: null,
+  }) }));
+  const existing = await network.loadExistingSegmentsForEpisode('tt1234567|movie');
+  assert.equal(existing.has('post-credits'), true);
+  assert.equal(existing.has('outro'), false);
+  assert.deepEqual(plain(existing.rangesByType.get('post-credits')), [{ startSec: 5600, endSec: 5700, creditPart: null }]);
+});
+
+test('post-credits submissions use the documented movie API payload', async () => {
+  const requests = [];
+  const network = loadNetwork(request => { requests.push(request); request.onload({ status: 201 }); });
+  await network.submitSegment({ media_type: 'movie', imdb_id: 'tt1234567', segment_type: 'post-credits', start_sec: 5600, end_sec: 5700, season: 1, episode: 1 }, 'test-key');
+  assert.deepEqual(JSON.parse(requests[0].data), { imdb_id: 'tt1234567', is_movie: true, segment_type: 'post-credits', start_sec: 5600, end_sec: 5700 });
+  assert.equal(requests[0].headers['X-API-Key'], 'test-key');
 });

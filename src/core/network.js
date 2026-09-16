@@ -171,7 +171,7 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
   const [imdbId, seasonOrMediaType, episode] = key.split('|');
   const isMovie = seasonOrMediaType === 'movie';
   const url = isMovie
-    ? `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}`
+    ? `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&is_movie=true`
     : `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(seasonOrMediaType)}&episode=${encodeURIComponent(episode)}`;
   
   const gmXhr = getGmXhr();
@@ -195,8 +195,8 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
       return null;
     };
     const add = (segmentType, value) => {
-      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType;
-      if (!['intro', 'recap', 'outro'].includes(normalizedType) || value == null) return;
+      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType === 'post_credits' ? 'post-credits' : segmentType;
+      if (!['intro', 'recap', 'outro', 'post-credits'].includes(normalizedType) || value == null) return;
       set.add(normalizedType);
       const entries = Array.isArray(value) ? value : [value];
       const ranges = entries.map(entry => {
@@ -218,7 +218,7 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
     } else if (Array.isArray(json?.segments)) {
       json.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
     }
-    for (const type of ['intro', 'recap', 'outro', 'credits']) add(type, json?.[type]);
+    for (const type of ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits']) add(type, json?.[type]);
     Object.defineProperty(set, 'rangesByType', { value: rangesByType, enumerable: false });
     return set;
   };
@@ -282,7 +282,7 @@ export async function submitSegment(item, apiKey) {
     end_sec: item.end_sec,
   };
   if (isMovie) {
-    data.media_type = 'movie';
+    data.is_movie = true;
   } else {
     data.season = item.season;
     data.episode = item.episode;

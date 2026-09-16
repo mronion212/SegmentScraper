@@ -10,63 +10,34 @@ export const SEGMENT_TYPES = {
   INTRO: 'intro',
   RECAP: 'recap',
   OUTRO: 'outro',
-};
-
-/** Labels used when a movie's credits are split around an after-credits scene. */
-export const CREDIT_PARTS = {
-  BEFORE_AFTER_CREDITS_SCENE: 'before_after_credits_scene',
-  AFTER_AFTER_CREDITS_SCENE: 'after_after_credits_scene',
+  POST_CREDITS: 'post-credits',
 };
 
 /**
- * Split a movie credit range around a provider-reported after-credits scene.
- *
- * The scene itself is deliberately omitted. If its end is unknown, only the
- * safe part before the scene is returned; guessing the post-scene start would
- * risk including the scene in the credits segment.
+ * Build a full movie outro plus an optional, explicitly timed extra scene.
+ * A credits marker after a known scene cannot identify the full outro.
  */
 export function splitCreditRange({
   startSec,
   endSec,
+  runtimeSec = null,
   afterCreditsStartSec = null,
   afterCreditsEndSec = null,
   afterCreditsDetected = false,
 }) {
-  const start = Number(startSec);
-  const end = Number(endSec);
+  const start = startSec == null ? NaN : Number(startSec);
+  const end = runtimeSec == null ? Number(endSec) : Number(runtimeSec);
+  if (endSec == null && runtimeSec == null) return [];
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) return [];
-
   const sceneStart = afterCreditsStartSec == null ? null : Number(afterCreditsStartSec);
   const sceneEnd = afterCreditsEndSec == null ? null : Number(afterCreditsEndSec);
-  const hasScene = afterCreditsDetected || Number.isFinite(sceneStart) || Number.isFinite(sceneEnd);
-
-  if (!hasScene) return [{ startSec: start, endSec: end, creditPart: null }];
-  if (!Number.isFinite(sceneStart)) return [];
-
-  // If all credits finish before the scene, they are still the pre-scene
-  // portion and should remain clearly labelled as such.
-  if (sceneStart >= end) return [{
-    startSec: start,
-    endSec: end,
-    creditPart: CREDIT_PARTS.BEFORE_AFTER_CREDITS_SCENE,
-  }];
-  if (sceneStart <= start) return [];
-
-  const parts = [{
-    startSec: start,
-    endSec: sceneStart,
-    creditPart: CREDIT_PARTS.BEFORE_AFTER_CREDITS_SCENE,
-  }];
-
-  // Without a trustworthy scene end there is no safe post-scene range.
-  if (!Number.isFinite(sceneEnd) || sceneEnd <= sceneStart) return parts;
-  const postSceneStart = Math.min(sceneEnd, end);
-  if (postSceneStart < end) {
-    parts.push({
-      startSec: postSceneStart,
-      endSec: end,
-      creditPart: CREDIT_PARTS.AFTER_AFTER_CREDITS_SCENE,
-    });
+  const hasScene = afterCreditsDetected || sceneStart !== null || sceneEnd !== null;
+  if (hasScene && (!Number.isFinite(sceneStart) || sceneStart <= start || sceneStart >= end)) return [];
+  if (Number.isFinite(sceneEnd) && (sceneEnd <= sceneStart || sceneEnd > end)) return [];
+  const parts = [{ startSec: start, endSec: end, creditPart: null }];
+  // Runtime is an outro boundary only, never a substitute for the scene end.
+  if (hasScene && Number.isFinite(sceneEnd)) {
+    parts.push({ startSec: sceneStart, endSec: sceneEnd, segmentType: SEGMENT_TYPES.POST_CREDITS, creditPart: null });
   }
   return parts;
 }

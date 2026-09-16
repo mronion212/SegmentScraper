@@ -197,8 +197,16 @@ export function processVideolandLayout(json) {
       'post_credits_scene',
       'postcreditsscene',
     ].includes(String(chapter.type || '').trim().toLowerCase()));
-    const afterCreditsChapter = afterCreditsChapters[0];
-    for (const chapter of chapters) {
+    const afterCreditsChapter = afterCreditsChapters.slice().sort((a, b) => Number(a.tcStart) - Number(b.tcStart))[0];
+    const creditChapters = chapters.filter(chapter => isVideolandMovieCreditsType(chapter.type)
+      && coerceVideolandNumber(chapter.tcStart) != null && coerceVideolandNumber(chapter.tcEnd) != null
+      && Number(chapter.tcEnd) > Number(chapter.tcStart));
+    const fullCredits = creditChapters.length ? [{
+      type: creditChapters[0].type,
+      tcStart: Math.min(...creditChapters.map(chapter => Number(chapter.tcStart))),
+      tcEnd: Math.max(...creditChapters.map(chapter => Number(chapter.tcEnd))),
+    }] : [];
+    for (const chapter of fullCredits) {
       const chapterType = String(chapter.type || '').trim().toLowerCase();
       if (!isVideolandMovieCreditsType(chapterType)) continue;
       const startSec = coerceVideolandNumber(chapter.tcStart);
@@ -213,7 +221,7 @@ export function processVideolandLayout(json) {
         afterCreditsEndSec: coerceVideolandNumber(afterCreditsChapter?.tcEnd),
       });
       for (const range of ranges) {
-        const episodeId = `${clipId}_movie_outro${range.creditPart ? `_${range.creditPart}` : ''}`;
+        const episodeId = `${clipId}_movie_${range.segmentType || 'outro'}${range.creditPart ? `_${range.creditPart}` : ''}`;
         if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
         extractedItems.push({
           _eid: episodeId,
@@ -222,7 +230,7 @@ export function processVideolandLayout(json) {
           media_type: 'movie',
           ...(range.creditPart ? { credit_part: range.creditPart } : {}),
           imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
-          segment_type: 'outro',
+          segment_type: range.segmentType || 'outro',
           season: null,
           episode: null,
           start_sec: range.startSec,

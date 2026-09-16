@@ -138,3 +138,17 @@ Episode metadata provided by [TheTVDB](https://thetvdb.com/).
 ## Acknowledgements
 
 Thanks to [Comasss](https://github.com/Comasss) for the initial idea behind this scraping project and for contributing as the first person involved.
+
+## Movie timestamps and post-credits scenes
+
+Movie support is implemented for Prime Video, Videoland and SkyShowtime. Movie exports and submissions use `is_movie: true` without season/episode; duplicate lookups use `GET /segments?imdb_id=...&is_movie=true`. TVDB mapping is not used for movies.
+
+Movie exports use a full `outro` from the first credits through the credits end (including extra scenes), with `post-credits` containing only the explicitly timed scene. This follows the requested convention and the worked example in [IntroDB movie documentation](https://introdb.app/docs/movies); the mid-credits prose on that page currently describes a conflicting convention. Movie outros must last 5–900 seconds, and scenes 5–600 seconds. Read responses use `post_credits`; submissions use `post-credits`.
+
+The extractor recognizes explicit provider markers (Prime after/post-credits events, Videoland after/post-credits chapters, and SkyShowtime SOAC/EOAC or named equivalents). These shapes are tested with fixtures; availability and timing still need verification against actual playback. A scene without an explicit end is not submitted, and the movie runtime is never used to invent that end. An outro without scene markers does not prove that the film has no extra scene. Multiple scenes are not fully modeled by this integration.
+
+[AfterCredits](https://aftercredits.com/about/) can help check whether extra scenes exist, but that information alone does not establish exact timestamps for a particular streaming version. Do not turn a presence flag into an uploaded timestamp or re-submit another database's timestamps as a fresh observation. Review the actual scene boundaries before contributing uncertain data.
+
+Netflix movies are detected but are not submitted from `creditsOffset` alone. The console entry `[NFE] Netflix movie markers require playback verification` contains the title, movie ID, creditsOffset, runtime and skipMarkers for inspection. This does not affect TV extraction. No authenticated Netflix movie response was available during this review; fixture tests are not evidence that Netflix exposes scene boundaries.
+
+TMDB's [movie keywords endpoint](https://developer.themoviedb.org/reference/movie-keywords) provides another possible presence check: [Spider-Man: Far From Home](https://www.themoviedb.org/movie/429617-spider-man-far-from-home?language=fr-FR) has both `aftercreditsstinger` and `duringcreditsstinger`. Keyword absence must remain unknown, not be interpreted as confirmed absence of a scene. This external check is not automatically integrated yet. Existing IntroDB scene ranges are already used to withhold an outro that starts after a known scene; those ranges are never copied into a new submission.

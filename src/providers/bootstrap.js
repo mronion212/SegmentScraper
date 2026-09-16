@@ -55,6 +55,22 @@ function hasExistingSegment(existing, item) {
   return existing.has?.(item.segment_type) ?? false;
 }
 
+// Existing scene timestamps are a warning signal, never copied into a submission.
+function filterConflictingMovieOutros(items, existingByKey) {
+  return items.filter(item => {
+    if (!isMovieItem(item) || item.segment_type !== 'outro') return true;
+    const key = getItemCacheKey(item);
+    const starts = [
+      ...items.filter(scene => isMovieItem(scene) && getItemCacheKey(scene) === key
+        && scene.segment_type === 'post-credits').map(scene => Number(scene.start_sec)),
+      ...(existingByKey.get(key)?.rangesByType?.get('post-credits') || []).map(scene => Number(scene.startSec)),
+    ].filter(Number.isFinite);
+    if (!starts.some(start => Number(item.start_sec) >= start)) return true;
+    toast(`Movie ${item.imdb_id}: outro starts after a known extra scene; skipped for playback review.`);
+    return false;
+  });
+}
+
 function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
   const normalizedShowId = showId != null ? String(showId) : '';
   const hasTaggedItems = state.allItems.some(item => getItemShowId(item));
@@ -273,16 +289,18 @@ function filterShortOutputSegments(items) {
     const end = Number(item?.end_sec);
     return Number.isFinite(start)
       && Number.isFinite(end)
-      && end - start >= MIN_OUTPUT_SEGMENT_DURATION_SECONDS;
+      && start >= 0
+      && end - start >= MIN_OUTPUT_SEGMENT_DURATION_SECONDS
+      && (!isMovieItem(item) || (['outro', 'post-credits'].includes(item.segment_type)
+        && end - start <= (item.segment_type === 'outro' ? 900 : 600)));
   });
 }
 
 function normalizeMovieExportItem(item) {
   return {
     imdb_id: item.imdb_id,
-    media_type: 'movie',
+    is_movie: true,
     segment_type: item.segment_type,
-    ...(item.credit_part ? { credit_part: item.credit_part } : {}),
     start_sec: item.start_sec,
     end_sec: item.end_sec,
   };
@@ -314,11 +332,11 @@ export async function exportJSON() {
   let items = filterShortOutputSegments(mappedItems);
   const shortSegmentCount = mappedItems.length - items.length;
   if (shortSegmentCount > 0) {
-    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
+    toast(`${shortSegmentCount} invalid or unsupported segment(s) removed from export.`);
   }
   if (!items.length) {
     if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+      toast(`All mapped segments have invalid durations or unsupported movie types; nothing was exported.`);
       return;
     }
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
@@ -339,6 +357,11 @@ export async function exportJSON() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
+  items = filterConflictingMovieOutros(items, canonicalExisting);
+  if (!items.length) {
+    toast('No safe movie timestamps to export; verify the first credits in playback.');
+    return;
+  }
   const beforeCount = items.length;
   items = items.filter(item => {
     const key = getItemCacheKey(item);
@@ -440,11 +463,11 @@ export async function submitToIntroDB() {
   const allMapped = filterShortOutputSegments(mappedItems);
   const shortSegmentCount = mappedItems.length - allMapped.length;
   if (shortSegmentCount > 0) {
-    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds skipped.`);
+    toast(`${shortSegmentCount} invalid or unsupported segment(s) skipped.`);
   }
   if (!allMapped.length) {
     if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was submitted.`);
+      toast(`All mapped segments have invalid durations or unsupported movie types; nothing was submitted.`);
       setIntrodbStatus(`Nothing submitted: segments must be at least ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds`);
       stopSubmission();
       return;
@@ -470,7 +493,13 @@ export async function submitToIntroDB() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  const items = allMapped.filter(item => {
+  const safeMapped = filterConflictingMovieOutros(allMapped, canonicalExisting);
+  if (!safeMapped.length) {
+    setIntrodbStatus('Nothing submitted: movie credits need playback review');
+    stopSubmission();
+    return;
+  }
+  const items = safeMapped.filter(item => {
     const key = getItemCacheKey(item);
     return !hasExistingSegment(canonicalExisting.get(key), item);
   });
