@@ -13,7 +13,7 @@ test('movie scenes require explicit boundaries and never extend to the file end'
   assert.equal(ranges[0].endSec, 6000);
   assert.deepEqual(ranges[1], { startSec: 5600, endSec: 5700, segmentType: 'post-credits', creditPart: null });
   assert.equal(ranges.length, 2);
-  assert.equal(split({ ...credits, afterCreditsStartSec: 5600 }).length, 1);
+  assert.equal(split({ ...credits, afterCreditsStartSec: 5600 }).length, 0);
   assert.equal(split({ ...credits, afterCreditsStartSec: 5600, afterCreditsEndSec: 5500 }).length, 0);
   assert.deepEqual(split({ ...credits, afterCreditsDetected: true }), []);
   assert.equal(split(credits).length, 1);

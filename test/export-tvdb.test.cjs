@@ -302,7 +302,7 @@ test('movie IntroDB submission bypasses TVDB mapping', async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.submissions)), [movieItem]);
 });
 
-test('movie export keeps the credit part that is not already present in IntroDB', async () => {
+test('a captured extra scene excludes the entire movie from export and submission', async () => {
   const before = {
     imdb_id: 'ttmovie3',
     media_type: 'movie',
@@ -338,14 +338,10 @@ test('movie export keeps the credit part that is not already present in IntroDB'
 
   await bootstrap.exportJSON();
 
-  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), [{
-    imdb_id: 'ttmovie3',
-    is_movie: true,
-    segment_type: 'post-credits',
-    start_sec: 5800,
-    end_sec: 6000,
-  }]);
-  assert.ok(bootstrap.calls.toasts.some(message => message.includes('1 duplicate')));
+  await bootstrap.submitToIntroDB();
+  assert.equal(bootstrap.calls.previews.length, 0);
+  assert.equal(bootstrap.calls.submissions.length, 0);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('entire movie temporarily excluded')));
 });
 
 test('movie export enforces documented segment types and inclusive duration limits', async () => {
@@ -355,19 +351,40 @@ test('movie export enforces documented segment types and inclusive duration limi
   ].map(([segment_type, duration], index) => ({ imdb_id: `tt123456${index}`,  media_type: 'movie', segment_type, start_sec: 100, end_sec: 100 + duration }));
   const bootstrap = loadBootstrap({ stateOverrides: { allItems: rows, tvdbApiKey: '' } });
   await bootstrap.exportJSON();
-  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), rows.slice(0, 4).map(({ media_type, ...row }) => ({ ...row, is_movie: true })));
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.previews[0].items)), rows.slice(0, 2).map(({ media_type, ...row }) => ({ ...row, is_movie: true })));
   assert.equal(bootstrap.calls.map.length, 0);
 });
 
-test('an existing scene blocks a movie outro that starts too late', async () => {
+test('an existing scene blocks even a full movie outro', async () => {
   const existing = new Set(['post-credits']);
   existing.rangesByType = new Map([['post-credits', [{ startSec: 5600, endSec: 5700 }]]]);
   const bootstrap = loadBootstrap({ stateOverrides: { tvdbApiKey: '', allItems: [
-    { media_type: 'movie', imdb_id: 'tt1234567', segment_type: 'outro', start_sec: 5800, end_sec: 6000 },
+    { media_type: 'movie', imdb_id: 'tt1234567', segment_type: 'outro', start_sec: 5400, end_sec: 6000 },
   ] }, existingSegmentsByKey: new Map([['tt1234567|movie', existing]]) });
   await bootstrap.exportJSON();
   await bootstrap.submitToIntroDB();
   assert.equal(bootstrap.calls.previews.length, 0);
   assert.equal(bootstrap.calls.submissions.length, 0);
   assert.equal(bootstrap.calls.confirmations.length, 0);
+});
+
+test('scene presence without ranges excludes only the matching movie', async () => {
+  const rows = ['tt1234567', 'tt1234568'].map(imdb_id => ({
+    media_type: 'movie', imdb_id, segment_type: 'outro', start_sec: 5400, end_sec: 6000,
+  }));
+  const bootstrap = loadBootstrap({ stateOverrides: { tvdbApiKey: '', allItems: rows },
+    existingSegmentsByKey: new Map([['tt1234567|movie', new Set(['post-credits'])]]) });
+  await bootstrap.exportJSON();
+  assert.deepEqual(Array.from(bootstrap.calls.previews[0].items, item => item.imdb_id), ['tt1234568']);
+});
+
+test('a scene removed by duration validation still excludes its movie', async () => {
+  const bootstrap = loadBootstrap({ stateOverrides: { tvdbApiKey: '', allItems: [
+    { media_type: 'movie', imdb_id: 'tt1234567', segment_type: 'outro', start_sec: 5400, end_sec: 6000 },
+    { media_type: 'movie', imdb_id: 'tt1234567', segment_type: 'post-credits', start_sec: 5700, end_sec: 5703 },
+  ] } });
+  await bootstrap.exportJSON();
+  await bootstrap.submitToIntroDB();
+  assert.equal(bootstrap.calls.previews.length, 0);
+  assert.equal(bootstrap.calls.submissions.length, 0);
 });

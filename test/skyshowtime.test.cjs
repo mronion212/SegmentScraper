@@ -22,6 +22,7 @@ function loadSkyShowtimeExtractor(globals = {}) {
   const context = vm.createContext({
     state,
     detectedShows,
+    updateCounters() {},
     console: { info(...args) { logs.push(args); }, warn() {}, error() {} },
     handleDetectedShow(show) {
       detectedShows.push(show);
@@ -432,4 +433,73 @@ test('captures metadata forwarded by the SkyShowtime dedicated-worker bridge', (
 
   assert.equal(stopped, true);
   assert.equal(sky.state.allItems.length, 4);
+});
+
+// Reproduces the reported exported boundaries, not a captured provider response.
+for (const [title, start, end, expected] of [
+  ['Nobody', 5495, 5502, 0],
+  ['Nobody 2', 4993.238, 5365, 1],
+  ['The Naked Gun', 5106.893, 5114, 0],
+  ['Mission: Impossible', 9763.504, 10177, 1],
+  ['Scream 7', 6624.743, 6836, 1],
+  ['M3gan 2.0', 6755.499, 7200, 1],
+  ['Five Nights at Freddys 2', 6241, 6248, 0],
+]) {
+  test(`reviews reported SkyShowtime boundary pattern: ${title}`, () => {
+    const sky = loadSkyShowtimeExtractor();
+    sky.processSkyShowtimeMetadata({ type: 'movie', id: title, title, durationSeconds: end,
+      formats: { HD: { markers: { SOCR: start * 1000 } } } });
+    assert.equal(sky.state.allItems.length, expected);
+    assert.equal(sky.state.skyShowtimeMovieDiagnostics[0].sceneStatus, 'unknown');
+    assert.equal(sky.state.skyShowtimeMovieDiagnostics[0].reviewReasons.length, expected ? 0 : 1);
+  });
+}
+
+// Reduced timing fields from the catalogue response supplied during investigation.
+test('supplied catalogue markers distinguish missing boundaries from conversion errors', () => {
+  for (const [title, durationMilliseconds, markers, expected] of [
+    ['Nobody', 5502000, { SOCR: 5495000 }, 0],
+    ['Nobody 2', 5365000, { SOCR: 4993238 }, 1],
+    ['The Naked Gun', 5114000, { SOCR: 5106893, SOLC: 4454241, EOLC: 5106893 }, 0],
+  ]) {
+    const sky = loadSkyShowtimeExtractor();
+    sky.processSkyShowtimeMetadata({ type: 'ASSET/PROGRAMME', id: title, attributes: {
+      title, providerVariantId: title, classification: ['MOVIES'], durationMilliseconds,
+      durationSeconds: durationMilliseconds / 1000,
+      formats: { HD: { chapterMarkers: [], startOfCredits: markers.SOCR, markers } },
+    } });
+    assert.equal(sky.state.allItems.length, expected);
+    const report = sky.state.skyShowtimeMovieDiagnostics[0];
+    assert.deepEqual(JSON.parse(JSON.stringify(report.formats.HD.markers)), markers);
+    assert.equal(report.sceneStatus, 'unknown');
+    if (expected) assert.equal(sky.state.allItems[0].start_sec, 4993.238);
+  }
+});
+
+test('diagnostics retain all quality timing fields without playback credentials', () => {
+  const sky = loadSkyShowtimeExtractor();
+  sky.processSkyShowtimeMetadata({ type: 'movie', id: 'diag', title: 'Diagnostic', durationSeconds: 5502,
+    token: 'private-token', formats: {
+      HD: { playbackUrl: 'https://example.test/?token=secret', markers: { SOCR: 5495000, unknownMarker: 5100000 } },
+      UHDSDR: { startOfCredits: 5100000, markers: { SOAC: 5300000, EOAC: 5350000 } },
+    } });
+  const report = sky.state.skyShowtimeMovieDiagnostics[0];
+  assert.equal(report.formats.HD.markers.unknownMarker, 5100000);
+  assert.equal(report.formats.UHDSDR.fields.startOfCredits, 5100000);
+  assert.equal(report.formats.UHDSDR.markers.SOAC, 5300000);
+  assert.doesNotMatch(JSON.stringify(report), /private-token|secret|playbackUrl/);
+  assert.equal(sky.state.allItems.length, 0); // Do not silently mix different versions.
+});
+
+test('later SkyShowtime metadata replaces a previously captured movie boundary', () => {
+  const sky = loadSkyShowtimeExtractor();
+  const payload = start => ({ type: 'movie', id: 'updated', title: 'Updated movie', durationSeconds: 5502,
+    formats: { HD: { markers: { SOCR: start * 1000 } } } });
+  sky.processSkyShowtimeMetadata(payload(5200));
+  sky.processSkyShowtimeMetadata(payload(5100));
+  assert.equal(sky.state.allItems.length, 1);
+  assert.equal(sky.state.allItems[0].start_sec, 5100);
+  sky.processSkyShowtimeMetadata(payload(5495));
+  assert.equal(sky.state.allItems.length, 0);
+  assert.equal(sky.state.skyShowtimeMovieDiagnostics.length, 3);
 });

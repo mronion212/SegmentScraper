@@ -32,6 +32,8 @@ export function splitCreditRange({
   const sceneStart = afterCreditsStartSec == null ? null : Number(afterCreditsStartSec);
   const sceneEnd = afterCreditsEndSec == null ? null : Number(afterCreditsEndSec);
   const hasScene = afterCreditsDetected || sceneStart !== null || sceneEnd !== null;
+  // A partial scene must not leave an apparently safe standalone outro.
+  if (hasScene && !Number.isFinite(sceneEnd)) return [];
   if (hasScene && (!Number.isFinite(sceneStart) || sceneStart <= start || sceneStart >= end)) return [];
   if (Number.isFinite(sceneEnd) && (sceneEnd <= sceneStart || sceneEnd > end)) return [];
   const parts = [{ startSec: start, endSec: end, creditPart: null }];

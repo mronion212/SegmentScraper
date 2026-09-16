@@ -11,6 +11,7 @@ import { splitCreditRange } from '../../normalization/segment-mapper.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { setProviderEpisodeCatalog } from '../../core/tvdb.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
+import { updateCounters } from '../../ui/panel.js';
 
 const SKYSHOWTIME_WORKER_MESSAGE = '__segmentScraperSkyShowtime';
 const SKYSHOWTIME_CATALOGUE_HOST = 'atom.skyshowtime.com';
@@ -306,6 +307,47 @@ function getSkyShowtimeMovieCreditRange(movie, format) {
   return { startMs, endMs, durationMs, afterCreditsStartMs, afterCreditsEndMs, afterCreditsDetected };
 }
 
+// Preserve numeric timing metadata only, never playback URLs or credentials.
+function skyShowtimeTimingFields(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 4) return {};
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === 'boolean') result[key] = entry;
+    else if (coerceSkyShowtimeNumber(entry) != null) result[key] = coerceSkyShowtimeNumber(entry);
+    else if (entry && typeof entry === 'object') {
+      const nested = skyShowtimeTimingFields(entry, depth + 1);
+      if (Object.keys(nested).length) result[key] = nested;
+    }
+  }
+  return result;
+}
+
+function recordSkyShowtimeMovieDiagnostic(movie, format, creditRange, reasons) {
+  const timingKeys = /^(?:duration|runtime|startOfCredits|endOfCredits|credits|afterCredits|postCredits|SO|EO)/i;
+  const selectTiming = source => Object.fromEntries(Object.entries(source || {})
+    .filter(([key]) => timingKeys.test(key)));
+  const entry = {
+    movieId: getSkyShowtimeMovieId(movie),
+    title: movie.titleLong || movie.titleMedium || movie.movieName || movie.title || movie.name || '',
+    runtime: skyShowtimeTimingFields(selectTiming(movie)),
+    formats: Object.fromEntries(Object.entries(movie.formats || {}).map(([name, candidate]) => [name, {
+      selected: candidate === format,
+      fields: skyShowtimeTimingFields(selectTiming(candidate)),
+      markers: skyShowtimeTimingFields(candidate?.markers),
+    }])),
+    selectedRangeMs: creditRange,
+    sceneStatus: creditRange?.afterCreditsDetected ? 'provider-marker-present' : 'unknown',
+    reviewReasons: reasons,
+  };
+  state.skyShowtimeMovieDiagnostics ||= [];
+  const signature = JSON.stringify(entry);
+  if (!state.skyShowtimeMovieDiagnostics.some(previous => JSON.stringify(previous) === signature)) {
+    state.skyShowtimeMovieDiagnostics.push(entry);
+    if (state.skyShowtimeMovieDiagnostics.length > 100) state.skyShowtimeMovieDiagnostics.shift();
+    console.info('[SSE] Movie marker diagnostic', entry);
+  }
+}
+
 function isSkyShowtimeSpecialEpisode(episode) {
   if (Number(episode.seasonNumber) === 0 || episode.isSpecial === true) return true;
   const type = String(episode.type || episode.episodeType || '').trim().toLowerCase();
@@ -331,7 +373,13 @@ function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, star
     item.segment_type === providerSegmentType &&
     (item.credit_part || null) === (creditPart || null)
   );
-  if (state.allItems.some(isDuplicate) || extractedItems.some(isDuplicate)) return;
+  if (extractedItems.some(isDuplicate)) return;
+  const previous = state.allItems.find(isDuplicate);
+  if (previous) {
+    if (!isMovie || (previous.start_sec === roundSkyShowtimeSeconds(startMs / 1000)
+      && previous.end_sec === roundSkyShowtimeSeconds(endMs / 1000))) return;
+    state.allItems = state.allItems.filter(item => !isDuplicate(item));
+  }
   extractedItems.push({
     _eid: episodeId,
     _episodeTitle: common.episodeTitle,
@@ -455,6 +503,21 @@ export function processSkyShowtimeMetadata(data, sourceUrl = '') {
     const movieTitle = movie.titleLong || movie.titleMedium || movie.movieName || movie.title || movie.name || '';
     const format = getSkyShowtimeFormat(movie);
     const creditRange = getSkyShowtimeMovieCreditRange(movie, format);
+    const reasons = [];
+    if (!creditRange) reasons.push('No complete credits range in the selected format.');
+    const durationMs = creditRange?.durationMs ?? creditRange?.endMs;
+    // This is a review heuristic, not a new definition of the credits start.
+    if (creditRange && durationMs - creditRange.startMs <= 10000) {
+      reasons.push('Credits marker is within the final 10 seconds; verify the first credits in playback.');
+    }
+    recordSkyShowtimeMovieDiagnostic(movie, format, creditRange, reasons);
+    if (reasons.length) {
+      const countBefore = state.allItems.length;
+      state.allItems = state.allItems.filter(item => !(item.media_type === 'movie' && item._showId === String(movieId)));
+      if (state.allItems.length !== countBefore) updateCounters();
+      console.warn('[SSE] Movie timestamps withheld for review:', movieTitle, reasons);
+      continue;
+    }
     if (!movieId || !movieTitle || !creditRange) continue;
 
     const common = {

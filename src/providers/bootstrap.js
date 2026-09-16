@@ -55,18 +55,28 @@ function hasExistingSegment(existing, item) {
   return existing.has?.(item.segment_type) ?? false;
 }
 
-// Existing scene timestamps are a warning signal, never copied into a submission.
-function filterConflictingMovieOutros(items, existingByKey) {
-  return items.filter(item => {
-    if (!isMovieItem(item) || item.segment_type !== 'outro') return true;
+// Temporary policy: exclude the entire movie when an extra scene is known.
+// Missing provider/IntroDB markers are unknown, not evidence of scene absence.
+function filterMoviesWithKnownExtraScenes(items, existingByKey) {
+  const excluded = new Set();
+  for (const item of [...state.allItems, ...items]) {
+    if (isMovieItem(item) && item.segment_type === 'post-credits') excluded.add(getItemCacheKey(item));
+  }
+  for (const item of items) {
+    if (!isMovieItem(item)) continue;
     const key = getItemCacheKey(item);
-    const starts = [
-      ...items.filter(scene => isMovieItem(scene) && getItemCacheKey(scene) === key
-        && scene.segment_type === 'post-credits').map(scene => Number(scene.start_sec)),
-      ...(existingByKey.get(key)?.rangesByType?.get('post-credits') || []).map(scene => Number(scene.startSec)),
-    ].filter(Number.isFinite);
-    if (!starts.some(start => Number(item.start_sec) >= start)) return true;
-    toast(`Movie ${item.imdb_id}: outro starts after a known extra scene; skipped for playback review.`);
+    const existing = existingByKey.get(key);
+    if (existing?.has?.('post-credits') || existing?.rangesByType?.get('post-credits')?.length) excluded.add(key);
+  }
+  const notified = new Set();
+  return items.filter(item => {
+    if (!isMovieItem(item)) return true;
+    const key = getItemCacheKey(item);
+    if (!excluded.has(key)) return true;
+    if (!notified.has(key)) {
+      toast(`Movie ${item.imdb_id}: extra scene detected; entire movie temporarily excluded.`);
+      notified.add(key);
+    }
     return false;
   });
 }
@@ -357,7 +367,7 @@ export async function exportJSON() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  items = filterConflictingMovieOutros(items, canonicalExisting);
+  items = filterMoviesWithKnownExtraScenes(items, canonicalExisting);
   if (!items.length) {
     toast('No safe movie timestamps to export; verify the first credits in playback.');
     return;
@@ -493,7 +503,7 @@ export async function submitToIntroDB() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  const safeMapped = filterConflictingMovieOutros(allMapped, canonicalExisting);
+  const safeMapped = filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
   if (!safeMapped.length) {
     setIntrodbStatus('Nothing submitted: movie credits need playback review');
     stopSubmission();
@@ -570,6 +580,17 @@ export function clearData() {
 
 function configurePanelCallbacks() {
   window.nfePanelCallbacks = {
+    onDiagnostics: () => {
+      const movies = state.skyShowtimeMovieDiagnostics || [];
+      if (!movies.length) { toast('Open a SkyShowtime movie first to capture its markers.'); return; }
+      const blob = new Blob([JSON.stringify({ provider: 'skyshowtime', movies }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = Object.assign(document.createElement('a'), { href: url, download: 'skyshowtime-movie-diagnostics.json' });
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
     onClose: closePanel,
     onExport: exportJSON,
     onSubmit: submitToIntroDB,

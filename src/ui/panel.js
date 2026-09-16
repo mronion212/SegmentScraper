@@ -50,6 +50,7 @@ function setupPanelEventListeners() {
 
   bindPanelCallback(closeBtn, 'onClose', '[NFE] Close button clicked');
   bindPanelCallback(exportBtn, 'onExport', '[NFE] Export button clicked');
+  bindPanelCallback(document.getElementById('nfe-diagnostics'), 'onDiagnostics');
   bindPanelCallback(submitBtn, 'onSubmit', '[NFE] Submit button clicked');
   bindPanelCallback(clearBtn, 'onClear', '[NFE] Clear button clicked');
   bindPanelCallback(imdbSetBtn, 'onImdbSet', '[NFE] IMDB set button clicked');
@@ -189,6 +190,7 @@ export function createPanel() {
       onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">
       Download JSON(s)
     </button>
+    ${currentProvider === 'skyshowtime' ? `<button id="nfe-diagnostics" style="width:100%;padding:8px;margin-bottom:6px;border:1px solid ${colors.border};border-radius:8px;background:${colors.panelBg};color:#fff;cursor:pointer">Download movie diagnostics</button><div style="font-size:11px;color:${colors.textMuted};margin-bottom:8px">Very short movie credits are held for review. Missing scene markers do not confirm that there is no extra scene.</div>` : ''}
 
      <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
        <div style="flex:1;height:1px;background:#222"></div>

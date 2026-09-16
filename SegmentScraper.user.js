@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
-// @version      1.9.3
+// @version      1.9.4
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -36,7 +36,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const SEGMENTSCRAPER_VERSION = "1.9.3";
+  const SEGMENTSCRAPER_VERSION = "1.9.4";
   const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
@@ -1614,6 +1614,8 @@ function splitCreditRange({
   const sceneStart = afterCreditsStartSec == null ? null : Number(afterCreditsStartSec);
   const sceneEnd = afterCreditsEndSec == null ? null : Number(afterCreditsEndSec);
   const hasScene = afterCreditsDetected || sceneStart !== null || sceneEnd !== null;
+  // A partial scene must not leave an apparently safe standalone outro.
+  if (hasScene && !Number.isFinite(sceneEnd)) return [];
   if (hasScene && (!Number.isFinite(sceneStart) || sceneStart <= start || sceneStart >= end)) return [];
   if (Number.isFinite(sceneEnd) && (sceneEnd <= sceneStart || sceneEnd > end)) return [];
   const parts = [{ startSec: start, endSec: end, creditPart: null }];
@@ -1827,6 +1829,7 @@ function setupPanelEventListeners() {
 
   bindPanelCallback(closeBtn, 'onClose', '[NFE] Close button clicked');
   bindPanelCallback(exportBtn, 'onExport', '[NFE] Export button clicked');
+  bindPanelCallback(document.getElementById('nfe-diagnostics'), 'onDiagnostics');
   bindPanelCallback(submitBtn, 'onSubmit', '[NFE] Submit button clicked');
   bindPanelCallback(clearBtn, 'onClear', '[NFE] Clear button clicked');
   bindPanelCallback(imdbSetBtn, 'onImdbSet', '[NFE] IMDB set button clicked');
@@ -1966,6 +1969,7 @@ function createPanel() {
       onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">
       Download JSON(s)
     </button>
+    ${currentProvider === 'skyshowtime' ? `<button id="nfe-diagnostics" style="width:100%;padding:8px;margin-bottom:6px;border:1px solid ${colors.border};border-radius:8px;background:${colors.panelBg};color:#fff;cursor:pointer">Download movie diagnostics</button><div style="font-size:11px;color:${colors.textMuted};margin-bottom:8px">Very short movie credits are held for review. Missing scene markers do not confirm that there is no extra scene.</div>` : ''}
 
      <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
        <div style="flex:1;height:1px;background:#222"></div>
@@ -2407,18 +2411,28 @@ function hasExistingSegment(existing, item) {
   return existing.has?.(item.segment_type) ?? false;
 }
 
-// Existing scene timestamps are a warning signal, never copied into a submission.
-function filterConflictingMovieOutros(items, existingByKey) {
-  return items.filter(item => {
-    if (!isMovieItem(item) || item.segment_type !== 'outro') return true;
+// Temporary policy: exclude the entire movie when an extra scene is known.
+// Missing provider/IntroDB markers are unknown, not evidence of scene absence.
+function filterMoviesWithKnownExtraScenes(items, existingByKey) {
+  const excluded = new Set();
+  for (const item of [...state.allItems, ...items]) {
+    if (isMovieItem(item) && item.segment_type === 'post-credits') excluded.add(getItemCacheKey(item));
+  }
+  for (const item of items) {
+    if (!isMovieItem(item)) continue;
     const key = getItemCacheKey(item);
-    const starts = [
-      ...items.filter(scene => isMovieItem(scene) && getItemCacheKey(scene) === key
-        && scene.segment_type === 'post-credits').map(scene => Number(scene.start_sec)),
-      ...(existingByKey.get(key)?.rangesByType?.get('post-credits') || []).map(scene => Number(scene.startSec)),
-    ].filter(Number.isFinite);
-    if (!starts.some(start => Number(item.start_sec) >= start)) return true;
-    toast(`Movie ${item.imdb_id}: outro starts after a known extra scene; skipped for playback review.`);
+    const existing = existingByKey.get(key);
+    if (existing?.has?.('post-credits') || existing?.rangesByType?.get('post-credits')?.length) excluded.add(key);
+  }
+  const notified = new Set();
+  return items.filter(item => {
+    if (!isMovieItem(item)) return true;
+    const key = getItemCacheKey(item);
+    if (!excluded.has(key)) return true;
+    if (!notified.has(key)) {
+      toast(`Movie ${item.imdb_id}: extra scene detected; entire movie temporarily excluded.`);
+      notified.add(key);
+    }
     return false;
   });
 }
@@ -2709,7 +2723,7 @@ async function exportJSON() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  items = filterConflictingMovieOutros(items, canonicalExisting);
+  items = filterMoviesWithKnownExtraScenes(items, canonicalExisting);
   if (!items.length) {
     toast('No safe movie timestamps to export; verify the first credits in playback.');
     return;
@@ -2845,7 +2859,7 @@ async function submitToIntroDB() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  const safeMapped = filterConflictingMovieOutros(allMapped, canonicalExisting);
+  const safeMapped = filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
   if (!safeMapped.length) {
     setIntrodbStatus('Nothing submitted: movie credits need playback review');
     stopSubmission();
@@ -2922,6 +2936,17 @@ function clearData() {
 
 function configurePanelCallbacks() {
   window.nfePanelCallbacks = {
+    onDiagnostics: () => {
+      const movies = state.skyShowtimeMovieDiagnostics || [];
+      if (!movies.length) { toast('Open a SkyShowtime movie first to capture its markers.'); return; }
+      const blob = new Blob([JSON.stringify({ provider: 'skyshowtime', movies }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = Object.assign(document.createElement('a'), { href: url, download: 'skyshowtime-movie-diagnostics.json' });
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
     onClose: closePanel,
     onExport: exportJSON,
     onSubmit: submitToIntroDB,
@@ -5345,6 +5370,47 @@ function getSkyShowtimeMovieCreditRange(movie, format) {
   return { startMs, endMs, durationMs, afterCreditsStartMs, afterCreditsEndMs, afterCreditsDetected };
 }
 
+// Preserve numeric timing metadata only, never playback URLs or credentials.
+function skyShowtimeTimingFields(value, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 4) return {};
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === 'boolean') result[key] = entry;
+    else if (coerceSkyShowtimeNumber(entry) != null) result[key] = coerceSkyShowtimeNumber(entry);
+    else if (entry && typeof entry === 'object') {
+      const nested = skyShowtimeTimingFields(entry, depth + 1);
+      if (Object.keys(nested).length) result[key] = nested;
+    }
+  }
+  return result;
+}
+
+function recordSkyShowtimeMovieDiagnostic(movie, format, creditRange, reasons) {
+  const timingKeys = /^(?:duration|runtime|startOfCredits|endOfCredits|credits|afterCredits|postCredits|SO|EO)/i;
+  const selectTiming = source => Object.fromEntries(Object.entries(source || {})
+    .filter(([key]) => timingKeys.test(key)));
+  const entry = {
+    movieId: getSkyShowtimeMovieId(movie),
+    title: movie.titleLong || movie.titleMedium || movie.movieName || movie.title || movie.name || '',
+    runtime: skyShowtimeTimingFields(selectTiming(movie)),
+    formats: Object.fromEntries(Object.entries(movie.formats || {}).map(([name, candidate]) => [name, {
+      selected: candidate === format,
+      fields: skyShowtimeTimingFields(selectTiming(candidate)),
+      markers: skyShowtimeTimingFields(candidate?.markers),
+    }])),
+    selectedRangeMs: creditRange,
+    sceneStatus: creditRange?.afterCreditsDetected ? 'provider-marker-present' : 'unknown',
+    reviewReasons: reasons,
+  };
+  state.skyShowtimeMovieDiagnostics ||= [];
+  const signature = JSON.stringify(entry);
+  if (!state.skyShowtimeMovieDiagnostics.some(previous => JSON.stringify(previous) === signature)) {
+    state.skyShowtimeMovieDiagnostics.push(entry);
+    if (state.skyShowtimeMovieDiagnostics.length > 100) state.skyShowtimeMovieDiagnostics.shift();
+    console.info('[SSE] Movie marker diagnostic', entry);
+  }
+}
+
 function isSkyShowtimeSpecialEpisode(episode) {
   if (Number(episode.seasonNumber) === 0 || episode.isSpecial === true) return true;
   const type = String(episode.type || episode.episodeType || '').trim().toLowerCase();
@@ -5370,7 +5436,13 @@ function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, star
     item.segment_type === providerSegmentType &&
     (item.credit_part || null) === (creditPart || null)
   );
-  if (state.allItems.some(isDuplicate) || extractedItems.some(isDuplicate)) return;
+  if (extractedItems.some(isDuplicate)) return;
+  const previous = state.allItems.find(isDuplicate);
+  if (previous) {
+    if (!isMovie || (previous.start_sec === roundSkyShowtimeSeconds(startMs / 1000)
+      && previous.end_sec === roundSkyShowtimeSeconds(endMs / 1000))) return;
+    state.allItems = state.allItems.filter(item => !isDuplicate(item));
+  }
   extractedItems.push({
     _eid: episodeId,
     _episodeTitle: common.episodeTitle,
@@ -5494,6 +5566,21 @@ function processSkyShowtimeMetadata(data, sourceUrl = '') {
     const movieTitle = movie.titleLong || movie.titleMedium || movie.movieName || movie.title || movie.name || '';
     const format = getSkyShowtimeFormat(movie);
     const creditRange = getSkyShowtimeMovieCreditRange(movie, format);
+    const reasons = [];
+    if (!creditRange) reasons.push('No complete credits range in the selected format.');
+    const durationMs = creditRange?.durationMs ?? creditRange?.endMs;
+    // This is a review heuristic, not a new definition of the credits start.
+    if (creditRange && durationMs - creditRange.startMs <= 10000) {
+      reasons.push('Credits marker is within the final 10 seconds; verify the first credits in playback.');
+    }
+    recordSkyShowtimeMovieDiagnostic(movie, format, creditRange, reasons);
+    if (reasons.length) {
+      const countBefore = state.allItems.length;
+      state.allItems = state.allItems.filter(item => !(item.media_type === 'movie' && item._showId === String(movieId)));
+      if (state.allItems.length !== countBefore) updateCounters();
+      console.warn('[SSE] Movie timestamps withheld for review:', movieTitle, reasons);
+      continue;
+    }
     if (!movieId || !movieTitle || !creditRange) continue;
 
     const common = {
