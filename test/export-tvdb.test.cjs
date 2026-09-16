@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadBootstrap({ mappingResult, stateOverrides = {}, existingSegmentsByKey = new Map() }) {
+function loadBootstrap({ mappingResult, stateOverrides = {}, existingSegmentsByKey = new Map(), tmdbResult = { status: 'unknown' } }) {
   const calls = { map: [], dedup: [], toasts: [], previews: [], submissions: [], confirmations: [], infoLogs: [], warnLogs: [] };
   const state = {
     allItems: [
@@ -56,6 +56,7 @@ function loadBootstrap({ mappingResult, stateOverrides = {}, existingSegmentsByK
     searchImdbByTitle: async () => ({ success: false }),
     lookupImdbTitle: async () => ({ success: false }),
     loadExistingSegments: async () => [],
+    checkTmdbExtraScenes: async () => tmdbResult,
     loadExistingSegmentsForEpisode: async (key, apiKey, options) => {
       calls.dedup.push({ key, apiKey, options });
       return existingSegmentsByKey.get(key) || new Set();
@@ -388,3 +389,16 @@ test('a scene removed by duration validation still excludes its movie', async ()
   assert.equal(bootstrap.calls.previews.length, 0);
   assert.equal(bootstrap.calls.submissions.length, 0);
 });
+
+for (const status of ['present', 'unavailable']) {
+  test(`TMDB ${status} blocks movie export and upload`, async () => {
+    const bootstrap = loadBootstrap({ tmdbResult: { status }, stateOverrides: { tvdbApiKey: '', allItems: [
+      { media_type: 'movie', imdb_id: 'tt1234567', segment_type: 'outro', start_sec: 5400, end_sec: 6000 },
+    ] } });
+    await bootstrap.exportJSON();
+    await bootstrap.submitToIntroDB();
+    assert.equal(bootstrap.calls.previews.length, 0);
+    assert.equal(bootstrap.calls.submissions.length, 0);
+    assert.equal(bootstrap.calls.confirmations.length, 0);
+  });
+}

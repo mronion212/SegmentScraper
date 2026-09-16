@@ -42,6 +42,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @grant        unsafeWindow
 // @connect      v3.sg.media-imdb.com
 // @connect      api.introdb.app
+// @connect      api.themoviedb.org
 // @connect      api4.thetvdb.com
 // @connect      atom.skyshowtime.com
 // @connect      static.crunchyroll.com
@@ -98,6 +99,7 @@ function bundle() {
     'core/update-check.js',
     'core/network.js',
     'core/introdb-settings.js',
+    'core/tmdb.js',
     'core/tvdb.js',
     'config/provider-config.js',
     'normalization/segment-mapper.js',

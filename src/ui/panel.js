@@ -61,6 +61,8 @@ function setupPanelEventListeners() {
   bindButtonClickOnEnter(apikeyInput, () => document.getElementById('nfe-apikey-set'));
 
   bindPanelCallback(tvdbSetBtn, 'onTvdbSet');
+  bindPanelCallback(document.getElementById('nfe-tmdb-set'), 'onTmdbSet');
+  bindButtonClickOnEnter(document.getElementById('nfe-tmdb-input'), () => document.getElementById('nfe-tmdb-set'));
   tvdbInputs.filter(Boolean).forEach(input => bindButtonClickOnEnter(input, () => tvdbSetBtn));
 }
 
@@ -237,6 +239,16 @@ export function createPanel() {
 
      <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
 
+     <div style="margin-bottom:10px;font-size:11px;color:${colors.textSecondary}">
+       <label for="nfe-tmdb-input">TMDB API Read Access Token (movie scene check)</label>
+       <div style="display:flex;gap:4px;margin:5px 0">
+         <input id="nfe-tmdb-input" type="password" autocomplete="off" placeholder="Paste token; blank clears it"
+           style="min-width:0;flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;padding:6px 8px"/>
+         <button id="nfe-tmdb-set" style="background:${providerColors.primary};border:0;border-radius:6px;color:#fff;padding:6px 10px;cursor:pointer">Save</button>
+       </div>
+       <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer" style="color:${colors.textSecondary}">Get a TMDB token</a> · Saved locally. Movie export/upload requires a successful check. Missing keywords do not prove scene absence.
+       <div>This product uses the TMDB API but is not endorsed or certified by TMDB.</div>
+     </div>
      <button id="nfe-submit"
        style="width:100%;background:${providerColors.secondary};border:none;border-radius:8px;color:#fff;
               padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;

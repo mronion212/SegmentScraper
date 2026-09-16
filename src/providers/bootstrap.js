@@ -10,6 +10,7 @@ import { injectBtn, getNextEpBtn } from '../ui/button.js';
 import { setProviderName, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput, showExportPreview, showRequiredUpdate } from '../ui/panel.js';
 import { getProviderConfig } from '../config/provider-config.js';
 import { loadIntrodbSettings, saveIntrodbSettings } from '../core/introdb-settings.js';
+import { checkTmdbExtraScenes, saveTmdbToken } from '../core/tmdb.js';
 import { loadTvdbSettings, saveTvdbSettings, mapSeriesItemsToTvdb } from '../core/tvdb.js';
 
 const BUTTON_IDLE_DELAY_MS = 3000;
@@ -57,7 +58,7 @@ function hasExistingSegment(existing, item) {
 
 // Temporary policy: exclude the entire movie when an extra scene is known.
 // Missing provider/IntroDB markers are unknown, not evidence of scene absence.
-function filterMoviesWithKnownExtraScenes(items, existingByKey) {
+async function filterMoviesWithKnownExtraScenes(items, existingByKey) {
   const excluded = new Set();
   for (const item of [...state.allItems, ...items]) {
     if (isMovieItem(item) && item.segment_type === 'post-credits') excluded.add(getItemCacheKey(item));
@@ -68,13 +69,21 @@ function filterMoviesWithKnownExtraScenes(items, existingByKey) {
     const existing = existingByKey.get(key);
     if (existing?.has?.('post-credits') || existing?.rangesByType?.get('post-credits')?.length) excluded.add(key);
   }
+  const movieIds = [...new Set(items.filter(isMovieItem).filter(item => !excluded.has(getItemCacheKey(item))).map(item => item.imdb_id))];
+  const tmdbResults = new Map();
+  if (movieIds.length) toast(`Checking TMDB for extra scenes (${movieIds.length} movie(s))...`);
+  for (const id of movieIds) tmdbResults.set(id, await checkTmdbExtraScenes(id));
   const notified = new Set();
   return items.filter(item => {
     if (!isMovieItem(item)) return true;
     const key = getItemCacheKey(item);
-    if (!excluded.has(key)) return true;
+    const tmdb = tmdbResults.get(item.imdb_id);
+    const knownScene = excluded.has(key) || tmdb?.status === 'present';
+    if (!knownScene && tmdb?.status === 'unknown') return true;
     if (!notified.has(key)) {
-      toast(`Movie ${item.imdb_id}: extra scene detected; entire movie temporarily excluded.`);
+      toast(knownScene
+        ? `Movie ${item.imdb_id}: extra scene detected${tmdb?.status === 'present' ? ' by TMDB' : ''}; entire movie temporarily excluded.`
+        : `Movie ${item.imdb_id}: ${tmdb?.reason || 'TMDB check unavailable'}; export and upload withheld.`);
       notified.add(key);
     }
     return false;
@@ -367,9 +376,9 @@ export async function exportJSON() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  items = filterMoviesWithKnownExtraScenes(items, canonicalExisting);
+  items = await filterMoviesWithKnownExtraScenes(items, canonicalExisting);
   if (!items.length) {
-    toast('No safe movie timestamps to export; verify the first credits in playback.');
+    toast('No movies eligible for export; see the scene exclusion or TMDB check message.');
     return;
   }
   const beforeCount = items.length;
@@ -503,9 +512,9 @@ export async function submitToIntroDB() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  const safeMapped = filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
+  const safeMapped = await filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
   if (!safeMapped.length) {
-    setIntrodbStatus('Nothing submitted: movie credits need playback review');
+    setIntrodbStatus('Nothing submitted: extra scene detected or TMDB check unavailable');
     stopSubmission();
     return;
   }
@@ -634,6 +643,12 @@ function configurePanelCallbacks() {
         console.error('[NFE] Manual IMDb search error:', error);
         setDbStatus('IMDb lookup error');
       });
+    },
+    onTmdbSet: () => {
+      const input = document.getElementById('nfe-tmdb-input');
+      const saved = saveTmdbToken(input.value);
+      input.value = '';
+      toast(saved ? 'TMDB token updated locally; movie checks run on export and upload.' : 'Could not save TMDB token.');
     },
     onApikeySet: () => {
       const value = document.getElementById('nfe-apikey-input').value.trim();

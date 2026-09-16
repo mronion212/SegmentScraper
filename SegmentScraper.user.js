@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
-// @version      1.9.4
+// @version      1.9.5
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -26,6 +26,7 @@
 // @grant        unsafeWindow
 // @connect      v3.sg.media-imdb.com
 // @connect      api.introdb.app
+// @connect      api.themoviedb.org
 // @connect      api4.thetvdb.com
 // @connect      atom.skyshowtime.com
 // @connect      static.crunchyroll.com
@@ -36,7 +37,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const SEGMENTSCRAPER_VERSION = "1.9.4";
+  const SEGMENTSCRAPER_VERSION = "1.9.5";
   const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
@@ -610,6 +611,62 @@ function saveIntrodbSettings(apiKey) {
   state.introdbApiKey = nextApiKey;
   setStoredIntrodbValue(INTRODB_API_KEY_STORAGE, nextApiKey);
   return { configured: Boolean(nextApiKey) };
+}
+
+/** TMDB presence checks. Credentials stay in userscript storage, outside public state. */
+const TMDB_TOKEN_STORAGE = 'segmentScraper.tmdb.token';
+const tmdbSceneCache = new Map();
+
+function saveTmdbToken(value) {
+  if (typeof GM_setValue !== 'function') return false;
+  try {
+    GM_setValue(TMDB_TOKEN_STORAGE, String(value || '').trim().replace(/^Bearer\s+/i, ''));
+    tmdbSceneCache.clear();
+    return true;
+  } catch (_) { return false; }
+}
+
+function tmdbRequest(path, token) {
+  return new Promise(resolve => {
+    const xhr = (typeof GM_xmlhttpRequest === 'function' && GM_xmlhttpRequest)
+      || (typeof GM !== 'undefined' && GM.xmlHttpRequest);
+    if (!xhr) { resolve(null); return; }
+    try {
+      xhr({ method: 'GET', url: `https://api.themoviedb.org/3${path}`,
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, timeout: 10000,
+        onload: response => {
+          try { resolve(response.status === 200 ? JSON.parse(response.responseText) : null); }
+          catch (_) { resolve(null); }
+        }, onerror: () => resolve(null), ontimeout: () => resolve(null), onabort: () => resolve(null),
+      });
+    } catch (_) { resolve(null); }
+  });
+}
+
+async function checkTmdbExtraScenes(imdbId) {
+  if (!/^tt\d+$/.test(String(imdbId))) return { status: 'unavailable', reason: 'Invalid IMDb ID' };
+  let token = '';
+  try { token = typeof GM_getValue === 'function' ? String(GM_getValue(TMDB_TOKEN_STORAGE, '') || '').trim() : ''; }
+  catch (_) {}
+  if (!token) return { status: 'unavailable', reason: 'Save your TMDB API Read Access Token first' };
+  const cached = tmdbSceneCache.get(imdbId);
+  if (cached && cached.expires > Date.now()) return cached.result;
+  const found = await tmdbRequest(`/find/${encodeURIComponent(imdbId)}?external_source=imdb_id`, token);
+  if (!Array.isArray(found?.movie_results) || found.movie_results.length !== 1
+    || !Number.isInteger(found.movie_results[0]?.id) || found.movie_results[0].id <= 0) {
+    return { status: 'unavailable', reason: 'TMDB movie lookup failed or was ambiguous' };
+  }
+  const tmdbId = found.movie_results[0].id;
+  const data = await tmdbRequest(`/movie/${tmdbId}/keywords`, token);
+  if (!Array.isArray(data?.keywords) || data.keywords.some(keyword => typeof keyword?.name !== 'string')) {
+    return { status: 'unavailable', reason: 'TMDB keyword check failed; verify token or retry' };
+  }
+  const keywords = data.keywords.map(keyword => String(keyword?.name || '').trim().toLowerCase())
+    .filter(name => ['aftercreditsstinger', 'duringcreditsstinger'].includes(name));
+  const result = { status: keywords.length ? 'present' : 'unknown', tmdbId, keywords };
+  if (tmdbSceneCache.size >= 200) tmdbSceneCache.delete(tmdbSceneCache.keys().next().value);
+  tmdbSceneCache.set(imdbId, { result, expires: Date.now() + 15 * 60 * 1000 });
+  return result;
 }
 
 /** TVDB v4 authentication, local settings, and conservative episode mapping. */
@@ -1840,6 +1897,8 @@ function setupPanelEventListeners() {
   bindButtonClickOnEnter(apikeyInput, () => document.getElementById('nfe-apikey-set'));
 
   bindPanelCallback(tvdbSetBtn, 'onTvdbSet');
+  bindPanelCallback(document.getElementById('nfe-tmdb-set'), 'onTmdbSet');
+  bindButtonClickOnEnter(document.getElementById('nfe-tmdb-input'), () => document.getElementById('nfe-tmdb-set'));
   tvdbInputs.filter(Boolean).forEach(input => bindButtonClickOnEnter(input, () => tvdbSetBtn));
 }
 
@@ -2016,6 +2075,16 @@ function createPanel() {
 
      <div id="nfe-introdb-status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
 
+     <div style="margin-bottom:10px;font-size:11px;color:${colors.textSecondary}">
+       <label for="nfe-tmdb-input">TMDB API Read Access Token (movie scene check)</label>
+       <div style="display:flex;gap:4px;margin:5px 0">
+         <input id="nfe-tmdb-input" type="password" autocomplete="off" placeholder="Paste token; blank clears it"
+           style="min-width:0;flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;padding:6px 8px"/>
+         <button id="nfe-tmdb-set" style="background:${providerColors.primary};border:0;border-radius:6px;color:#fff;padding:6px 10px;cursor:pointer">Save</button>
+       </div>
+       <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer" style="color:${colors.textSecondary}">Get a TMDB token</a> · Saved locally. Movie export/upload requires a successful check. Missing keywords do not prove scene absence.
+       <div>This product uses the TMDB API but is not endorsed or certified by TMDB.</div>
+     </div>
      <button id="nfe-submit"
        style="width:100%;background:${providerColors.secondary};border:none;border-radius:8px;color:#fff;
               padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
@@ -2413,7 +2482,7 @@ function hasExistingSegment(existing, item) {
 
 // Temporary policy: exclude the entire movie when an extra scene is known.
 // Missing provider/IntroDB markers are unknown, not evidence of scene absence.
-function filterMoviesWithKnownExtraScenes(items, existingByKey) {
+async function filterMoviesWithKnownExtraScenes(items, existingByKey) {
   const excluded = new Set();
   for (const item of [...state.allItems, ...items]) {
     if (isMovieItem(item) && item.segment_type === 'post-credits') excluded.add(getItemCacheKey(item));
@@ -2424,13 +2493,21 @@ function filterMoviesWithKnownExtraScenes(items, existingByKey) {
     const existing = existingByKey.get(key);
     if (existing?.has?.('post-credits') || existing?.rangesByType?.get('post-credits')?.length) excluded.add(key);
   }
+  const movieIds = [...new Set(items.filter(isMovieItem).filter(item => !excluded.has(getItemCacheKey(item))).map(item => item.imdb_id))];
+  const tmdbResults = new Map();
+  if (movieIds.length) toast(`Checking TMDB for extra scenes (${movieIds.length} movie(s))...`);
+  for (const id of movieIds) tmdbResults.set(id, await checkTmdbExtraScenes(id));
   const notified = new Set();
   return items.filter(item => {
     if (!isMovieItem(item)) return true;
     const key = getItemCacheKey(item);
-    if (!excluded.has(key)) return true;
+    const tmdb = tmdbResults.get(item.imdb_id);
+    const knownScene = excluded.has(key) || tmdb?.status === 'present';
+    if (!knownScene && tmdb?.status === 'unknown') return true;
     if (!notified.has(key)) {
-      toast(`Movie ${item.imdb_id}: extra scene detected; entire movie temporarily excluded.`);
+      toast(knownScene
+        ? `Movie ${item.imdb_id}: extra scene detected${tmdb?.status === 'present' ? ' by TMDB' : ''}; entire movie temporarily excluded.`
+        : `Movie ${item.imdb_id}: ${tmdb?.reason || 'TMDB check unavailable'}; export and upload withheld.`);
       notified.add(key);
     }
     return false;
@@ -2723,9 +2800,9 @@ async function exportJSON() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  items = filterMoviesWithKnownExtraScenes(items, canonicalExisting);
+  items = await filterMoviesWithKnownExtraScenes(items, canonicalExisting);
   if (!items.length) {
-    toast('No safe movie timestamps to export; verify the first credits in playback.');
+    toast('No movies eligible for export; see the scene exclusion or TMDB check message.');
     return;
   }
   const beforeCount = items.length;
@@ -2859,9 +2936,9 @@ async function submitToIntroDB() {
     await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
   ])));
 
-  const safeMapped = filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
+  const safeMapped = await filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
   if (!safeMapped.length) {
-    setIntrodbStatus('Nothing submitted: movie credits need playback review');
+    setIntrodbStatus('Nothing submitted: extra scene detected or TMDB check unavailable');
     stopSubmission();
     return;
   }
@@ -2990,6 +3067,12 @@ function configurePanelCallbacks() {
         console.error('[NFE] Manual IMDb search error:', error);
         setDbStatus('IMDb lookup error');
       });
+    },
+    onTmdbSet: () => {
+      const input = document.getElementById('nfe-tmdb-input');
+      const saved = saveTmdbToken(input.value);
+      input.value = '';
+      toast(saved ? 'TMDB token updated locally; movie checks run on export and upload.' : 'Could not save TMDB token.');
     },
     onApikeySet: () => {
       const value = document.getElementById('nfe-apikey-input').value.trim();
