@@ -54,5 +54,7 @@ test('analysis API uses the inspected source, reports progress and invalidates o
  let resolveAnalysis,invoked,invalidated;const server=createApp({probe:async()=>({duration:100,chapters:[]}),uploads:{active:()=>false,list:()=>[],adminConfigured:()=>false,invalidate:id=>{invalidated=id;}},analyzer:async(source,report,options)=>{invoked=source;options.onProgress({phase:'scanning',percent:20});return new Promise(r=>{resolveAnalysis=r;});}});server.listen(0,'127.0.0.1');await once(server,'listening');t.after(()=>new Promise(r=>{server.close(r);server.closeAllConnections();}));const base=`http://127.0.0.1:${server.address().port}`;const {token}=await(await fetch(base+'/api/session')).json();const api=async(route,body)=>await(await fetch(base+'/api/'+route,{method:body?'POST':'GET',headers:{'X-App-Token':token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined})).json();await api('local',{paths:[file],mode:'movie'});
  let job;for(let n=0;n<100;n++){job=(await api('status')).jobs[0];if(job.status==='done')break;await new Promise(r=>setTimeout(r,5));}
  await api('analyze-credits',{jobId:job.id,scanFraction:.25,input:'C:\\not-authorized.mkv'});assert.equal(invoked.input,file);assert.equal(invalidated,job.id);assert.equal((await api('status')).jobs[0].analysisProgress.percent,20);
- resolveAnalysis({analysis:{status:'needs-review',scenes:[],suggestions:[]},artifacts:[]});await new Promise(r=>setTimeout(r,5));assert.equal((await api('status')).jobs[0].status,'done');
+ resolveAnalysis({analysis:{status:'needs-review',scenes:[],suggestions:[]},artifacts:[]});
+ for(let n=0;n<200;n++){job=(await api('status')).jobs[0];if(job.status==='done')break;await new Promise(r=>setTimeout(r,5));}
+ assert.equal(job.status,'done');
 });
