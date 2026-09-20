@@ -39,16 +39,17 @@ function mountReview(job){
  if(playerJobId!==job.id){playerJobId=job.id;reviewRequest++;viewer.pause();viewer.removeAttribute('src');viewer.load();activeClip=null;clipSnapshot='';undoEdits=[];$('undo-boundary').disabled=true;updatePosition(0);$('player-message').textContent='Analyze this movie to create review clips.';}
  $('source-seek').max=job.report.duration;
  if(activeClip&&!(job.previews||[]).some(c=>c.id===activeClip.id)){activeClip=null;viewer.pause();viewer.removeAttribute('src');viewer.load();viewer.hidden=true;$('download-preview').hidden=true;}
- const signature=JSON.stringify(job.previews||[]);if(signature!==clipSnapshot){clipSnapshot=signature;$('clip-tabs').replaceChildren();for(const clip of job.previews||[])$('clip-tabs').append(button(clip.speed===12?'Overview · 12×':time(clip.boundary),()=>loadClip(clip,clip.boundary)));if(!activeClip&&job.previews?.length)loadClip(job.previews[0]);}
+ const signature=JSON.stringify([job.previews||[],job.report.analysis]);if(signature!==clipSnapshot){clipSnapshot=signature;$('clip-tabs').replaceChildren();for(const clip of job.previews||[])$('clip-tabs').append(button(clip.speed===12?'Overview · 12×':time(clip.boundary),()=>loadClip(clip,clip.boundary)));const analysis=job.report.analysis;if(analysis){const boundaries=[analysis.creditsStart,analysis.creditsEnd,...analysis.scenes.flatMap(s=>[s.start_sec,s.end_sec])].filter(Number.isFinite);for(const boundary of [...new Set(boundaries)])if(!(job.previews||[]).some(c=>c.boundary===boundary))$('clip-tabs').append(button(`Inspect ${time(boundary)}`,()=>inspectPosition(boundary)));}if(!activeClip&&job.previews?.length)loadClip(job.previews[0]);}
  $('inspect-position').disabled=!job.report.analysis||job.status!=='done';$('mark-start').disabled=$('mark-end').disabled=activeClip?.speed!==1;
  renderReviewTimeline();
 }
-bind('inspect-position',async()=>{
- const jobId=loadedJobId,position=sourcePosition(),request=++reviewRequest;
+async function inspectPosition(position){
+ const jobId=loadedJobId,request=++reviewRequest;
  $('player-message').textContent='Preparing a short review clip…';
  let clip;try{({clip}=await api('review-clip',{jobId,time:position}));}catch(error){$('player-message').textContent=error.message;throw error;}
  if(jobId!==loadedJobId||request!==reviewRequest)return;loadClip(clip,position);await poll();
-});
+}
+bind('inspect-position',()=>inspectPosition(sourcePosition()));
 function renderReviewTimeline(){
  if(!$('selected-segment'))return;
  const selected=$('selected-segment').value,rows=[...$('segment-editor').children],duration=jobs.find(j=>j.id===loadedJobId)?.report?.duration||1;

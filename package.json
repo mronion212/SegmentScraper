@@ -1,6 +1,6 @@
 {
   "name": "segmentscraper",
-  "version": "1.12.0",
+  "version": "1.12.1",
   "description": "Extracts and organizes intro, recap, and outro segments from streaming services.",
   "main": "app/desktop/main.cjs",
   "scripts": {

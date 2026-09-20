@@ -5,7 +5,7 @@ import {existsSync} from 'node:fs';
 import {mkdtemp,rm,stat} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {analyzeCredits,disposeAnalysis,frameFeatures,proposeTimeline} from '../app/analysis.mjs';
+import {analyzeCredits,disposeAnalysis,createReviewClip,analysisStart,frameFeatures,proposeTimeline} from '../app/analysis.mjs';
 import {createApp} from '../app/server.mjs';
 import {once} from 'node:events';
 
@@ -34,7 +34,8 @@ test('real FFmpeg ending scan detects synthetic credits/scenes and creates playa
  filters.push("drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='gte(t,72)'");
  execFileSync(ffmpeg,['-v','error','-f','lavfi','-i','color=c=gray:s=320x180:r=10:d=80','-vf',filters.join(','),'-c:v','libx264','-preset','ultrafast',file],{windowsHide:true});
  const progress=[];const result=await analyzeCredits({input:file,remote:false},{duration:80,chapters:[]},{scanFraction:1,executable:ffmpeg,onProgress:p=>progress.push(p)});t.after(()=>disposeAnalysis(result));
- assert.equal(result.analysis.scenes.length,2);assert.ok(Math.abs(result.analysis.creditsStart-12)<1);assert.ok(result.analysis.blackRanges.some(r=>Math.abs(r.start_sec-72)<1));assert.ok(result.artifacts.length>=5);assert.equal(progress.at(-1).percent,100);
+ assert.equal(result.analysis.scenes.length,2);assert.ok(Math.abs(result.analysis.creditsStart-12)<1);assert.ok(result.analysis.blackRanges.some(r=>Math.abs(r.start_sec-72)<1));assert.equal(result.artifacts.length,1);const clip=await createReviewClip({input:file,remote:false},80,32,result.directory,{executable:ffmpeg});result.artifacts.push(clip);assert.equal(clip.sourceStart,26);assert.equal(clip.sourceEnd,38);assert.equal(progress.at(-1).percent,100);
+ const overviewDuration=Number(execFileSync(path.resolve('vendor/ffmpeg/ffprobe.exe'),['-v','error','-show_entries','format=duration','-of','csv=p=0',result.artifacts[0].file],{encoding:'utf8'}));assert.ok(Math.abs(overviewDuration-80/12)<.3,'overview must retain 12x source timing');
  for(const a of result.artifacts){
   assert.ok((await stat(a.file)).size>1000);
   execFileSync(ffmpeg,['-v','error','-xerror','-i',a.file,'-f','null','-'],{windowsHide:true});
@@ -58,3 +59,5 @@ test('analysis API uses the inspected source, reports progress and invalidates o
  for(let n=0;n<200;n++){job=(await api('status')).jobs[0];if(job.status==='done')break;await new Promise(r=>setTimeout(r,5));}
  assert.equal(job.status,'done');
 });
+
+test('bounded scan windows preserve explicit coverage and reject invalid input',()=>{assert.equal(analysisStart(6448.61,'last-15-minutes'),5548.61);assert.equal(analysisStart(80,'last-15-minutes'),0);assert.equal(analysisStart(80,.25),60);assert.throws(()=>analysisStart(80,'bad'));});

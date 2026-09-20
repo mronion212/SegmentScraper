@@ -10,7 +10,7 @@ import { pipeline } from 'node:stream/promises';
 import { collectVideos, inspectFile, inspectRemote, probeAvailable } from './media.mjs';
 import { Debrid } from './providers.mjs';
 import { createUploadService } from './upload.mjs';
-import { analyzeCredits, disposeAnalysis, createReviewClip, ANALYSIS_VERSION } from './analysis.mjs';
+import { analyzeCredits, disposeAnalysis, createReviewClip, analysisStart, ANALYSIS_VERSION } from './analysis.mjs';
 import { openWorkspace, fingerprint, savedJob, cleanDraft } from './workspace.mjs';
 
 const publicDir = fileURLToPath(new URL('./public/', import.meta.url));
@@ -159,10 +159,10 @@ export function createApp({ downloadDir = path.resolve('app-data/downloads'), pr
         const job=jobs.find(j=>j.id===body.jobId&&j.report&&['done','cancelled'].includes(j.status));
         if(!job)throw new Error('Choose a completed inspection first.');
         if(jobs.some(j=>j.status==='analyzing'||j.clipBusy))throw new Error('An ending analysis or preview is already running.');
-        if(![.25,.5,1].includes(body.scanFraction??.25))throw new Error('Invalid analysis window.');
+        const scanStart=analysisStart(job.report.duration,body.scanFraction??.25);
         await verifySource(job);
         const prior=job.report.analysis;
-        if(!job.remote&&!body.force&&prior?.version===ANALYSIS_VERSION&&prior.scanStart===Math.round(job.report.duration*(1-(body.scanFraction??.25))*1000)/1000&&job.analysisResult?.artifacts?.length){
+        if(!job.remote&&!body.force&&prior?.version===ANALYSIS_VERSION&&prior.scanStart===scanStart&&job.analysisResult?.artifacts?.length){
           const present=await Promise.all(job.analysisResult.artifacts.map(a=>stat(a.file).then(s=>s.size>0,()=>false)));
           if(present.every(Boolean))return send(res,200,{ok:true,cached:true});
         }

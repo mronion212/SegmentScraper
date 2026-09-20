@@ -15,7 +15,8 @@ uploadPanel.innerHTML=`<div class="eyebrow">04 / REVIEW & CONTRIBUTE</div><h2>Up
 <label>Confirmed IMDb ID<input id="upload-imdb" placeholder="tt1234567"></label>
 <div id="episode-fields" class="settings-grid" hidden><label>Season<input id="upload-season" type="number" min="1"></label><label>Episode<input id="upload-episode" type="number" min="1"></label><label>Episode title · required for reliable TVDB matching<input id="upload-episode-title" placeholder="Actual episode title, not the release filename"></label></div>
 <section id="ending-analysis" class="analysis-card"><h3>Automatic credits & extra-scene analysis</h3><p>Scan the ending, then review a 12× overview and short boundary clips. Black fades and text-like images provide candidates, not guaranteed scene recognition. Default timing resolution: 0.5 seconds.</p>
-<div class="row"><label>Scan window<select id="analysis-window"><option value="0.25">Last quarter · recommended</option><option value="0.5">Last half · wider search</option><option value="1">Entire video · slowest</option></select></label><button id="analyze-ending">Analyze ending</button><button id="cancel-analysis" class="secondary" hidden>Cancel analysis</button></div>
+<div class="row"><label>Scan window<select id="analysis-window"><option value="last-15-minutes">Last 15 minutes · shorter coverage</option><option selected value="0.25">Last quarter · recommended</option><option value="0.5">Last half · wider search</option><option value="1">Entire video · slowest</option></select></label><button id="analyze-ending">Analyze ending</button><button id="cancel-analysis" class="secondary" hidden>Cancel analysis</button></div>
+<p class="review-hint">A shorter window checks less of the movie. Expand it if credits or extra scenes begin earlier. Provider 4K speed also depends on the connection and decoding.</p>
 <div id="analysis-progress" role="status" aria-live="polite"></div><div id="analysis-findings"></div><div id="analysis-previews"></div>
 <button id="use-analysis" class="secondary" disabled>Use detected timestamps</button><label class="remember"><input id="ending-reviewed" type="checkbox"> I reviewed the ending overview and scene boundaries, rejected false positives, and checked that no extra scene is skipped.</label>
 </section>
@@ -109,7 +110,7 @@ function useAnalysis(){
 }
 async function startEndingAnalysis(force=false){
  const jobId=$('upload-job').value;if(!jobId)throw new Error('Choose an inspected file first.');
- saveDraft();await draftWrites;const response=await api('analyze-credits',{jobId,scanFraction:Number($('analysis-window').value),force});requestedAnalysisJob=response.cached?null:jobId;analysisSnapshot='';invalidateUpload();$('ending-reviewed').checked=false;if(response.cached)notice('Reusing the saved analysis for this unchanged video. Your corrections were preserved.');await poll();
+ saveDraft();await draftWrites;const response=await api('analyze-credits',{jobId,scanFraction:$('analysis-window').value==='last-15-minutes'?'last-15-minutes':Number($('analysis-window').value),force});requestedAnalysisJob=response.cached?null:jobId;analysisSnapshot='';invalidateUpload();$('ending-reviewed').checked=false;if(response.cached)notice('Reusing the saved analysis for this unchanged video. Your corrections were preserved.');await poll();
 }
 bind('analyze-ending',()=>startEndingAnalysis());
 const reanalyze=button('Reanalyze from source',()=>startEndingAnalysis(true));reanalyze.id='reanalyze-ending';$('analyze-ending').after(reanalyze);
@@ -121,7 +122,7 @@ function renderEndingAnalysis(job){
  $('reanalyze-ending').disabled=!job||job.status==='analyzing';
  const p=job?.analysisProgress;
  $('analysis-progress').replaceChildren();
- if(p){const progress=el('progress');progress.max=100;progress.value=p.percent||0;progress.setAttribute('aria-label','Ending analysis progress');$('analysis-progress').append(progress,el('p',`${(p.phase||'').replaceAll('-',' ')} · ${p.percent||0}% · ${Math.floor(((p.finishedAt||Date.now())-p.startedAt)/1000)}s elapsed${p.totalSeconds?` · ${Math.round(p.scannedSeconds||0)} / ${Math.round(p.totalSeconds)} source seconds scanned`:''}`));}
+ if(p){const elapsed=Math.max(0,((p.finishedAt||Date.now())-p.startedAt)/1000),speed=elapsed>0?(p.scannedSeconds||0)/elapsed:0,eta=p.phase==='scanning'&&elapsed>=5&&speed>0?` | ~${Math.ceil((p.totalSeconds-p.scannedSeconds)/speed/60)} min remaining | ${speed.toFixed(1)}x source speed`:'';const progress=el('progress');progress.max=100;progress.value=p.percent||0;progress.setAttribute('aria-label','Ending analysis progress');$('analysis-progress').append(progress,el('p',`${(p.phase||'').replaceAll('-',' ')} · ${p.percent||0}% · ${Math.floor(((p.finishedAt||Date.now())-p.startedAt)/1000)}s elapsed${p.totalSeconds?` · ${Math.round(p.scannedSeconds||0)} / ${Math.round(p.totalSeconds)} source seconds scanned`:''}${eta}`));}
  if(job?.analysisError)$('analysis-progress').append(el('p',job.analysisError,'review-warning'));
  const analysis=job?.report?.analysis;const snapshot=JSON.stringify([job?.id,analysis,job?.previews]);if(snapshot===analysisSnapshot)return;
  const nextEvidenceKey=JSON.stringify([job?.id,analysis]);const preserved=nextEvidenceKey===evidenceKey?[...document.querySelectorAll('.scene-decision')].map(n=>n.value):[];analysisSnapshot=snapshot;evidenceKey=nextEvidenceKey;
