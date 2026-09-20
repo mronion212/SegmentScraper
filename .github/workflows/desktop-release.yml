@@ -35,7 +35,7 @@ jobs:
         run: npm test
 
       - name: Build Windows installers
-        run: npm run dist:win
+        run: npm run dist:win -- --publish never
 
       - name: Publish GitHub Release
         env:
