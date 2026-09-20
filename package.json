@@ -2,8 +2,15 @@
   "name": "segmentscraper",
   "version": "1.9.5",
   "description": "Extracts and organizes intro, recap, and outro segments from streaming services.",
-  "main": "index.js",
+  "main": "app/desktop/main.cjs",
   "scripts": {
+    "app": "electron .",
+    "app:web": "node app/server.mjs",
+    "setup:media": "node build/setup-media.mjs",
+    "dist:win": "electron-builder --win --x64",
+    "dist:win:setup": "electron-builder --win nsis --x64",
+    "dist:win:portable": "electron-builder --win portable --x64",
+    "test:app": "node --test test/media-app.test.mjs",
     "build": "node build/bundler.js",
     "dev": "node build/bundler.js && cat SegmentScraper.user.js",
     "test": "node --test"
@@ -19,5 +26,61 @@
   "bugs": {
     "url": "https://github.com/mronion212/SegmentScraper/issues"
   },
-  "homepage": "https://github.com/mronion212/SegmentScraper#readme"
+  "homepage": "https://github.com/mronion212/SegmentScraper#readme",
+  "build": {
+    "appId": "org.segmentscraper.desktop",
+    "productName": "SegmentScraper",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "app/**/*",
+      "package.json",
+      "!app/README.md"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/ffmpeg",
+        "to": "ffprobe",
+        "filter": [
+          "ffprobe.exe",
+          "LICENSE",
+          "README.txt"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SegmentScraper",
+      "artifactName": "SegmentScraper-Desktop-${version}-${arch}-Setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "SegmentScraper-Desktop-${version}-${arch}-Portable.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "44.4.3",
+    "electron-builder": "26.15.3"
+  }
 }

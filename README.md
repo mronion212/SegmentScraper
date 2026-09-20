@@ -2,6 +2,10 @@
 
 SegmentScraper extracts intro, recap, and outro timestamps from supported streaming services. It includes automatic IMDb lookup, JSON export, and IntroDB submission with duplicate filtering.
 
+## Desktop media app
+
+This branch includes a Windows desktop app with its own window, native file/folder pickers and bundled ffprobe. Connect the same TorBox account used in Nuvio to browse existing torrents, Usenet and webdownloads, inspect chapters directly from the provider or download whole season packs for local inspection. No magnet links are needed. Real-Debrid and already downloaded local files are also supported. Install it with the Setup EXE in `dist`, or use the portable EXE, or develop with `npm ci`, `npm run setup:media` and `npm run app`. See [the desktop guide](app/README.md) for build instructions and limitations.
+
 ## Supported Services
 
 - Netflix
