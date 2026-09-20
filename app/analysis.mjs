@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 
 const WIDTH=320, HEIGHT=180, FPS=2, FRAME_BYTES=WIDTH*HEIGHT;
 const round=n=>Math.round(n*1000)/1000;
-export const ANALYSIS_VERSION='credits-tail/v1';
+export const ANALYSIS_VERSION='credits-tail/v2';
 
 // A deliberately conservative visual heuristic, not semantic recognition.
 // Text over a dark background has many small disconnected bright components.
@@ -106,15 +106,21 @@ function runFfmpeg(args,{signal,onFrame,onProgress,onLine,executable=process.env
   });
 }
 
-export async function analyzeCredits(source,report,{signal,onProgress=()=>{},scanFraction=.25,executable}={}){
+export async function analyzeCredits(source,report,{signal,onProgress=()=>{},scanFraction=.25,executable,artifactRoot}={}){
   const duration=report.duration;
   if(!Number.isFinite(duration)||duration<=0)throw new Error('Inspect the video duration before analyzing credits.');
   if(![.25,.5,1].includes(scanFraction))throw new Error('Invalid analysis window.');
   const start=round(duration*(1-scanFraction)),length=duration-start;
   const samples=[],blackRanges=[];
   const input=inputArgs(source);
+  const directory=await mkdtemp(path.join(artifactRoot||os.tmpdir(),'segmentscraper-analysis-'));
+  const artifacts=[];
+  try{
+  const overview={id:randomUUID(),kind:'overview',file:path.join(directory,'overview.webm'),sourceStart:start,sourceEnd:duration,speed:12};
+  artifacts.push(overview);
+  const graph=`[0:v:0]split=2[scan][overview];[scan]scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,blackdetect=d=2:pix_th=0.1:pic_th=0.98,fps=${FPS},format=gray[frames];[overview]setpts=(PTS-STARTPTS)/12,fps=6,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,format=yuv420p[quick]`;
   onProgress({phase:'scanning',percent:0,scannedSeconds:0,totalSeconds:length,startedAt:Date.now()});
-  await runFfmpeg(['-hide_banner','-nostdin','-loglevel','info',...input,'-ss',String(start),'-i',source.input,'-t',String(length),'-map','0:v:0','-an','-sn','-dn','-vf',`scale=${WIDTH}:${HEIGHT}:force_original_aspect_ratio=decrease,pad=${WIDTH}:${HEIGHT}:(ow-iw)/2:(oh-ih)/2,blackdetect=d=2:pix_th=0.1:pic_th=0.98,fps=${FPS},format=gray`,'-progress','pipe:3','-f','rawvideo','pipe:1'],{
+  await runFfmpeg(['-hide_banner','-nostdin','-loglevel','info',...input,'-ss',String(start),'-i',source.input,'-filter_complex',graph,'-map','[frames]','-an','-c:v','rawvideo','-progress','pipe:3','-f','rawvideo','pipe:1','-map','[quick]','-an','-c:v','libvpx','-deadline','realtime','-cpu-used','8','-b:v','500k','-y',overview.file],{
     signal,executable,onFrame:(frame,index)=>{if(index/FPS<=length+.5)samples.push({time:round(start+index/FPS),...frameFeatures(frame)});},
     onLine:line=>{const m=line.match(/black_start:([\d.]+)\s+black_end:([\d.]+)\s+black_duration:([\d.]+)/);if(m)blackRanges.push({start_sec:round(start+Number(m[1])),end_sec:round(Math.min(duration,start+Number(m[2])))});},
     onProgress:seconds=>onProgress({phase:'scanning',percent:Math.min(80,Math.round(seconds/length*80)),scannedSeconds:Math.min(length,seconds),totalSeconds:length}),
@@ -123,23 +129,15 @@ export async function analyzeCredits(source,report,{signal,onProgress=()=>{},sca
   // Decoder failures/truncation must not masquerade as a complete ending scan.
   if(samples.at(-1).time<duration-2)throw new Error('The ending scan stopped before the end of the video. Download and retry locally.');
   const analysis=proposeTimeline({duration,start,samples,blackRanges,chapters:report.chapters});
-  const directory=await mkdtemp(path.join(os.tmpdir(),'segmentscraper-analysis-'));
-  const artifacts=[];
-  try{
-    // A fast ending overview also covers cases without black fades or conventional credits.
-    const overview={id:randomUUID(),kind:'overview',file:path.join(directory,'overview.mp4'),sourceStart:start,sourceEnd:duration,speed:12};
-    const overviewFilter='setpts=(PTS-STARTPTS)/12,fps=6,scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2';
-    artifacts.push(overview);
-    onProgress({phase:'creating-overview',percent:81});
-    await runFfmpeg(['-hide_banner','-nostdin','-loglevel','error',...input,'-ss',String(start),'-i',source.input,'-t',String(length),'-map','0:v:0','-an','-sn','-dn','-vf',overviewFilter,'-c:v','libx264','-preset','ultrafast','-crf','28','-pix_fmt','yuv420p','-movflags','+faststart','-y',overview.file],{signal,executable});
+    // Overview and analysis share one decode; only small boundary windows are read again.
     const boundaries=[analysis.creditsStart,analysis.creditsEnd,...analysis.scenes.flatMap(s=>[s.start_sec,s.end_sec])].filter(Number.isFinite);
     const unique=[...new Set(boundaries)].slice(0,24);
     if(boundaries.length>24)analysis.warnings.push('Too many boundaries for automatic previews. Review the ending overview and narrow the candidates.');
     for(const [i,boundary]of unique.entries()){
       const from=Math.max(0,boundary-6),to=Math.min(duration,boundary+6);
-      const clip={id:randomUUID(),kind:'boundary',boundary,sourceStart:from,sourceEnd:to,speed:1,file:path.join(directory,`boundary-${i}.mp4`)};artifacts.push(clip);
+      const clip={id:randomUUID(),kind:'boundary',boundary,sourceStart:from,sourceEnd:to,speed:1,file:path.join(directory,`boundary-${i}.webm`)};artifacts.push(clip);
       onProgress({phase:'creating-previews',percent:82+Math.round((i+1)/Math.max(1,unique.length)*17),completedClips:i,totalClips:unique.length});
-      await runFfmpeg(['-hide_banner','-nostdin','-loglevel','error',...input,'-ss',String(from),'-i',source.input,'-t',String(to-from),'-map','0:v:0','-map','0:a:0?','-sn','-dn','-vf','scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2','-c:v','libx264','-preset','ultrafast','-crf','25','-pix_fmt','yuv420p','-c:a','aac','-ac','2','-b:a','96k','-movflags','+faststart','-y',clip.file],{signal,executable,timeout:5*60000});
+      await runFfmpeg(['-hide_banner','-nostdin','-loglevel','error',...input,'-ss',String(from),'-i',source.input,'-t',String(to-from),'-map','0:v:0','-map','0:a:0?','-sn','-dn','-vf','scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,format=yuv420p','-c:v','libvpx','-deadline','realtime','-cpu-used','8','-b:v','800k','-c:a','libopus','-ac','2','-b:a','96k','-y',clip.file],{signal,executable,timeout:5*60000});
     }
     for(const a of artifacts){if((await stat(a.file)).size===0)throw new Error('An analysis preview is empty.');}
     onProgress({phase:'ready-for-review',percent:100});
@@ -151,4 +149,14 @@ export async function disposeAnalysis(result){
   // Only remove our explicit generated files, never source media or recursive paths.
   for(const a of result.artifacts||[])if(path.dirname(a.file)===result.directory)await rm(a.file,{force:true}).catch(()=>{});
   await rmdir(result.directory).catch(()=>{});
+}
+
+export async function createReviewClip(source,duration,boundary,directory,{signal,executable}={}){
+  if(!Number.isFinite(boundary)||boundary<0||boundary>duration)throw new Error('Choose a time within the video.');
+  const from=Math.max(0,boundary-6),to=Math.min(duration,boundary+6),id=randomUUID();
+  const clip={id,kind:'boundary',boundary,sourceStart:from,sourceEnd:to,speed:1,file:path.join(directory,`${id}.webm`)};
+  try{
+    await runFfmpeg(['-hide_banner','-nostdin','-loglevel','error',...inputArgs(source),'-ss',String(from),'-i',source.input,'-t',String(to-from),'-map','0:v:0','-map','0:a:0?','-sn','-dn','-vf','scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,format=yuv420p','-c:v','libvpx','-deadline','realtime','-cpu-used','8','-b:v','800k','-c:a','libopus','-ac','2','-b:a','96k','-y',clip.file],{signal,executable,timeout:5*60000});
+    return clip;
+  }catch(error){await rm(clip.file,{force:true}).catch(()=>{});throw error;}
 }

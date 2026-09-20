@@ -62,15 +62,20 @@ function renderFiles(provider) {
 const statuses = { queued: 'Queued', downloading: 'Downloading', checking: 'Inspect chapters', analyzing: 'Analyzing ending', done: 'Inspection finished', error: 'Failed', cancelled: 'Cancelled' };
 function renderJobs() {
   const opened = new Set([...document.querySelectorAll('details[open]')].map(n => n.dataset.id));
-  $('jobs').replaceChildren(); $('count').textContent = jobs.length;
+  $('count').textContent = jobs.length;
+  const current=new Set(jobs.map(j=>j.id));for(const n of [...$('jobs').children])if(!current.has(n.dataset.job))n.remove();
   for (const job of jobs) {
+    const previous=[...$('jobs').children].find(n=>n.dataset.job===job.id),signature=JSON.stringify([job.status,job.bytes,job.total,job.error,job.report,job.savedPath]);
+    if(previous?.dataset.signature===signature)continue;
     const node = el('article', undefined, 'job'), head = el('div', undefined, 'job-head');
+    node.dataset.job=job.id;node.dataset.signature=signature;
     head.append(el('strong', job.name, 'job-title'), el('span', statuses[job.status], 'badge'));
     node.append(head);
     if (job.remote) node.append(el('small', 'Inspected directly from provider'));
     if (!['done', 'error', 'cancelled'].includes(job.status)) node.append(button('Cancel', async () => { await api('cancel', { id: job.id }); await poll(); }));
     if (job.status === 'downloading') { node.append(el('small', `${bytes(job.bytes)} / ${bytes(job.total)}`)); const p = el('progress'); if (job.total) { p.max = job.total; p.value = job.bytes; } node.append(p); }
     if (job.error) node.append(el('p', job.error));
+    if(['done','error','cancelled'].includes(job.status))node.append(button(job.status==='done'?'Reinspect file':'Resume / reinspect',async()=>{await api('resume',{id:job.id});await poll();}));
     if (job.savedPath) node.append(el('small', `Saved: ${job.savedPath}`));
     if (job.report) {
       const r = job.report;
@@ -86,7 +91,7 @@ function renderJobs() {
         table.append(tbody); detail.append(table); node.append(detail);
       }
     }
-    $('jobs').append(node);
+    if(previous)previous.replaceWith(node);else $('jobs').append(node);
   }
   if (!jobs.length) $('jobs').append(el('p', 'No files yet. Add local media or select files from your provider above.', 'empty'));
 }

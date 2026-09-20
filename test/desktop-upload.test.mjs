@@ -35,6 +35,15 @@ test('existing exact ranges skip upload but differing ranges can correct data',a
  const {fetcher,calls}=mock({existing:{...none,outro:{start_sec:start,end_sec:7100.5}}});const service=createUploadService({fetcher});service.configure({introdbKey:'key',tmdbToken:'token'});service.check(job,draft);const r=await idle(service);assert.equal(r.duplicates[0],duplicate);await service.submit(r.id,{reviewed:true});await idle(service);assert.equal(calls.some(c=>c.url.endsWith('/submit')),!duplicate);
  }
 });
+
+test('invalid existing timestamps block instead of silently marking a duplicate',async()=>{
+ const service=createUploadService({fetcher:mock({existing:{...none,outro:{start_sec:null,end_sec:7100}}}).fetcher});service.configure({tmdbToken:'token'});service.check(job,draft);const run=await idle(service);assert.equal(run.status,'blocked');assert.ok(run.blockers.some(x=>x.includes('invalid timestamps')));assert.equal(run.duplicates,undefined);
+});
+test('accepted uploads persist across service restart but validation authorization does not',async()=>{
+ let saved;const service=createUploadService({fetcher:mock().fetcher,onState:async state=>{saved=structuredClone(state);}});service.configure({introdbKey:'secret',tmdbToken:'token'});service.check(job,draft);const run=await idle(service);await service.submit(run.id,{reviewed:true});await idle(service);
+ assert.equal(saved.history.at(-1).status,'complete');assert.ok(!JSON.stringify(saved).includes('secret'));
+ const next=createUploadService({fetcher:mock().fetcher,initialState:saved});next.configure({tmdbToken:'token'});assert.equal(next.list().length,0);assert.equal(next.history().length,1);next.check(job,draft);assert.deepEqual((await idle(next)).duplicates,[true]);await assert.rejects(next.submit(run.id,{reviewed:true}),/validation again/);
+});
 test('failed duplicate checks block and never silently pass; override requires code and audit',async()=>{
  const audit=[];const {fetcher,calls}=mock({fail:true});const service=createUploadService({fetcher,adminCode:'secret-code',onAudit:async x=>audit.push(x)});service.configure({introdbKey:'key',tmdbToken:'token'});service.check(job,draft);const r=await idle(service);assert.equal(r.status,'blocked');assert.match(r.blockers.join(),/503/);
  await assert.rejects(service.submit(r.id,{reviewed:true,code:'wrong',reason:'Manual review done'}),/Invalid admin/);assert.equal(calls.some(c=>c.url.endsWith('/submit')),false);

@@ -4,7 +4,7 @@ Inspect embedded chapters, automatically analyze movie endings, review timestamp
 
 ## Install and use
 
-Run `dist/SegmentScraper-Desktop-1.11.0-x64-Setup.exe`, or the Portable EXE. ffprobe and FFmpeg are bundled.
+Run `dist/SegmentScraper-Desktop-1.12.0-x64-Setup.exe`, or the Portable EXE. ffprobe and FFmpeg are bundled.
 
 1. Choose local files/a season folder, or connect the same TorBox account used in Nuvio. Torrents, Usenet and web downloads are supported. Real-Debrid supports existing torrents. No content is added to TorBox.
 2. Inspect directly from your provider, or download and inspect. Remote inspection uses bandwidth and may read substantial data. Completed downloads remain on disk.
@@ -30,11 +30,21 @@ IntroDB returns one aggregated scene and does not model credits after that scene
 
 FFmpeg decodes only the chosen window. Full-rate black detection is combined with dark-background text-component heuristics at 320×180 / 2 fps. Candidate resolution is approximately 0.5 seconds; nearby black transitions refine boundaries. Credits over live action, stylized graphics, dark scenes, logos and scenes without fades can confuse the heuristic. No candidates means unknown, not proven absence. A candidate reaching EOF without an end transition remains unresolved. Review the 12× overview and boundary clips and correct or widen the scan when needed. This has synthetic-video regression coverage, not a measured accuracy claim on a representative film dataset.
 
-Preview clips are generated locally with FFmpeg and exposed only by opaque IDs on the loopback server. Source paths and provider URLs are not preview endpoints. They are deleted on clear/normal shutdown; a forced crash may leave `segmentscraper-analysis-*` temporary folders. Provider analysis obtains a fresh private link and uses provider bandwidth for scanning and previews; download locally if the provider cannot seek reliably. Cancellation stops FFmpeg. Reports include candidate evidence and warnings, not source links or keys.
+Preview clips are generated locally with FFmpeg and exposed only by opaque IDs on the loopback server. Source paths and provider URLs are not preview endpoints. Clips are retained with the saved workspace and deleted when you clear tasks or reanalyze. A forced crash during creation may leave an unreferenced preview folder. Provider analysis obtains a fresh private link and uses provider bandwidth for scanning and previews; download locally if the provider cannot seek reliably. Cancellation stops FFmpeg. Reports include candidate evidence and warnings, not source links or keys.
 
 A local selection is an incomplete catalogue: the desktop requires exact, unique episode-title matching rather than inferring order from equal counts. The shared TVDB loader follows pagination. Movies bypass TVDB. Duplicates are checked against fresh IntroDB data: exact ranges are skipped, differing ranges may be submitted as corrections. Network errors block instead of implying an empty database. Successful session submissions are tracked to avoid repeats. Failed/uncertain uploads stop the batch and require fresh checks before retrying. Requests time out after 15 seconds; checks expire after 15 minutes. Editing requires new checks.
 
-Queue, drafts and reports are in memory. Export inspection/upload results before closing.
+Queue, drafts, reports, preview files and upload receipts are saved locally in Electron's user-data `workspace` folder (web mode: `app-data/workspace`, overridable with `WORKSPACE_DIR`). Atomic snapshots use a flushed temporary file followed by rename. Credentials and provider URLs are excluded. Keep a backup of this folder if your review history matters; clearing tasks removes their reports and previews. Upload history remains available.
+
+Interrupted work is shown as resumable; it never silently uploads or downloads on startup. Reconnect the original provider before resuming remote work. Resume restarts inspection/download; it does not resume a partial video download byte-for-byte. Restored remote reports require reinspection. Local files are checked using size, modification time and SHA-256 samples at the beginning, middle and end before analysis, validation and upload. This is a practical change detector, not a full-file cryptographic identity. Changed files need reinspection. Reusing an unchanged local analysis also requires matching analysis version, scan window and existing preview files.
+
+Review confirmations and validation runs are not restored as upload authorization. All uploads require fresh checks and explicit personal review. Accepted submissions and an interrupted upload's last saved state remain in history; uncertain submissions require a fresh IntroDB check.
+
+## Review workspace and performance
+
+Filter the file list, confirm the identity, and review the timeline in one persistent player. Use the overview to navigate, then a 1× clip to set a boundary. `Inspect this time at 1×` creates or reuses a 12-second clip around the chosen source position. `Set start here`, `Set end here`, 0.1-second steps and Undo update the segment editor. Timecode captions accompany numeric seconds. Draft changes are automatically saved and flushed when closing the desktop window. Clip creation is limited to 48 per analysis; `Reanalyze from source` resets the preview cache.
+
+Analysis and the 12× overview share a single FFmpeg decode pass. Only short boundary windows are decoded again. Previews use WebM VP8/Opus with explicit Play/Pause controls and a download fallback. This avoids relying on native browser media-control automation. Existing queue rows are retained when their displayed data has not changed. No fixed speedup is promised: source codec, resolution and provider seeking determine the actual cost.
 
 ## Admin override
 

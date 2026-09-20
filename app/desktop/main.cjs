@@ -5,7 +5,7 @@ const { readFile, writeFile, mkdir, appendFile } = require('node:fs/promises');
 const { pathToFileURL } = require('node:url');
 const { CredentialVault } = require('./vault.cjs');
 
-let window, server, origin, quitting = false;
+let window, server, origin, quitting = false, closing = false;
 app.setName('SegmentScraper');
 app.commandLine.appendSwitch('lang','en-US');
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -41,9 +41,11 @@ async function start() {
   const { createApp } = await import(pathToFileURL(path.join(__dirname, '..', 'server.mjs')).href);
   const { createUpdateChecker, RELEASES } = await import(pathToFileURL(path.join(__dirname, '..', 'updates.mjs')).href);
   const { createUploadService } = await import(pathToFileURL(path.join(__dirname, '..', 'upload.mjs')).href);
+  const { openWorkspace } = await import(pathToFileURL(path.join(__dirname, '..', 'workspace.mjs')).href);
+  const workspace=await openWorkspace(path.join(userData,'workspace'));
   const updates=createUpdateChecker({version:app.getVersion(),requiredVersion:settings.requiredVersion});
-  const uploads=createUploadService({onAudit:async entry=>{await mkdir(userData,{recursive:true});await appendFile(path.join(userData,'upload-audit.jsonl'),JSON.stringify(entry)+'\n');}});
-  server = createApp({ downloadDir: settings.downloadDir || path.join(app.getPath('downloads'), 'SegmentScraper'), credentialStore: vault, uploads, updates });
+  const uploads=createUploadService({initialState:workspace.get().uploads,onState:uploads=>workspace.save({uploads}),onAudit:async entry=>{await mkdir(userData,{recursive:true});await appendFile(path.join(userData,'upload-audit.jsonl'),JSON.stringify(entry)+'\n');}});
+  server = createApp({ workspace,downloadDir: settings.downloadDir || path.join(app.getPath('downloads'), 'SegmentScraper'), credentialStore: vault, uploads, updates });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   origin = `http://127.0.0.1:${server.address().port}`;
   window = new BrowserWindow({ title: 'SegmentScraper', width: 1440, height: 960, minWidth: 900, minHeight: 650, backgroundColor: '#0b1018', show: false,
@@ -78,11 +80,15 @@ async function start() {
     if (canceled) return false; await writeFile(filePath, report); return true;
   });
   window.on('close', event => {
+    if(quitting)return;
+    event.preventDefault();
+    if(closing)return;
     if (!quitting && server.hasActiveJobs()) {
       const choice = dialog.showMessageBoxSync(window, { type: 'question', title: 'Queue is still running', message: 'Stop active downloads and checks and close the app?', buttons: ['Keep processing', 'Stop and close'], defaultId: 0, cancelId: 0 });
       if (choice === 0) { event.preventDefault(); return; }
     }
-    quitting = true; server.stopJobs();
+    closing=true;
+    window.webContents.executeJavaScript('window.flushReviewDraft ? window.flushReviewDraft() : Promise.resolve()').then(()=>{server.stopJobs();return server.flush();}).then(()=>{quitting=true;window.close();}).catch(()=>{closing=false;dialog.showErrorBox('Work could not be saved','Check disk space and try closing again. Your window remains open.');});
   });
   window.once('ready-to-show', () => window.show());
   await window.loadURL(origin);

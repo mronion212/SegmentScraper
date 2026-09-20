@@ -53,8 +53,10 @@ export function existingRanges(data, type) {
   if (raw == null) return [];
   return (Array.isArray(raw) ? raw : [raw]).map(s => ({ start: s.start_sec ?? s.startSec ?? (s.start_ms == null ? NaN : s.start_ms / 1000), end: s.end_sec ?? s.endSec ?? (s.end_ms == null ? NaN : s.end_ms / 1000) }));
 }
-export function createUploadService({ fetcher = fetch, adminCode = process.env.SEGMENTSCRAPER_ADMIN_CODE || '', onAudit = async () => {} } = {}) {
-  const runs = new Map(), accepted = new Set();
+export function createUploadService({ fetcher = fetch, adminCode = process.env.SEGMENTSCRAPER_ADMIN_CODE || '', onAudit = async () => {}, initialState={}, onState=async()=>{} } = {}) {
+  const runs = new Map(), accepted = new Set(initialState.accepted||[]), history=initialState.history||[];
+  const save=()=>onState({accepted:[...accepted],history});
+  function record(run){const i=history.findIndex(r=>r.id===run.id);const item=JSON.parse(JSON.stringify(run));if(i<0)history.push(item);else history[i]=item;while(history.length>500)history.shift();return save();}
   let settings = {}, busy = false, attempts = [];
   const snapshot = run => JSON.parse(JSON.stringify(run));
   function configure(input) {
@@ -104,7 +106,8 @@ export function createUploadService({ fetcher = fetch, adminCode = process.env.S
         const p=run.payloads[0]; const query=new URLSearchParams({imdb_id:p.imdb_id,...(p.is_movie?{is_movie:'true'}:{season:String(p.season),episode:String(p.episode)})});
         existing=await jsonRequest(`${BASE}/segments?${query}`,{allowMissing:true},fetcher);
         if(existing!==null && (typeof existing!=='object' || (!Array.isArray(existing) && !('intro' in existing || 'segments' in existing || 'outro' in existing)))) throw new Error('Unexpected IntroDB response; duplicate check is inconclusive.');
-        run.duplicates=run.payloads.map(p=>accepted.has(JSON.stringify(p))||existingRanges(existing,p.segment_type).some(r=>!Number.isFinite(r.start)||!Number.isFinite(r.end)||Math.abs(r.start-p.start_sec)<0.01&&Math.abs(r.end-p.end_sec)<0.01));
+        if(run.payloads.some(p=>existingRanges(existing,p.segment_type).some(r=>!Number.isFinite(r.start)||!Number.isFinite(r.end)||r.start<0||r.end<=r.start)))throw new Error('IntroDB returned invalid timestamps; duplicate check is inconclusive.');
+        run.duplicates=run.payloads.map(p=>accepted.has(JSON.stringify(p))||existingRanges(existing,p.segment_type).some(r=>Math.abs(r.start-p.start_sec)<0.01&&Math.abs(r.end-p.end_sec)<0.01));
         return `${run.duplicates.filter(Boolean).length} duplicate segments will be skipped`;
       });
       await step('Movie extra-scene protection', async () => {
@@ -145,21 +148,25 @@ export function createUploadService({ fetcher = fetch, adminCode = process.env.S
     }
     busy=true;run.status='uploading';
     void (async()=>{
+      await record(run);
       if(run.override) await onAudit({runId:run.id,jobId:run.jobId,...run.override});
       for(let i=0;i<run.payloads.length;i++) {
         if(['uploaded','duplicate'].includes(run.results[i]?.status)) continue;
         if(run.duplicates?.[i] || accepted.has(JSON.stringify(run.payloads[i]))) {run.results[i]={status:'duplicate',detail:'Already in IntroDB or submitted in this session'};continue;}
         run.results[i]={status:'uploading',detail:`Submitting segment ${i+1} of ${run.payloads.length}`};
+        await record(run);
         try {
           const response=await jsonRequest(`${BASE}/submit`,{method:'POST',headers:{'Content-Type':'application/json','X-API-Key':settings.introdbKey},body:JSON.stringify(run.payloads[i])},fetcher);
           if(response?.ok!==true) throw new Error('IntroDB did not confirm acceptance. Recheck before retrying.');
           accepted.add(JSON.stringify(run.payloads[i]));
           run.results[i]={status:'uploaded',detail:'IntroDB accepted the submission',id:response.submission?.id};
-        } catch(e) {run.results[i]={status:'failed',detail:e.message};run.status='partial';return;}
+          await record(run);
+        } catch(e) {run.results[i]={status:'failed',detail:e.message};run.status='partial';await record(run);return;}
       }
       run.status='complete';
+      await record(run);
     })().catch(()=>{run.status='partial';run.results.push({status:'failed',detail:'Could not record admin audit. No further segments submitted.'});}).finally(()=>{busy=false;});
     return snapshot(run);
   }
-  return { configure, lookup, check, submit, invalidate:jobId=>{if(busy)throw new Error('Wait for validation or upload to finish.');for(const [id,run]of runs)if(run.jobId===jobId)runs.delete(id);}, active:()=>busy, list:()=>[...runs.values()].map(snapshot), adminConfigured:()=>Boolean(adminCode) };
+  return { configure, lookup, check, submit, history:()=>history.map(snapshot), invalidate:jobId=>{if(busy)throw new Error('Wait for validation or upload to finish.');for(const [id,run]of runs)if(run.jobId===jobId)runs.delete(id);}, active:()=>busy, list:()=>[...runs.values()].map(snapshot), adminConfigured:()=>Boolean(adminCode) };
 }

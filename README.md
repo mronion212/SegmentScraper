@@ -10,6 +10,8 @@ Desktop 1.10.0 adds an English review/upload workflow, IMDb identity lookup, sha
 
 Desktop 1.11.0 adds automatic movie-ending analysis using FFmpeg, credit-text heuristics, a 12× overview and short boundary previews. It can submit a reviewed scene-safe outro and one mid-/post-credits scene. The online userscript retains its blanket exclusion for movies with known extra scenes. Multiple real scenes are preserved in local reports because IntroDB does not currently model them separately. Applicable future changes must be carried to both clients; shared code and CI checks enforce generated-code parity (see `AGENTS.md`).
 
+Desktop 1.12.0 adds saved workspaces and upload history, resumable inspection tasks, a single-player review timeline with boundary editing, WebM previews, and a shared decode pass for analysis and overview. Local analysis reuse verifies the source file; uploads always need fresh checks after restart.
+
 ## Supported Services
 
 - Netflix
