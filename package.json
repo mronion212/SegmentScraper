@@ -1,6 +1,6 @@
 {
   "name": "segmentscraper",
-  "version": "1.12.1",
+  "version": "1.12.3",
   "description": "Extracts and organizes intro, recap, and outro segments from streaming services.",
   "main": "app/desktop/main.cjs",
   "scripts": {
@@ -38,7 +38,7 @@
   "homepage": "https://github.com/mronion212/SegmentScraper#readme",
   "build": {
     "appId": "org.segmentscraper.desktop",
-    "productName": "SegmentScraper",
+    "productName": "SegmentScraper Desktop Alpha 0.1",
     "directories": {
       "output": "dist"
     },

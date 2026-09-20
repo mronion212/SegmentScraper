@@ -52,6 +52,6 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             dist/*-Setup.exe \
             dist/*-Portable.exe \
-            --title "SegmentScraper $GITHUB_REF_NAME" \
+            --title "SegmentScraper $GITHUB_REF_NAME — Desktop Alpha 0.1" \
             "${notes[@]}" \
             --generate-notes

@@ -6,6 +6,7 @@ const { pathToFileURL } = require('node:url');
 const { CredentialVault } = require('./vault.cjs');
 
 let window, server, origin, quitting = false, closing = false;
+const DESKTOP_RELEASE_LABEL = 'Alpha 0.1';
 app.setName('SegmentScraper');
 app.commandLine.appendSwitch('lang','en-US');
 if (!app.requestSingleInstanceLock()) app.quit();
@@ -48,7 +49,7 @@ async function start() {
   server = createApp({ workspace,downloadDir: settings.downloadDir || path.join(app.getPath('downloads'), 'SegmentScraper'), credentialStore: vault, uploads, updates });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   origin = `http://127.0.0.1:${server.address().port}`;
-  window = new BrowserWindow({ title: 'SegmentScraper', width: 1440, height: 960, minWidth: 900, minHeight: 650, backgroundColor: '#0b1018', show: false,
+  window = new BrowserWindow({ title: `SegmentScraper Desktop · ${DESKTOP_RELEASE_LABEL}`, width: 1440, height: 960, minWidth: 900, minHeight: 650, backgroundColor: '#0b1018', show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true } });
   Menu.setApplicationMenu(null);
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
