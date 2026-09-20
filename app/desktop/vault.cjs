@@ -6,17 +6,17 @@ class CredentialVault {
   constructor(file, encryption) { this.file = file; this.encryption = encryption; this.pending = Promise.resolve(); }
   async read() {
     try { return JSON.parse(await readFile(this.file, 'utf8')); }
-    catch (error) { if (error.code === 'ENOENT') return {}; throw new Error('Opgeslagen accounts konden niet worden gelezen.'); }
+    catch (error) { if (error.code === 'ENOENT') return {}; throw new Error('Saved accounts could not be read.'); }
   }
   async list() { return Object.keys(await this.read()).filter(key => ['torbox', 'real-debrid'].includes(key)); }
   async get(provider) {
     const cipher = (await this.read())[provider];
-    if (!cipher) throw new Error('Geen opgeslagen account.');
+    if (!cipher) throw new Error('No saved account.');
     return this.encryption.decrypt(Buffer.from(cipher, 'base64'));
   }
   update(provider, token) {
     const operation = this.pending.catch(() => {}).then(async () => {
-      if (!['torbox', 'real-debrid'].includes(provider)) throw new Error('Onbekende provider.');
+      if (!['torbox', 'real-debrid'].includes(provider)) throw new Error('Unknown provider.');
       const records = await this.read();
       if (token === null) delete records[provider];
       else records[provider] = (await this.encryption.encrypt(token)).toString('base64');

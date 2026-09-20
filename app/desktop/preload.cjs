@@ -4,4 +4,5 @@ contextBridge.exposeInMainWorld('desktop', {
   pickFolder: () => ipcRenderer.invoke('desktop:pick-folder'),
   pickDestination: () => ipcRenderer.invoke('desktop:pick-destination'),
   saveReport: report => ipcRenderer.invoke('desktop:save-report', report),
+  openUpdate: () => ipcRenderer.invoke('desktop:open-update'),
 });

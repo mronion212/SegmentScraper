@@ -3,7 +3,7 @@ name: Build SegmentScraper desktop release
 on:
   push:
     tags:
-      - "desktop-v*"
+      - "v*"
 
 permissions:
   contents: write
@@ -25,8 +25,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Download and verify ffprobe
+      - name: Reject stale desktop shared code
+        run: node build/desktop-core.cjs --check
+
+      - name: Download and verify FFmpeg and ffprobe
         run: npm run setup:media
+
+      - name: Test both clients including FFmpeg analysis
+        run: npm test
 
       - name: Build Windows installers
         run: npm run dist:win
@@ -40,4 +46,5 @@ jobs:
             dist/*-Setup.exe \
             dist/*-Portable.exe \
             --title "SegmentScraper $GITHUB_REF_NAME" \
+            --notes-file "release-notes/${GITHUB_REF_NAME#v}.md" \
             --generate-notes

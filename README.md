@@ -6,6 +6,10 @@ SegmentScraper extracts intro, recap, and outro timestamps from supported stream
 
 This branch includes a Windows desktop app with its own window, native file/folder pickers and bundled ffprobe. Connect the same TorBox account used in Nuvio to browse existing torrents, Usenet and webdownloads, inspect chapters directly from the provider or download whole season packs for local inspection. No magnet links are needed. Real-Debrid and already downloaded local files are also supported. Install it with the Setup EXE in `dist`, or use the portable EXE, or develop with `npm ci`, `npm run setup:media` and `npm run app`. See [the desktop guide](app/README.md) for build instructions and limitations.
 
+Desktop 1.10.0 adds an English review/upload workflow, IMDb identity lookup, shared TVDB/TMDB checks, duplicate filtering, visible validation progress, an audited admin override, and required desktop-update dialogs. Users must personally review all output against the video. The app follows the official IntroDB API at `api.introdb.app`.
+
+Desktop 1.11.0 adds automatic movie-ending analysis using FFmpeg, credit-text heuristics, a 12× overview and short boundary previews. It can submit a reviewed scene-safe outro and one mid-/post-credits scene. The online userscript retains its blanket exclusion for movies with known extra scenes. Multiple real scenes are preserved in local reports because IntroDB does not currently model them separately. Applicable future changes must be carried to both clients; shared code and CI checks enforce generated-code parity (see `AGENTS.md`).
+
 ## Supported Services
 
 - Netflix

@@ -19,9 +19,9 @@ export function chapterReport(data, name, mode) {
     const end = c.end_time == null ? NaN : Number(c.end_time);
     const title = String(c.tags?.title || c.tags?.TITLE || `Chapter ${index + 1}`);
     const issues = [];
-    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) issues.push('Ongeldige tijdgrenzen');
-    if (Number.isFinite(start) && start < previousEnd - 0.01) issues.push('Overlappende of ongeordende chapters');
-    if (duration && end > duration + 0.1) issues.push('Chapter valt buiten de speelduur');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) issues.push('Invalid time boundaries');
+    if (Number.isFinite(start) && start < previousEnd - 0.01) issues.push('Overlapping or unordered chapters');
+    if (duration && end > duration + 0.1) issues.push('Chapter exceeds video duration');
     if (Number.isFinite(end)) previousEnd = Math.max(previousEnd, end);
     // Names are hints only; generic chapter numbers never imply intro/outro.
     const suggestion = /\b(post[- ]?credits?|after[- ]?credits?)\b/i.test(title) ? 'post-credits'
@@ -30,7 +30,10 @@ export function chapterReport(data, name, mode) {
       : /\b(credits|outro|ending|ed)\b/i.test(title) ? 'outro' : null;
     return { title, start_sec: Number.isFinite(start) ? start : null, end_sec: Number.isFinite(end) ? end : null, suggestion, needs_review: true, issues };
   });
-  return { name, ...identify(name, mode), duration, status: !chapters.length ? 'no-chapters' : chapters.some(c => c.issues.length) ? 'review' : 'checked', chapters };
+  const diagnostics = [];
+  if (!chapters.length) diagnostics.push('ffprobe returned no embedded chapters. This does not mean the video has no intro or credits. Provider skip markers are separate metadata.');
+  if (duration && duration < 600) diagnostics.push('Short video: check whether this is a trailer, sample, or short feature before identifying it.');
+  return { name, ...identify(name, mode), duration, container: data.format?.format_name || null, diagnostics, status: !chapters.length ? 'no-chapters' : chapters.some(c => c.issues.length) ? 'review' : 'checked', chapters };
 }
 export async function inspectFile(file, { mode = 'auto', signal, executable = process.env.FFPROBE_PATH || 'ffprobe' } = {}) {
   try {
@@ -38,28 +41,28 @@ export async function inspectFile(file, { mode = 'auto', signal, executable = pr
     return chapterReport(JSON.parse(stdout), path.basename(file), mode);
   } catch (error) {
     if (error.name === 'AbortError') throw error;
-    throw new Error(error.code === 'ENOENT' ? 'ffprobe ontbreekt. Installeer FFmpeg of stel FFPROBE_PATH in.' : 'Chaptercontrole mislukt: bestand onleesbaar, beschadigd of tijdslimiet bereikt.');
+    throw new Error(error.code === 'ENOENT' ? 'ffprobe is missing. Install FFmpeg or configure FFPROBE_PATH.' : 'Chapter inspection failed: unreadable or damaged file, or timeout.');
   }
 }
 export async function inspectRemote(url, name, { mode = 'auto', signal, executable = process.env.FFPROBE_PATH || 'ffprobe' } = {}) {
   const parsed = new URL(url);
-  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('Ongeldige providerlink.');
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error('Invalid provider link.');
   try {
     const { stdout } = await exec(executable, ['-v', 'error', '-rw_timeout', '15000000', '-protocol_whitelist', 'https,http,tls,tcp,crypto', '-show_chapters', '-show_format', '-of', 'json', '-i', url], { signal, timeout: 120000, maxBuffer: 16 * 1024 * 1024, windowsHide: true });
     return chapterReport(JSON.parse(stdout), name, mode);
   } catch (error) {
     if (error.name === 'AbortError') throw error;
-    throw new Error(error.code === 'ENOENT' ? 'ffprobe ontbreekt.' : 'Controle via de provider mislukt. Download het bestand en controleer het lokaal.');
+    throw new Error(error.code === 'ENOENT' ? 'ffprobe is missing.' : 'Remote inspection failed. Download the file and inspect it locally.');
   }
 }
 export async function probeAvailable() {
   try { await exec(process.env.FFPROBE_PATH || 'ffprobe', ['-version'], { timeout: 5000, windowsHide: true }); return true; } catch { return false; }
 }
 export async function collectVideos(inputs) {
-  if (!Array.isArray(inputs) || !inputs.length || inputs.length > 100) throw new Error('Geef 1–100 lokale bestanden of mappen op.');
+  if (!Array.isArray(inputs) || !inputs.length || inputs.length > 100) throw new Error('Provide 1–100 local files or folders.');
   const files = new Set();
   async function visit(file, depth = 0) {
-    if (depth > 30 || files.size >= 5000) throw new Error('Map te groot: maximaal 5000 bestanden en 30 niveaus.');
+    if (depth > 30 || files.size >= 5000) throw new Error('Folder too large: maximum 5000 files and 30 levels.');
     const info = await stat(file);
     if (info.isDirectory()) {
       for (const entry of await readdir(file, { withFileTypes: true })) {
@@ -68,7 +71,7 @@ export async function collectVideos(inputs) {
     } else if (info.isFile() && isVideo(file)) files.add(path.resolve(file));
   }
   for (const input of inputs) {
-    if (typeof input !== 'string' || !path.isAbsolute(input) || input.startsWith('\\\\')) throw new Error('Gebruik een absoluut lokaal pad, geen netwerk- of URL-pad.');
+    if (typeof input !== 'string' || !path.isAbsolute(input) || input.startsWith('\\\\')) throw new Error('Use an absolute local path, not a network path or URL.');
     await visit(input);
   }
   return [...files].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));

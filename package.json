@@ -1,6 +1,6 @@
 {
   "name": "segmentscraper",
-  "version": "1.9.5",
+  "version": "1.11.0",
   "description": "Extracts and organizes intro, recap, and outro segments from streaming services.",
   "main": "app/desktop/main.cjs",
   "scripts": {
@@ -11,9 +11,18 @@
     "dist:win:setup": "electron-builder --win nsis --x64",
     "dist:win:portable": "electron-builder --win portable --x64",
     "test:app": "node --test test/media-app.test.mjs",
-    "build": "node build/bundler.js",
+    "build": "node build/desktop-core.cjs && node build/bundler.js",
     "dev": "node build/bundler.js && cat SegmentScraper.user.js",
-    "test": "node --test"
+    "test": "node --test",
+    "build:desktop-core": "node build/desktop-core.cjs",
+    "preapp": "node build/desktop-core.cjs",
+    "preapp:web": "node build/desktop-core.cjs",
+    "predist:win": "node build/desktop-core.cjs",
+    "predist:win:setup": "node build/desktop-core.cjs",
+    "predist:win:portable": "node build/desktop-core.cjs",
+    "pretest": "node build/desktop-core.cjs",
+    "pretest:app": "node build/desktop-core.cjs",
+    "check:desktop-core": "node build/desktop-core.cjs --check"
   },
   "repository": {
     "type": "git",
@@ -43,6 +52,7 @@
         "from": "vendor/ffmpeg",
         "to": "ffprobe",
         "filter": [
+          "ffmpeg.exe",
           "ffprobe.exe",
           "LICENSE",
           "README.txt"

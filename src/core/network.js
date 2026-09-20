@@ -4,6 +4,7 @@
  */
 
 import { state, createMediaCacheKey } from './state.js';
+import { introdbPayload } from './output-policy.js';
 
 const INTRODB_BASE = 'https://api.introdb.app';
 
@@ -274,19 +275,7 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
 export async function submitSegment(item, apiKey) {
   const url = `${INTRODB_BASE}/submit`;
   const gmXhr = getGmXhr();
-  const isMovie = String(item.media_type || item.mediaType || item._mediaType || '').toLowerCase() === 'movie';
-  const data = {
-    imdb_id: item.imdb_id,
-    segment_type: item.segment_type,
-    start_sec: item.start_sec,
-    end_sec: item.end_sec,
-  };
-  if (isMovie) {
-    data.is_movie = true;
-  } else {
-    data.season = item.season;
-    data.episode = item.episode;
-  }
+  const data = introdbPayload(item);
   
   if (gmXhr) {
     return new Promise((resolve) => {

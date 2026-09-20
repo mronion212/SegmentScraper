@@ -25,6 +25,7 @@ function loadNetwork(requestHandler) {
     GM_xmlhttpRequest: requestHandler,
     console: { log() {}, error() {} },
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/core/output-policy.js'), 'utf8').replace(/^export /gm, ''), context);
   vm.runInContext(source, context, { filename: 'network.js' });
   return { state, ...context.networkExports };
 }

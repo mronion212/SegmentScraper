@@ -96,6 +96,7 @@ function bundle() {
   // Define file order for proper dependency resolution
   const commonFileOrder = [
     'core/state.js',
+    'core/output-policy.js',
     'core/update-check.js',
     'core/network.js',
     'core/introdb-settings.js',

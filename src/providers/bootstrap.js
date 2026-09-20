@@ -4,6 +4,7 @@
  */
 
 import { state, createState, createMediaCacheKey } from '../core/state.js';
+import { outputSegmentAllowed } from '../core/output-policy.js';
 import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
 import { injectBtn, getNextEpBtn } from '../ui/button.js';
@@ -300,19 +301,8 @@ async function mapCapturedItemsWithTvdb(action) {
   };
 }
 
-const MIN_OUTPUT_SEGMENT_DURATION_SECONDS = 5;
-
 function filterShortOutputSegments(items) {
-  return items.filter(item => {
-    const start = Number(item?.start_sec);
-    const end = Number(item?.end_sec);
-    return Number.isFinite(start)
-      && Number.isFinite(end)
-      && start >= 0
-      && end - start >= MIN_OUTPUT_SEGMENT_DURATION_SECONDS
-      && (!isMovieItem(item) || (['outro', 'post-credits'].includes(item.segment_type)
-        && end - start <= (item.segment_type === 'outro' ? 900 : 600)));
-  });
+  return items.filter(outputSegmentAllowed);
 }
 
 function normalizeMovieExportItem(item) {

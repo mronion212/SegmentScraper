@@ -88,6 +88,7 @@ function loadBootstrap({ mappingResult, stateOverrides = {}, existingSegmentsByK
       return typeof mappingResult === 'function' ? mappingResult(items, catalog) : mappingResult;
     },
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/core/output-policy.js'), 'utf8').replace(/^export /gm, ''), context);
   vm.runInContext(source, context, { filename: 'bootstrap.js' });
   return {
     exportJSON: context.bootstrapExports.exportJSON,

@@ -4,14 +4,14 @@ export const torboxReady = t => t.download_present === true && t.download_finish
 const sources = { torrents: 'torrent_id', usenet: 'usenet_id', webdl: 'web_id' };
 function resource(key) {
   const [source, id] = String(key).includes(':') ? String(key).split(':') : ['torrents', String(key)];
-  if (!Object.hasOwn(sources, source) || !/^\d+$/.test(id)) throw new Error('Ongeldig bibliotheekitem.');
+  if (!Object.hasOwn(sources, source) || !/^\d+$/.test(id)) throw new Error('Invalid library item.');
   return { source, id };
 }
 
 export class Debrid {
   constructor(provider, token, fetcher = fetch) {
-    if (!['torbox', 'real-debrid'].includes(provider)) throw new Error('Onbekende provider.');
-    if (typeof token !== 'string' || !token.trim() || /[\r\n]/.test(token)) throw new Error('Vul een geldige API-sleutel in.');
+    if (!['torbox', 'real-debrid'].includes(provider)) throw new Error('Unknown provider.');
+    if (typeof token !== 'string' || !token.trim() || /[\r\n]/.test(token)) throw new Error('Enter a valid API key.');
     this.provider = provider; this.token = token.trim(); this.fetch = fetcher;
     this.base = provider === 'torbox' ? 'https://api.torbox.app/v1/api' : 'https://api.real-debrid.com/rest/1.0';
   }
@@ -19,41 +19,41 @@ export class Debrid {
     let response;
     try {
       response = await this.fetch(this.base + endpoint, { method: body ? 'POST' : 'GET', headers: { Authorization: `Bearer ${this.token}` }, body, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000), redirect: 'error' });
-    } catch { throw new Error('Provider niet bereikbaar of aanvraag geannuleerd.'); }
-    if (!response.ok) throw new Error(`Providerfout (${response.status}). Controleer je sleutel, account en limieten.`);
+    } catch { throw new Error('Provider unreachable or request cancelled.'); }
+    if (!response.ok) throw new Error(`Provider error (${response.status}). Check your key, account, and limits.`);
     if (response.status === 204) return null;
     const json = await response.json();
     if (this.provider === 'torbox') {
-      if (json.success !== true) throw new Error('TorBox kon de aanvraag niet uitvoeren. Controleer de status in je account.');
+      if (json.success !== true) throw new Error('TorBox could not process the request. Check your account status.');
       return json.data;
     }
     return json;
   }
   async library({ source = 'all', fresh = true } = {}) {
     if (this.provider !== 'torbox') return { torrents: await this.list({ fresh }), warnings: [] };
-    if (source !== 'all' && !Object.hasOwn(sources, source)) throw new Error('Onbekend bibliotheekonderdeel.');
+    if (source !== 'all' && !Object.hasOwn(sources, source)) throw new Error('Unknown library source.');
     const requested = source === 'all' ? Object.keys(sources) : [source];
     const results = await Promise.allSettled(requested.map(source => this.list({ source, fresh })));
     if (results.every(r => r.status === 'rejected')) throw results[0].reason;
-    return { torrents: results.flatMap(r => r.status === 'fulfilled' ? r.value : []), warnings: results.flatMap((r, i) => r.status === 'rejected' ? [`${requested[i]} kon niet worden geladen. Controleer je accountrechten of probeer opnieuw.`] : []) };
+    return { torrents: results.flatMap(r => r.status === 'fulfilled' ? r.value : []), warnings: results.flatMap((r, i) => r.status === 'rejected' ? [`${requested[i]} could not be loaded. Check account permissions or retry.`] : []) };
   }
   async list({ fresh = false, source = 'torrents' } = {}) {
-    if (!Object.hasOwn(sources, source)) throw new Error('Onbekend bibliotheekonderdeel.');
+    if (!Object.hasOwn(sources, source)) throw new Error('Unknown library source.');
     const torrents = [];
     for (let page = 0; page < 100; page++) {
       const rows = await this.request(this.provider === 'torbox' ? `/${source}/mylist?offset=${page * 100}&limit=100${fresh ? '&bypass_cache=true' : ''}` : `/torrents?offset=${page * 100}&limit=100`);
-      if (!Array.isArray(rows)) throw new Error('Onverwacht antwoord van provider.');
+      if (!Array.isArray(rows)) throw new Error('Unexpected provider response.');
       torrents.push(...rows.map(t => ({ id: this.provider === 'torbox' ? `${source}:${t.id}` : String(t.id), source, name: t.name || t.filename, status: t.download_state || t.status, progress: this.provider === 'torbox' ? Math.round((t.progress || 0) * 100) : t.progress,
         ready: this.provider === 'torbox' ? torboxReady(t) : t.status === 'downloaded', cached: t.cached === true, size: t.size ?? t.bytes, expiresAt: t.expires_at || null,
         videoCount: Array.isArray(t.files) ? t.files.filter(f => isVideo(f.name || f.path)).length : null })));
       if (rows.length < 100) return torrents;
     }
-    throw new Error('Account bevat meer dan 10.000 torrents.');
+    throw new Error('Account contains more than 10,000 torrents.');
   }
   async details(id, signal) {
     const target = this.provider === 'torbox' ? resource(id) : null;
     const t = await this.request(target ? `/${target.source}/mylist?id=${target.id}&bypass_cache=true` : `/torrents/info/${encodeURIComponent(id)}`, undefined, signal);
-    if (!t || !Array.isArray(t.files)) throw new Error('Bestandslijst nog niet beschikbaar. Ververs zodra de metadata klaar is.');
+    if (!t || !Array.isArray(t.files)) throw new Error('File list is not ready. Refresh when metadata is available.');
     const selected = t.files.filter(f => f.selected === 1);
     return { id: target ? `${target.source}:${t.id}` : String(t.id), source: target?.source || 'torrents', name: t.name || t.filename, ready: this.provider === 'torbox' ? torboxReady(t) : t.status === 'downloaded', cached: t.cached === true, status: t.download_state || t.status,
       files: t.files.filter(f => isVideo(f.name || f.path)).map(f => ({ id: String(f.id), name: f.name || f.path, size: f.size ?? f.bytes, downloadable: !f.zipped && !f.infected, link: this.provider === 'real-debrid' && selected.length === t.links?.length ? t.links[selected.indexOf(f)] : undefined })) };
@@ -64,12 +64,12 @@ export class Debrid {
   async downloadLink(torrentId, fileId, signal) {
     const torrent = await this.details(torrentId, signal);
     const file = torrent.files.find(f => f.id === String(fileId));
-    if (!torrent.ready || !file || !file.downloadable) throw new Error('Bestand is nog niet klaar of niet afzonderlijk beschikbaar.');
+    if (!torrent.ready || !file || !file.downloadable) throw new Error('File is not ready or individually available.');
     if (this.provider === 'torbox') {
       const { source, id } = resource(torrentId);
       return this.request(`/${source}/requestdl?${new URLSearchParams({ token: this.token, [sources[source]]: id, file_id: fileId, redirect: 'false' })}`, undefined, signal);
     }
-    if (!file.link) throw new Error('Geen eenduidige downloadlink. Selecteer de bestanden in je provider en ververs.');
+    if (!file.link) throw new Error('No unambiguous download link. Select the files at your provider and refresh.');
     return (await this.request('/unrestrict/link', new URLSearchParams({ link: file.link }), signal)).download;
   }
 }

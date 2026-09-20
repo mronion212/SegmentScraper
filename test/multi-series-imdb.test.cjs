@@ -52,6 +52,7 @@ function loadShowHandler(searches) {
     document: { getElementById: () => null, addEventListener: noop, querySelector: () => null },
     getProviderConfig: () => ({ name: 'SkyShowtime' }),
   });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/core/output-policy.js'), 'utf8').replace(/^export /gm, ''), context);
   vm.runInContext(source, context, { filename: 'bootstrap.js' });
   return { state, searchCalls, handleDetectedShow: context.bootstrapExports.handleDetectedShow };
 }

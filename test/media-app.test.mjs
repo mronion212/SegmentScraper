@@ -43,8 +43,8 @@ test('recursive local collection filters sidecars and deduplicates paths', async
   await Promise.all(['season/S01E02.mkv', 'season/S01E01.mp4', 'notes.txt'].map(file => writeFile(path.join(folder, file), 'fixture')));
   const files = await collectVideos([folder, path.join(folder, 'season/S01E01.mp4')]);
   assert.equal(files.length, 2); assert.ok(files[0].endsWith('S01E01.mp4'));
-  await assert.rejects(collectVideos(['https://example.com/movie.mkv']), /lokaal/);
-  await assert.rejects(inspectFile(files[0], { executable: 'nonexistent-ffprobe-test-binary' }), /ffprobe ontbreekt/);
+  await assert.rejects(collectVideos(['https://example.com/movie.mkv']), /local/);
+  await assert.rejects(inspectFile(files[0], { executable: 'nonexistent-ffprobe-test-binary' }), /ffprobe is missing/);
 });
 test('TorBox adapter validates envelopes, file ID zero, readiness and private download-link lookup', async () => {
   const calls = [];
@@ -151,7 +151,7 @@ test('TorBox aggregates torrents, Usenet and webdownloads without colliding IDs;
 test('one unavailable TorBox source does not hide the other libraries', async () => {
   const p = new Debrid('torbox', 'key', async url => url.includes('/usenet/') ? new Response(null, { status: 403 }) : Response.json({ success: true, data: [{ id: 1, name: 'Film' }] }));
   const result = await p.library(); assert.equal(result.torrents.length, 2); assert.equal(result.warnings.length, 1);
-  await assert.rejects(p.library({ source: 'other' }), /Onbekend/);
+  await assert.rejects(p.library({ source: 'other' }), /Unknown/);
 });
 
 for (const [source, idKey] of [['torrents', 'torrent_id'], ['usenet', 'usenet_id'], ['webdl', 'web_id']]) {
@@ -192,7 +192,7 @@ test('credential vault persists only encryption output, serializes updates and r
   assert.equal(await vault.get('torbox'), 'private-one'); assert.equal((await vault.list()).length, 2);
   assert.ok(!(await readFile(file, 'utf8')).includes('private-one'));
   await vault.remove('torbox'); assert.deepEqual(await vault.list(), ['real-debrid']);
-  await assert.rejects(vault.get('torbox'), /Geen opgeslagen/);
+  await assert.rejects(vault.get('torbox'), /No saved/);
 });
 
 test('stored account restore keeps keys inside backend and disconnect removes remembered account', async t => {

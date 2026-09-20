@@ -1,66 +1,67 @@
 # SegmentScraper Desktop
 
-Een zelfstandige Windows-desktopapp met eigen venster, bestands-/mapkiezers en meegeleverde ffprobe. De bestaande userscript blijft apart beschikbaar.
+Inspect embedded chapters, automatically analyze movie endings, review timestamps, and contribute to **IntroDB (introdb.app)**. This complements streaming-provider metadata. Ending analysis is a visual heuristic, not a trained scene-recognition model or automatic intro detector.
 
-## Installeren en openen
+## Install and use
 
-Gebruik voor een normale Windows-installatie `dist/SegmentScraper-Desktop-1.9.5-x64-Setup.exe`. De installer maakt een Startmenu-entry, optioneel een bureaubladsnelkoppeling en een uninstall-entry in Windows. Daarna open je SegmentScraper gewoon vanuit het Startmenu.
+Run `dist/SegmentScraper-Desktop-1.11.0-x64-Setup.exe`, or the Portable EXE. ffprobe and FFmpeg are bundled.
 
-De portable variant `dist/SegmentScraper-Desktop-1.9.5-x64-Portable.exe` blijft ook beschikbaar voor gebruik zonder installatie. Beide varianten bevatten ffprobe en hebben geen losse Node.js-, browser- of FFmpeg-installatie nodig. Je hoeft geen server te starten of URL te openen. Sluiten van het venster sluit ook de backend af.
+1. Choose local files/a season folder, or connect the same TorBox account used in Nuvio. Torrents, Usenet and web downloads are supported. Real-Debrid supports existing torrents. No content is added to TorBox.
+2. Inspect directly from your provider, or download and inspect. Remote inspection uses bandwidth and may read substantial data. Completed downloads remain on disk.
+3. Choose **Review for IntroDB** on a completed inspection. No chapters means ffprobe found no embedded chapter entries, not that the video has no intro or credits. Inspect the downloaded file to rule out remote-access limitations. Short videos are flagged as possible trailers/samples.
+4. Enter your IntroDB key, TMDB read access token for movies, and TheTVDB key/optional subscriber PIN for TV. Upload credentials stay in backend memory for this session; saving replaces all four fields. Provider accounts can separately be remembered using Electron safeStorage encryption.
+5. Search by title or IMDb ID and select the correct movie/series. For TV, enter the actual episode title and positive season/episode numbers. Season 0/specials are excluded.
+6. For movies, choose **Analyze ending**. It automatically scans the last quarter (optionally half/full video), finds credit-like imagery/black transitions, and generates candidate scene boundaries, a 12× ending overview, and short boundary clips. Review these rather than watching the whole movie. Mark each candidate as a real scene or false positive. **Use detected timestamps** drops rejected candidates. Correct the times as needed and confirm the ending review.
+7. Run the checks. Review canonical numbering, exact payload, progress and blocking reasons. Watch and verify every boundary yourself, tick the required acknowledgment, and upload.
 
-## Nuvio → TorBox → SegmentScraper
+## Checks and script parity
 
-1. Kies TorBox en voer de API-sleutel in van **hetzelfde TorBox-account dat je in Nuvio gebruikt**.
-2. Klik op **Verbinden**. De app leest bestaande torrents, Usenet-downloads en webdownloads via de drie TorBox-bibliotheekendpoints. Je hoeft geen magnetlinks, NZB-bestanden of links uit Nuvio over te nemen. Dit voegt geen content toe aan TorBox.
-3. Zoek op naam of filter op onderdeel. **Alleen direct beschikbaar** toont downloads die volgens TorBox afgerond én aanwezig zijn. Een losse `cached`-indicator is onvoldoende: verlopen/verwijderde bestanden worden niet als beschikbaar voorgesteld.
-4. Open een film of seizoenspakket en selecteer video's. **Alles selecteren** verwerkt het volledige beschikbare seizoen. Niet-video's, TorBox ZIP-items en geïnfecteerde bestanden worden overgeslagen.
-5. **Chapters lezen via provider** laat ffprobe rechtstreeks via een tijdelijke providerlink lezen. Dit bewaart geen video lokaal, maar gebruikt wel providerbandbreedte. De hoeveelheid verkeer hangt van bestand en server af; het is niet gegarandeerd slechts een klein metadata-request. Werkt dit niet, kies dan **Selectie downloaden & controleren**.
-6. Downloads worden per bestand in een eigen map bewaard en daarna gecontroleerd. Standaard: de Windows Downloads-map onder `SegmentScraper`. **Downloadmap kiezen** past de bestemming voor nieuwe taken aan.
-7. Bekijk chapters in de wachtrij en exporteer rapporten via het native Opslaan-venster.
+`build/desktop-core.cjs` generates `app/shared-core.mjs` from the existing userscript modules. Build/test hooks regenerate it. TVDB episode matching, normalized unique titles, ambiguity rejection, translated titles and TMDB extra-scene detection use the existing implementation.
 
-De app toont wat TorBox via jouw accountbibliotheek beschikbaar stelt. Hij leest Nuvio's kijkgeschiedenis niet en doorzoekt niet de volledige gedeelde TorBox-cache. Ontbreekt iets, controleer het account, zet het beschikbaarheidsfilter uit en ververs. Een fout voor één TorBox-onderdeel laat de andere onderdelen zichtbaar, met een melding over het ontbrekende onderdeel.
+The desktop checks finite numeric boundaries, ordering, overlap and actual duration. Both clients share timing rules and the IntroDB payload builder in `src/core/output-policy.js`: minimum 5 seconds; movie outro/post-credits maximums 900/600 seconds. IntroDB does not accept movie intro/recap submissions. IMDb identity/media type are verified. Missing TMDB keywords do not prove scene absence.
 
-Real-Debrid ondersteunt bestaande torrents, inclusief bestandsselectie indien vereist. Bibliotheekitems blijven bij de provider staan. Wissen van afgeronde taken verwijdert alleen lokale wachtrijrapporten.
+**Intentional policy difference:** the online userscript still withholds the entire movie when extra scenes are known. Desktop accepts a reviewed, scene-safe outro plus a separately bounded scene. Known chapter/IntroDB/TMDB scene indications cannot silently disappear: a missing scene range blocks normal upload. Final acknowledgment is always required.
 
-## Lokale bestanden en accounts
+## Analysis and IntroDB movie convention
 
-**Bestanden kiezen** selecteert films/afleveringen; **Seizoensmap kiezen** neemt submappen mee. Absolute paden plakken kan ook. Ondersteund: MKV, MP4, M4V, AVI, MOV, WebM, TS en M2TS.
+The [movie documentation](https://introdb.app/docs/movies) explicitly says the outro ends at the scene start and post-credits covers the actual scene, including mid-credits scenes. Its older worked example overlaps the ranges; desktop follows the explicit mid-credits rule to avoid skipping a scene. `mid-credits` is a local classification, not an API segment type. The wire type remains `post-credits`. No invented `credits_start`, `film_einde`, `credit_part`, or scene-array fields are sent.
 
-**Account versleuteld onthouden** bewaart de sleutel met Electron safeStorage (Windows DPAPI) in de gebruikersgegevensmap van SegmentScraper. Zonder deze optie blijft hij alleen in geheugen. Een onthouden TorBox-account wordt bij starten verbonden. Voor andere providers kies je de provider en **Opgeslagen account verbinden**. **Loskoppelen** verwijdert ook de onthouden sleutel. Ingeplande taken behouden hun verbinding tot afronden/annuleren. Sleutels en ondertekende downloadlinks worden niet in de interface, logs of rapporten teruggegeven.
+IntroDB returns one aggregated scene and does not model credits after that scene. Multiple same-type submissions would compete in aggregation; they are not a multi-scene playlist. Desktop preserves all candidates locally, but more than one confirmed real scene cannot be uploaded or bypassed with an admin code. Reject false positives before validation, or export the full report for a truly multi-scene movie. The app never merges several scenes into one fabricated range or uses EOF as the scene end.
 
-Het venster gebruikt context isolation, renderer sandboxing en uitgeschakelde Node-integratie. Preload biedt alleen vaste native kies-/exportacties aan; IPC controleert het afzenderframe. De interne backend luistert alleen op 127.0.0.1 op een willekeurige vrije poort.
+FFmpeg decodes only the chosen window. Full-rate black detection is combined with dark-background text-component heuristics at 320×180 / 2 fps. Candidate resolution is approximately 0.5 seconds; nearby black transitions refine boundaries. Credits over live action, stylized graphics, dark scenes, logos and scenes without fades can confuse the heuristic. No candidates means unknown, not proven absence. A candidate reaching EOF without an end transition remains unresolved. Review the 12× overview and boundary clips and correct or widen the scan when needed. This has synthetic-video regression coverage, not a measured accuracy claim on a representative film dataset.
 
-## Chaptercontrole en grenzen
+Preview clips are generated locally with FFmpeg and exposed only by opaque IDs on the loopback server. Source paths and provider URLs are not preview endpoints. They are deleted on clear/normal shutdown; a forced crash may leave `segmentscraper-analysis-*` temporary folders. Provider analysis obtains a fresh private link and uses provider bandwidth for scanning and previews; download locally if the provider cannot seek reliably. Cancellation stops FFmpeg. Reports include candidate evidence and warnings, not source links or keys.
 
-- Originele chaptertijden blijven behouden; ongeldige grenzen, overlap/volgorde en grenzen buiten de speelduur worden gemeld.
-- Intro, Opening, Recap, Credits en Post-credits zijn **suggesties ter beoordeling**, geen bewezen segmentgrenzen. Gewone hoofdstuknummers leveren geen verzonnen segmenten op.
-- Zonder chapters volgt “Geen chapters aanwezig”. Nog geen automatische beeld-/audioherkenning, videoscrubber, IMDb/TVDB-mapping of IntroDB-upload.
-- Kies Film of Serie bij **Type voor controle**. Automatisch herkent S01E01 en 1x01; andere namen blijven onbekend. Nummering is niet geverifieerd bij TVDB. Dubbelafleveringen vereisen beoordeling.
-- Wachtrij/rapporten staan in geheugen: exporteer vóór afsluiten. Sluiten tijdens actieve taken geeft een waarschuwing. Voltooide downloads blijven bewaard, ook bij fouten in chaptercontrole.
-- Downloads lopen één voor één. Bij normale fouten/annulering worden tijdelijke `.part`-bestanden verwijderd. Geen automatische hervatting/retries. Na geforceerd afsluiten kunnen `.part`-bestanden achterblijven. Voeg volledig gedownloade video's opnieuw lokaal toe om een controle te herhalen.
-- Maximaal 5000 actieve bestanden. Probe-timeout: 2 minuten; download-timeout: 6 uur. Lezen/downloaden gebruikt providerquota.
-- De EXE is een lokale, niet code-ondertekende ontwikkelbuild. Geen automatische updater.
+A local selection is an incomplete catalogue: the desktop requires exact, unique episode-title matching rather than inferring order from equal counts. The shared TVDB loader follows pagination. Movies bypass TVDB. Duplicates are checked against fresh IntroDB data: exact ranges are skipped, differing ranges may be submitted as corrections. Network errors block instead of implying an empty database. Successful session submissions are tracked to avoid repeats. Failed/uncertain uploads stop the batch and require fresh checks before retrying. Requests time out after 15 seconds; checks expire after 15 minutes. Editing requires new checks.
 
-## Bouwen en testen
+Queue, drafts and reports are in memory. Export inspection/upload results before closing.
 
-Gebruik Node.js 22+ en npm:
+## Admin override
+
+Set `SEGMENTSCRAPER_ADMIN_CODE` in the desktop process environment before starting it. No default or hard-coded code is shipped. The backend uses a constant-time digest comparison and attempt limit. Force upload requires personal review and a written reason. Failed checks and the reason are recorded in `upload-audit.jsonl` in Electron's user-data directory, without the code/API keys.
+
+This local operator override bypasses review-policy failures, including unavailable lookups. It cannot bypass malformed IDs, invalid/out-of-video/overlapping boundaries, unsupported multiple scene ranges, specials, the update gate, or IntroDB authentication/validation/rate limits. People controlling the local installation can change its configuration; centralized administrative enforcement requires a separate trusted service.
+
+## Required updates
+
+Electron checks stable GitHub releases on startup and every 30 minutes. Only releases with a Windows Setup asset count. A confirmed newer version opens a non-dismissible dialog and blocks backend mutations until installation and restart. Reports remain exportable. The button opens the fixed repository releases page; the user installs the update. Known mandatory versions persist offline. A failed first check is not mistaken for an available update.
+
+Publish a higher version with `SegmentScraper-Desktop-VERSION-x64-Setup.exe` on a stable GitHub release. A userscript-only update cannot lock the desktop. Version 1.9.5 needs a one-time manual upgrade because it has no checker. Builds are currently not code-signed.
+
+## Development
 
 ```powershell
 npm ci
 npm run setup:media
+npm test
 npm run app
 npm run dist:win
-node --test
 ```
 
-`start-app.cmd` start de ontwikkelversie na installatie van dependencies. De Windows-build verschijnt in `dist`. `setup:media` downloadt FFmpeg 9.0.1 essentials van Gyan, controleert de vastgelegde SHA-256 en pakt de tools lokaal uit. Alleen ffprobe plus licentie en README worden meegebouwd; ffmpeg zelf dient voor testvideo's. Ontwikkelaars kunnen `FFPROBE_PATH` instellen voor een eigen binary.
+Browser development: `npm run app:web`, with `FFPROBE_PATH` and `FFMPEG_PATH` pointing to the corresponding binaries. Native dialogs, encrypted provider storage, persistent override audit and the desktop update checker belong to Electron. `DOWNLOAD_DIR` controls the web development download folder.
 
-`npm run dist:win` maakt zowel de installeerbare Setup-EXE als de portable EXE. Gebruik `npm run dist:win:setup` of `npm run dist:win:portable` om slechts één variant te bouwen.
+Applicable userscript changes must reach desktop in the same change (see root `AGENTS.md`). Regenerate both outputs. `node build/desktop-core.cjs --check` and CI detect stale desktop code; bundler tests detect stale userscript output. Client-specific movie scene policies have separate regression tests.
 
-Optionele browserontwikkeling: `node app/server.mjs`. Native kiezers/accountopslag zijn alleen beschikbaar in de desktopapp. Stel daarbij `FFPROBE_PATH` en eventueel `DOWNLOAD_DIR` in; deze ontwikkelserver downloadt standaard naar `app-data/downloads`.
+Tests cover real generated MKV chapters and mocked provider/IMDb/TVDB/TMDB/IntroDB requests, payloads, duplicates, failures, overrides and backend update enforcement. Live uploads require your own keys and reviewed timestamps.
 
-Tests dekken de drie bibliotheken, gescheiden IDs, gereedheid, directe links zonder toevoegen van content, fouten, chaptergrenzen, lokale/directe controles, wachtrij/annulering en accountopslag. Na `setup:media` draait ook de test met een echte gegenereerde MKV met chapters. Providerantwoorden worden gesimuleerd; een volledige live-test vereist een eigen account en beschikbare bestanden.
-
-`desktop/main.cjs` beheert venster/native dialogen; `desktop/vault.cjs` versleutelde opslag; `media.mjs` chaptercontrole; `providers.mjs` providerbibliotheken; `server.mjs` wachtrij/backend; `public/` de interface.
-
-Bronnen: [TorBox torrents](https://www.postman.com/torbox/torbox-api/documentation/b6l9hbv/main-api), [TorBox Usenet](https://github.com/TorBox-App/torbox-sdk-py/blob/main/documentation/services/UsenetService.md), [TorBox webdownloads](https://github.com/TorBox-App/torbox-sdk-py/blob/main/documentation/services/WebDownloadsDebridService.md), [Real-Debrid](https://api.real-debrid.com/), [ffprobe](https://ffmpeg.org/ffprobe.html), [FFmpeg Windows-build en broncode](https://www.gyan.dev/ffmpeg/builds/), [Electron safeStorage](https://www.electronjs.org/docs/latest/api/safe-storage).
+Reference: [official IntroDB docs](https://api.introdb.app/) and [OpenAPI schema](https://api.introdb.app/openapi.json), captured in `introdb-openapi.json` on 2026-09-20. Upload: `POST /submit`, `X-API-Key`, `imdb_id`, `segment_type`, `start_sec`, `end_sec`, plus `is_movie: true` or canonical `season`/`episode`. This is not TheIntroDB v3.
