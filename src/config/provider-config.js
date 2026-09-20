@@ -46,7 +46,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'TV series and Netflix movie credits are captured automatically. Other provider movie credits remain disabled while their markers are verified.',
   },
   disneyplus: {
     name: 'Disney+',
@@ -62,7 +62,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'Series segments are captured automatically. Movie credits are temporarily disabled while provider markers are verified.',
   },
   'prime-video': {
     name: 'Prime Video',
@@ -78,7 +78,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
+    captureHint: 'Series segments are fetched per episode. Movie credits are temporarily disabled while provider markers are verified.',
   },
   hbo: {
     name: 'HBO Max',
@@ -94,7 +94,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'Series segments are captured automatically. Movie credits are temporarily disabled while provider markers are verified.',
   },
   videoland: {
     name: 'Videoland',
@@ -110,7 +110,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
+    captureHint: 'Series segments are fetched per episode. Movie credits are temporarily disabled while provider markers are verified.',
   },
   skyshowtime: {
     name: 'SkyShowtime',
@@ -126,7 +126,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Series segments and movie credits are captured automatically from SkyShowtime catalogue metadata.',
+    captureHint: 'Series segments are captured automatically from SkyShowtime catalogue metadata. Movie credits are temporarily disabled while provider markers are verified.',
   },
 };
 

@@ -4,7 +4,7 @@
  */
 
 import { state, createState, createMediaCacheKey } from '../core/state.js';
-import { outputSegmentAllowed, capturedSegmentKey } from '../core/output-policy.js';
+import { outputSegmentAllowed, capturedSegmentKey, movieCaptureAllowedForProvider, providerCaptureAllowed } from '../core/output-policy.js';
 import { restoreCaptureSession, scheduleCaptureSave, saveCaptureSession, clearCaptureSession } from '../core/capture-session.js';
 import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
@@ -17,6 +17,7 @@ import { loadTvdbSettings, saveTvdbSettings, mapSeriesItemsToTvdb } from '../cor
 
 
 let activeProviderConfig = getProviderConfig('netflix');
+let activeProviderName = 'netflix';
 
 
 function getItemShowId(item) {
@@ -159,6 +160,14 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     updatePanelTitle();
   }
 
+  if (normalizedMediaType === 'movie' && !movieCaptureAllowedForProvider(activeProviderName)) {
+    state.dbSearchDone = true;
+    setDbStatus(`${activeProviderConfig.name} movie credit capture is temporarily disabled; TV series capture remains active.`);
+    setTvdbStatus('Movie capture is temporarily disabled');
+    updateCounters();
+    return;
+  }
+
   if (state.dbSearchDone || !state.showTitle) return;
   state.dbSearchDone = true;
 
@@ -215,9 +224,29 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
   });
 }
 
+function removeDisabledMovieCaptures(providerName) {
+  if (movieCaptureAllowedForProvider(providerName)) return 0;
+  const retained = state.allItems.filter(item => providerCaptureAllowed(item, providerName));
+  const removed = state.allItems.length - retained.length;
+  if (!removed) return 0;
+  state.allItems = retained;
+  scheduleCaptureSave();
+  updateCounters();
+  console.info(`[NFE] Removed ${removed} movie capture(s); movie credits are temporarily disabled for ${activeProviderConfig.name}.`);
+  return removed;
+}
+
 /** Store extractor output and update the shared counters/toast identically. */
-export function recordExtractedSegments(items) {
+export function recordExtractedSegments(items, providerName = activeProviderName) {
   if (state.updateRequired) return;
+  if (!Array.isArray(items) || !items.length) return;
+  const receivedCount = items.length;
+  items = items.filter(item => providerCaptureAllowed(item, providerName));
+  if (items.length !== receivedCount) {
+    const providerLabel = activeProviderConfig?.name || providerName;
+    console.info(`[NFE] Skipped ${receivedCount - items.length} movie capture(s); movie credits are temporarily disabled for ${providerLabel}.`);
+    setDbStatus(`${providerLabel} movie credits are temporarily disabled; TV segments remain active.`);
+  }
   if (!items.length) return;
   const keys = new Set(state.allItems.map(capturedSegmentKey));
   items = items.filter(item => {
@@ -838,9 +867,11 @@ export function bootstrapProvider({
   setupInterception,
   isPlayerPage = () => Boolean(document.querySelector('video')),
 }) {
-  activeProviderConfig = getProviderConfig(providerName);
+  activeProviderName = String(providerName || 'netflix').trim().toLowerCase();
+  activeProviderConfig = getProviderConfig(activeProviderName);
   Object.assign(state, createState(activeProviderConfig.name));
-  restoreCaptureSession(providerName);
+  restoreCaptureSession(activeProviderName);
+  removeDisabledMovieCaptures(activeProviderName);
   window.addEventListener('pagehide', saveCaptureSession);
   document.addEventListener('visibilitychange', () => { if (document.hidden) saveCaptureSession(); });
   loadIntrodbSettings();

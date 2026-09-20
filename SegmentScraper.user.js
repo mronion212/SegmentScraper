@@ -111,16 +111,33 @@ const createState = (providerName) => ({
 const state = createState('Streaming Service');
 
 /** Shared wire format and timing rules for both clients. Client-specific scene policy stays explicit. */
+function isMovieSegment(item) {
+  return item?.is_movie === true || String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie';
+}
+
+/**
+ * Movie credit extraction is intentionally enabled only for Netflix for now.
+ * Other providers keep their TV extraction active while their movie markers
+ * are being verified against real playback.
+ */
+function movieCaptureAllowedForProvider(providerName) {
+  return String(providerName || '').trim().toLowerCase() === 'netflix';
+}
+
+function providerCaptureAllowed(item, providerName) {
+  return !isMovieSegment(item) || movieCaptureAllowedForProvider(providerName);
+}
+
 function capturedSegmentKey(item) {
   return JSON.stringify([String(item._showId || ''), String(item._eid), item.season, item.episode, item.segment_type, Number(item.start_sec), Number(item.end_sec)]);
 }
 function outputSegmentAllowed(item) {
-  const movie=item?.is_movie===true||String(item?.media_type||item?.mediaType||item?._mediaType||'').toLowerCase()==='movie';
+  const movie = isMovieSegment(item);
   const start=Number(item?.start_sec),end=Number(item?.end_sec);
   return Number.isFinite(start)&&Number.isFinite(end)&&start>=0&&end-start>=5&&(!movie||(['outro','post-credits'].includes(item.segment_type)&&end-start<=(item.segment_type==='outro'?900:600)));
 }
 function introdbPayload(item) {
-  const movie=item?.is_movie===true||String(item?.media_type||item?.mediaType||item?._mediaType||'').toLowerCase()==='movie';
+  const movie = isMovieSegment(item);
   return {imdb_id:item.imdb_id,segment_type:item.segment_type,start_sec:item.start_sec,end_sec:item.end_sec,...(movie?{is_movie:true}:{season:item.season,episode:item.episode})};
 }
 
@@ -1610,7 +1627,7 @@ const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'TV series and Netflix movie credits are captured automatically. Other provider movie credits remain disabled while their markers are verified.',
   },
   disneyplus: {
     name: 'Disney+',
@@ -1626,7 +1643,7 @@ const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'Series segments are captured automatically. Movie credits are temporarily disabled while provider markers are verified.',
   },
   'prime-video': {
     name: 'Prime Video',
@@ -1642,7 +1659,7 @@ const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
+    captureHint: 'Series segments are fetched per episode. Movie credits are temporarily disabled while provider markers are verified.',
   },
   hbo: {
     name: 'HBO Max',
@@ -1658,7 +1675,7 @@ const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'All available seasons and episodes are captured automatically.',
+    captureHint: 'Series segments are captured automatically. Movie credits are temporarily disabled while provider markers are verified.',
   },
   videoland: {
     name: 'Videoland',
@@ -1674,7 +1691,7 @@ const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
+    captureHint: 'Series segments are fetched per episode. Movie credits are temporarily disabled while provider markers are verified.',
   },
   skyshowtime: {
     name: 'SkyShowtime',
@@ -1690,7 +1707,7 @@ const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Series segments and movie credits are captured automatically from SkyShowtime catalogue metadata.',
+    captureHint: 'Series segments are captured automatically from SkyShowtime catalogue metadata. Movie credits are temporarily disabled while provider markers are verified.',
   },
 };
 
@@ -2642,6 +2659,7 @@ function injectBtn(providerName, getAnchor = getNextEpBtn) {
 
 
 let activeProviderConfig = getProviderConfig('netflix');
+let activeProviderName = 'netflix';
 
 
 function getItemShowId(item) {
@@ -2784,6 +2802,14 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
     updatePanelTitle();
   }
 
+  if (normalizedMediaType === 'movie' && !movieCaptureAllowedForProvider(activeProviderName)) {
+    state.dbSearchDone = true;
+    setDbStatus(`${activeProviderConfig.name} movie credit capture is temporarily disabled; TV series capture remains active.`);
+    setTvdbStatus('Movie capture is temporarily disabled');
+    updateCounters();
+    return;
+  }
+
   if (state.dbSearchDone || !state.showTitle) return;
   state.dbSearchDone = true;
 
@@ -2840,9 +2866,29 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
   });
 }
 
+function removeDisabledMovieCaptures(providerName) {
+  if (movieCaptureAllowedForProvider(providerName)) return 0;
+  const retained = state.allItems.filter(item => providerCaptureAllowed(item, providerName));
+  const removed = state.allItems.length - retained.length;
+  if (!removed) return 0;
+  state.allItems = retained;
+  scheduleCaptureSave();
+  updateCounters();
+  console.info(`[NFE] Removed ${removed} movie capture(s); movie credits are temporarily disabled for ${activeProviderConfig.name}.`);
+  return removed;
+}
+
 /** Store extractor output and update the shared counters/toast identically. */
-function recordExtractedSegments(items) {
+function recordExtractedSegments(items, providerName = activeProviderName) {
   if (state.updateRequired) return;
+  if (!Array.isArray(items) || !items.length) return;
+  const receivedCount = items.length;
+  items = items.filter(item => providerCaptureAllowed(item, providerName));
+  if (items.length !== receivedCount) {
+    const providerLabel = activeProviderConfig?.name || providerName;
+    console.info(`[NFE] Skipped ${receivedCount - items.length} movie capture(s); movie credits are temporarily disabled for ${providerLabel}.`);
+    setDbStatus(`${providerLabel} movie credits are temporarily disabled; TV segments remain active.`);
+  }
   if (!items.length) return;
   const keys = new Set(state.allItems.map(capturedSegmentKey));
   items = items.filter(item => {
@@ -3463,9 +3509,11 @@ function bootstrapProvider({
   setupInterception,
   isPlayerPage = () => Boolean(document.querySelector('video')),
 }) {
-  activeProviderConfig = getProviderConfig(providerName);
+  activeProviderName = String(providerName || 'netflix').trim().toLowerCase();
+  activeProviderConfig = getProviderConfig(activeProviderName);
   Object.assign(state, createState(activeProviderConfig.name));
-  restoreCaptureSession(providerName);
+  restoreCaptureSession(activeProviderName);
+  removeDisabledMovieCaptures(activeProviderName);
   window.addEventListener('pagehide', saveCaptureSession);
   document.addEventListener('visibilitychange', () => { if (document.hidden) saveCaptureSession(); });
   loadIntrodbSettings();
