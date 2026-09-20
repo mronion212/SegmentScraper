@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, copyFile, readdir } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, copyFile, readdir, mkdtemp } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -27,13 +27,15 @@ if (!existsSync(archive)) {
 if (createHash('sha256').update(await readFile(archive)).digest('hex') !== expectedHash)
   throw new Error('FFmpeg archive checksum mismatch; remove the archive and retry.');
 
-execFileSync('tar', ['-xf', archive, '-C', buildRoot], { windowsHide: true });
+// Isolate extraction so an older cached directory cannot silently win selection.
+const extractionRoot = await mkdtemp(path.join(buildRoot, 'extract-'));
+execFileSync('tar', ['-xf', archive, '-C', extractionRoot], { windowsHide: true });
 
-const dirs = await readdir(buildRoot);
+const dirs = await readdir(extractionRoot);
 const extractedName = dirs.find(name => /^ffmpeg-.+-essentials_build$/.test(name));
 if (!extractedName) throw new Error('Extracted FFmpeg directory not found.');
 
-const extracted = path.join(buildRoot, extractedName);
+const extracted = path.join(extractionRoot, extractedName);
 
 for (const file of ['ffprobe.exe', 'ffmpeg.exe'])
   await copyFile(path.join(extracted, 'bin', file), path.join(vendor, file));
