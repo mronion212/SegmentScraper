@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const test = require('node:test');
 
 test('recapturing restored segments does not duplicate data or discard distinct episode segments', () => {
-  const source = ['core/state.js', 'providers/bootstrap.js'].map(file => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
+  const source = ['core/state.js', 'core/output-policy.js', 'providers/bootstrap.js'].map(file => fs.readFileSync(path.join(__dirname, '../src', file), 'utf8')
     .replace(/^import .*$/gm, '').replace(/^export /gm, '')).join('\n');
   const context = vm.createContext({
     getProviderConfig: () => ({ name:'Test' }),

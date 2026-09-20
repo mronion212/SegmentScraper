@@ -3,7 +3,7 @@ import { state } from './state.js';
 
 let captureSessionKey = '';
 let captureSaveTimer = null;
-const CAPTURE_FIELDS = ['allItems', 'showTitle', 'showId', 'showYear', 'imdbId', 'imdbIdsByShowId', 'providerEpisodes', 'providerEpisodesByShowId', 'interceptedCount'];
+const CAPTURE_FIELDS = ['allItems', 'showTitle', 'mediaType', 'showId', 'showYear', 'imdbId', 'imdbIdsByShowId', 'providerEpisodes', 'providerEpisodesByShowId', 'interceptedCount'];
 
 export function saveCaptureSession() {
   if (!captureSessionKey) return;

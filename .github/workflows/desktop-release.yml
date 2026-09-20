@@ -1,0 +1,57 @@
+name: Build SegmentScraper desktop release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify release version
+        run: node -e "const v=require('./package.json').version;if(process.env.GITHUB_REF_NAME!=='v'+v)throw new Error('Release tag must match package.json version')"
+
+      - name: Reject stale desktop shared code
+        run: node build/desktop-core.cjs --check
+
+      - name: Download and verify FFmpeg and ffprobe
+        run: npm run setup:media
+
+      - name: Test both clients including FFmpeg analysis
+        run: npm test
+
+      - name: Build Windows installers
+        run: npm run dist:win -- --publish never
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          notes=()
+          if [[ -f "release-notes/${GITHUB_REF_NAME#v}.md" ]]; then
+            notes=(--notes-file "release-notes/${GITHUB_REF_NAME#v}.md")
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            dist/*-Setup.exe \
+            dist/*-Portable.exe \
+            --title "SegmentScraper $GITHUB_REF_NAME — Desktop Alpha 0.1" \
+            "${notes[@]}" \
+            --generate-notes

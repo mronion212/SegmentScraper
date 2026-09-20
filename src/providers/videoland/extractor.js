@@ -4,6 +4,7 @@
  */
 
 import { state } from '../../core/state.js';
+import { splitCreditRange } from '../../normalization/segment-mapper.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { recordProviderEpisode } from '../../core/tvdb.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
@@ -25,16 +26,30 @@ function coerceVideolandNumber(value) {
 function extractVideolandRootMeta(json) {
   const video = json?.seo?.video || null;
   const entity = json?.entity || null;
+  const parent = json?.seo?.parent || json?.parent || null;
+  const type = String(
+    json?.mediaType || json?.type || json?.videoType || json?.contentType ||
+    json?.seo?.mediaType || json?.seo?.type || json?.seo?.contentType ||
+    video?.mediaType || video?.type || video?.videoType || video?.contentType ||
+    entity?.mediaType || entity?.type || entity?.videoType || entity?.contentType || ''
+  ).trim().toLowerCase();
   return {
     entityId: entity?.id != null ? String(entity.id) : null,
     entity,
-    season: coerceVideolandNumber(video?.season),
-    episode: coerceVideolandNumber(video?.episode),
-    duration: coerceVideolandNumber(video?.duration),
-    programId: json?.seo?.parent?.id != null ? String(json.seo.parent.id) : null,
-    programTitle: json?.seo?.parent?.name || null,
-    episodeTitle: video?.name || video?.title || null,
-    extraTitle: video?.extraTitle || null,
+    mediaType: json?.isMovie === true || video?.isMovie === true || entity?.isMovie === true || ['movie', 'film', 'feature'].includes(type)
+      ? 'movie'
+      : 'tv',
+    season: coerceVideolandNumber(video?.season ?? entity?.season ?? json?.season),
+    episode: coerceVideolandNumber(video?.episode ?? entity?.episode ?? json?.episode),
+    duration: coerceVideolandNumber(video?.duration ?? entity?.duration ?? json?.duration),
+    programId: parent?.id != null
+      ? String(parent.id)
+      : (json?.programId ?? entity?.programId ?? entity?.seriesId) != null
+        ? String(json?.programId ?? entity?.programId ?? entity?.seriesId)
+        : null,
+    programTitle: parent?.name || json?.programTitle || json?.seriesTitle || null,
+    episodeTitle: video?.name || video?.title || entity?.episodeTitle || entity?.episodeName || null,
+    extraTitle: video?.extraTitle || entity?.extraTitle || null,
   };
 }
 
@@ -62,9 +77,21 @@ function mapVideolandChapterType(type) {
   return null;
 }
 
-function updateVideolandTitle(title, programId) {
+function isVideolandMovieCreditsType(type) {
+  return [
+    'ending_credits',
+    'endingcredits',
+    'end_credits',
+    'endcredits',
+    'closing_credits',
+    'closingcredits',
+    'credits',
+  ].includes(String(type || '').trim().toLowerCase());
+}
+
+function updateVideolandTitle(title, programId, mediaType = 'tv') {
   const showId = String(programId || title);
-  handleDetectedShow({ title, showId });
+  handleDetectedShow({ title, showId, mediaType });
   return showId;
 }
 
@@ -135,17 +162,94 @@ export function processVideolandLayout(json) {
   const clipId = String(activeItem.video.id);
   const season = rootMeta.season;
   const episode = rootMeta.episode;
-  const title = (rootMeta.programTitle || activeItem.title || '').trim();
+  const hasMovieCreditsChapter = (activeItem.video.chapters || []).some(chapter => isVideolandMovieCreditsType(chapter.type));
+  const isMovie = rootMeta.mediaType === 'movie' || (season == null && episode == null && hasMovieCreditsChapter);
+  const title = (rootMeta.programTitle || rootMeta.episodeTitle || activeItem.title || activeItem.video.title || activeItem.video.name || '').trim();
+  const mediaId = isMovie ? (rootMeta.programId || rootMeta.entityId || clipId) : rootMeta.programId;
   const episodeTitle = chooseVideolandEpisodeTitle(rootMeta, activeItem, title);
-  if (!episodeTitle) {
+  if (isMovie) {
+    console.info('[VLE] Movie metadata classified; skipping TVDB mapping.', {
+      title,
+      showId: mediaId,
+      clipId,
+    });
+  }
+  if (!isMovie && !episodeTitle) {
     console.warn('[VLE] No episode-specific title found; the series title will not be used for TVDB matching.', {
       clipId,
       seriesTitle: title,
     });
   }
-  const showId = updateVideolandTitle(title, rootMeta.programId);
+  const showId = updateVideolandTitle(title, mediaId, isMovie ? 'movie' : 'tv');
   const useGtstAbsoluteTitleMatch = isVideolandGtstSeries(title);
-  state.clipMap.set(clipId, { season, episode, title, showId });
+  state.clipMap.set(clipId, { season, episode, title, showId, mediaType: isMovie ? 'movie' : 'tv' });
+
+  if (isMovie) {
+    const extractedItems = [];
+    const chapters = activeItem.video.chapters || [];
+    const afterCreditsChapters = chapters.filter(chapter => [
+      'after_credits',
+      'aftercredits',
+      'after_credits_scene',
+      'aftercreditsscene',
+      'post_credits',
+      'postcredits',
+      'post_credits_scene',
+      'postcreditsscene',
+    ].includes(String(chapter.type || '').trim().toLowerCase()));
+    const afterCreditsChapter = afterCreditsChapters.slice().sort((a, b) => Number(a.tcStart) - Number(b.tcStart))[0];
+    const creditChapters = chapters.filter(chapter => isVideolandMovieCreditsType(chapter.type)
+      && coerceVideolandNumber(chapter.tcStart) != null && coerceVideolandNumber(chapter.tcEnd) != null
+      && Number(chapter.tcEnd) > Number(chapter.tcStart));
+    const fullCredits = creditChapters.length ? [{
+      type: creditChapters[0].type,
+      tcStart: Math.min(...creditChapters.map(chapter => Number(chapter.tcStart))),
+      tcEnd: Math.max(...creditChapters.map(chapter => Number(chapter.tcEnd))),
+    }] : [];
+    for (const chapter of fullCredits) {
+      const chapterType = String(chapter.type || '').trim().toLowerCase();
+      if (!isVideolandMovieCreditsType(chapterType)) continue;
+      const startSec = coerceVideolandNumber(chapter.tcStart);
+      const endSec = coerceVideolandNumber(chapter.tcEnd);
+      if (startSec == null || endSec == null || endSec <= startSec) continue;
+
+      const ranges = splitCreditRange({
+        startSec,
+        endSec,
+        afterCreditsDetected: afterCreditsChapters.length > 0,
+        afterCreditsStartSec: coerceVideolandNumber(afterCreditsChapter?.tcStart),
+        afterCreditsEndSec: coerceVideolandNumber(afterCreditsChapter?.tcEnd),
+      });
+      for (const range of ranges) {
+        const episodeId = `${clipId}_movie_${range.segmentType || 'outro'}${range.creditPart ? `_${range.creditPart}` : ''}`;
+        if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+        extractedItems.push({
+          _eid: episodeId,
+          _episodeTitle: title,
+          _showId: showId,
+          media_type: 'movie',
+          ...(range.creditPart ? { credit_part: range.creditPart } : {}),
+          imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
+          segment_type: range.segmentType || 'outro',
+          season: null,
+          episode: null,
+          start_sec: range.startSec,
+          end_sec: range.endSec,
+        });
+      }
+    }
+    logCapturedTimestamps({
+      prefix: 'VLE',
+      showTitle: title,
+      mediaType: 'movie',
+      episodeTitle: title,
+      providerIdLabel: 'clipId',
+      providerId: clipId,
+      items: extractedItems,
+    });
+    recordExtractedSegments(extractedItems);
+    return;
+  }
 
   if (season != null && episode != null) {
     state.currentSeason = season;

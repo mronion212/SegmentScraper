@@ -2,6 +2,14 @@
 .env
 .env.local
 .env.*.local
+app-data/
+node_modules/
+dist/
+.npm-cache/
+.electron-cache/
+.builder-cache/
+.media-build/
+vendor/ffmpeg/
 
 # API keys and secrets
 *.key

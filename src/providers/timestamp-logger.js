@@ -18,6 +18,7 @@ export function formatCapturedTimestamp(seconds) {
 export function logCapturedTimestamps({
   prefix,
   showTitle,
+  mediaType = 'tv',
   season,
   episode,
   episodeTitle = '',
@@ -27,12 +28,15 @@ export function logCapturedTimestamps({
 }) {
   if (!items.length) return;
 
-  const episodeLabel = `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
+  const episodeLabel = String(mediaType).toLowerCase() === 'movie'
+    ? 'MOVIE'
+    : `S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
   const details = {
     title: episodeTitle || '',
     ...(providerId != null && providerId !== '' ? { [providerIdLabel]: providerId } : {}),
     segments: items.map(item => ({
       type: item.segment_type,
+      ...(item.credit_part ? { credit_part: item.credit_part } : {}),
       start: formatCapturedTimestamp(item.start_sec),
       end: formatCapturedTimestamp(item.end_sec),
       start_sec: item.start_sec,

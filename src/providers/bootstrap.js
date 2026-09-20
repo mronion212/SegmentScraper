@@ -3,14 +3,16 @@
  * The Netflix UI/controls are the single source of truth for every provider.
  */
 
+import { state, createState, createMediaCacheKey } from '../core/state.js';
+import { outputSegmentAllowed, capturedSegmentKey } from '../core/output-policy.js';
 import { restoreCaptureSession, scheduleCaptureSave, saveCaptureSession, clearCaptureSession } from '../core/capture-session.js';
-import { state, createState, createEpisodeCacheKey } from '../core/state.js';
 import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
 import { injectBtn, getNextEpBtn, removePlayerButton } from '../ui/button.js';
 import { setProviderName, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput, showExportPreview, showRequiredUpdate } from '../ui/panel.js';
 import { getProviderConfig } from '../config/provider-config.js';
 import { loadIntrodbSettings, saveIntrodbSettings } from '../core/introdb-settings.js';
+import { checkTmdbExtraScenes, saveTmdbToken } from '../core/tmdb.js';
 import { loadTvdbSettings, saveTvdbSettings, mapSeriesItemsToTvdb } from '../core/tvdb.js';
 
 
@@ -19,6 +21,75 @@ let activeProviderConfig = getProviderConfig('netflix');
 
 function getItemShowId(item) {
   return item?._showId != null ? String(item._showId) : '';
+}
+
+function getItemMediaType(item) {
+  return String(item?.media_type || item?.mediaType || item?._mediaType || 'tv').toLowerCase() === 'movie'
+    ? 'movie'
+    : 'tv';
+}
+
+function isMovieItem(item) {
+  return getItemMediaType(item) === 'movie';
+}
+
+function getItemCacheKey(item) {
+  return createMediaCacheKey(item.imdb_id, getItemMediaType(item), item.season, item.episode);
+}
+
+function hasTvItems(items) {
+  return items.some(item => !isMovieItem(item));
+}
+
+function hasExistingSegment(existing, item) {
+  if (!existing) return false;
+  const ranges = existing.rangesByType?.get(item.segment_type);
+  if (ranges?.length) {
+    const start = Number(item.start_sec);
+    const end = Number(item.end_sec);
+    return ranges.some(range => {
+      const sameRange = Number.isFinite(start) && Number.isFinite(end) &&
+        Math.abs(Number(range.startSec) - start) < 0.01 &&
+        Math.abs(Number(range.endSec) - end) < 0.01;
+      if (!sameRange) return false;
+      return !item.credit_part || !range.creditPart || item.credit_part === range.creditPart;
+    });
+  }
+  return existing.has?.(item.segment_type) ?? false;
+}
+
+// Temporary policy: exclude the entire movie when an extra scene is known.
+// Missing provider/IntroDB markers are unknown, not evidence of scene absence.
+async function filterMoviesWithKnownExtraScenes(items, existingByKey) {
+  const excluded = new Set();
+  for (const item of [...state.allItems, ...items]) {
+    if (isMovieItem(item) && item.segment_type === 'post-credits') excluded.add(getItemCacheKey(item));
+  }
+  for (const item of items) {
+    if (!isMovieItem(item)) continue;
+    const key = getItemCacheKey(item);
+    const existing = existingByKey.get(key);
+    if (existing?.has?.('post-credits') || existing?.rangesByType?.get('post-credits')?.length) excluded.add(key);
+  }
+  const movieIds = [...new Set(items.filter(isMovieItem).filter(item => !excluded.has(getItemCacheKey(item))).map(item => item.imdb_id))];
+  const tmdbResults = new Map();
+  if (movieIds.length) toast(`Checking TMDB for extra scenes (${movieIds.length} movie(s))...`);
+  for (const id of movieIds) tmdbResults.set(id, await checkTmdbExtraScenes(id));
+  const notified = new Set();
+  return items.filter(item => {
+    if (!isMovieItem(item)) return true;
+    const key = getItemCacheKey(item);
+    const tmdb = tmdbResults.get(item.imdb_id);
+    const knownScene = excluded.has(key) || tmdb?.status === 'present';
+    if (!knownScene && tmdb?.status === 'unknown') return true;
+    if (!notified.has(key)) {
+      toast(knownScene
+        ? `Movie ${item.imdb_id}: extra scene detected${tmdb?.status === 'present' ? ' by TMDB' : ''}; entire movie temporarily excluded.`
+        : `Movie ${item.imdb_id}: ${tmdb?.reason || 'TMDB check unavailable'}; export and upload withheld.`);
+      notified.add(key);
+    }
+    return false;
+  });
 }
 
 function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
@@ -43,7 +114,7 @@ export function setDbStatus(msg) {
   const feedback = document.getElementById('nfe-imdb-feedback');
   if (feedback) feedback.textContent = msg;
   const el = document.getElementById('nfe-imdb-status');
-  if (el) el.textContent = `IMDb ID: ${state.imdbId || 'Not set'}`;
+  if (el) el.textContent = `${state.mediaType === 'movie' ? 'Movie' : 'TV'} · IMDb ID: ${state.imdbId || 'Not set'}`;
 }
 
 export function setIntrodbStatus(msg) {
@@ -61,15 +132,18 @@ export function setTvdbStatus(msg) {
 }
 
 /** Apply the shared IMDb flow after an extractor discovers a show. */
-export function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null }) {
+export function handleDetectedShow({ title, showId = null, year = '', imdbOverride = null, mediaType = 'tv' }) {
   if (state.updateRequired) return;
   const normalizedShowId = showId != null ? String(showId) : null;
+  const normalizedMediaType = String(mediaType).toLowerCase() === 'movie' ? 'movie' : 'tv';
   const showChanged = Boolean(title) && (
     title !== state.showTitle ||
-    (normalizedShowId && normalizedShowId !== state.showId)
+    (normalizedShowId && normalizedShowId !== state.showId) ||
+    normalizedMediaType !== (state.mediaType || 'tv')
   );
   if (showChanged) {
     state.showTitle = title;
+    state.mediaType = normalizedMediaType;
     state.showId = normalizedShowId;
     if (state.showId) state.showIds.add(state.showId);
     state.showYear = year ? String(year) : '';
@@ -77,6 +151,11 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     state.imdbId = '';
     state.dedupCacheV2 = {};
     state.providerEpisodes = [];
+    updateImdbInput();
+    setDbStatus(`Detected ${normalizedMediaType === 'movie' ? 'movie' : 'TV series'}; looking up IMDb...`);
+    setTvdbStatus(normalizedMediaType === 'movie'
+      ? 'TVDB is not needed for movies'
+      : (state.tvdbApiKey ? 'TVDB credentials saved locally' : ''));
     updatePanelTitle();
   }
 
@@ -86,9 +165,10 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
   const lookupTitle = state.showTitle;
   const lookupYear = state.showYear;
   const lookupShowId = state.showId;
+  const lookupMediaType = state.mediaType || 'tv';
   const isCurrentShow = () => lookupShowId
-    ? state.showId === lookupShowId
-    : state.showTitle === lookupTitle;
+    ? state.showId === lookupShowId && (state.mediaType || 'tv') === lookupMediaType
+    : state.showTitle === lookupTitle && (state.mediaType || 'tv') === lookupMediaType;
 
   const cachedImdbId = lookupShowId && state.imdbIdsByShowId?.[lookupShowId];
   if (!imdbOverride && cachedImdbId) {
@@ -110,8 +190,13 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     return;
   }
 
-  searchImdbByTitle(lookupTitle, lookupYear).then(result => {
+  searchImdbByTitle(lookupTitle, lookupYear, { mediaType: lookupMediaType }).then(result => {
     if (result.success) {
+      console.info('[NFE] IMDb media resolved:', {
+        mediaType: lookupMediaType,
+        title: lookupTitle,
+        imdbId: result.imdbId,
+      });
       applyImdbIdToShow(result.imdbId, lookupShowId);
       if (!isCurrentShow()) return;
       state.imdbId = result.imdbId;
@@ -131,10 +216,6 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
 }
 
 /** Store extractor output and update the shared counters/toast identically. */
-function capturedSegmentKey(item) {
-  return JSON.stringify([item._showId, item._eid, item.season, item.episode, item.segment_type, item.start_sec, item.end_sec]);
-}
-
 export function recordExtractedSegments(items) {
   if (state.updateRequired) return;
   if (!items.length) return;
@@ -154,8 +235,8 @@ export function recordExtractedSegments(items) {
 }
 
 export function isAlreadyInIntroDB(item) {
-  const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-  return state.dedupCacheV2[key]?.has(item.segment_type) ?? false;
+  const key = getItemCacheKey(item);
+  return hasExistingSegment(state.dedupCacheV2[key], item);
 }
 
 function hasExistingSegment(existing, item) {
@@ -183,13 +264,16 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
     toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
   }
 
+  const validItems = capturedItems.filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING');
+  const movieItems = validItems.filter(isMovieItem);
   const seriesGroups = new Map();
-  for (const item of capturedItems.filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')) {
+  for (const item of validItems.filter(item => !isMovieItem(item))) {
     if (!seriesGroups.has(item.imdb_id)) seriesGroups.set(item.imdb_id, []);
     seriesGroups.get(item.imdb_id).push(item);
   }
 
-  const items = [];
+  // Movies have no season/episode pair and deliberately bypass TVDB mapping.
+  const items = movieItems.slice();
   let unreliableSkipped = 0;
   let specialSegmentsExcluded = 0;
   const reasonLabels = {
@@ -248,16 +332,22 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
   };
 }
 
-const MIN_OUTPUT_SEGMENT_DURATION_SECONDS = 5;
-
 function filterShortOutputSegments(items) {
-  return items.filter(item => {
-    const start = Number(item?.start_sec);
-    const end = Number(item?.end_sec);
-    return Number.isFinite(start)
-      && Number.isFinite(end)
-      && end - start >= MIN_OUTPUT_SEGMENT_DURATION_SECONDS;
-  });
+  return items.filter(outputSegmentAllowed);
+}
+
+function normalizeMovieExportItem(item) {
+  return {
+    imdb_id: item.imdb_id,
+    is_movie: true,
+    segment_type: item.segment_type,
+    start_sec: item.start_sec,
+    end_sec: item.end_sec,
+  };
+}
+
+function normalizeExportItem(item) {
+  return isMovieItem(item) ? normalizeMovieExportItem(item) : item;
 }
 
 async function loadCanonicalExisting(episodeKeys) {
@@ -298,7 +388,7 @@ async function prepareJSONExport() {
   };
   const refresh = showExportPreview(view);
   try {
-    if (!state.tvdbApiKey) {
+    if (hasTvItems(capturedItems) && !state.tvdbApiKey) {
       revealApiSettings();
       toast('Please enter your own TVDB API key before exporting JSON.');
       setTvdbStatus('No TVDB API key configured');
@@ -326,18 +416,18 @@ async function prepareJSONExport() {
         row.reason = '';
         if (!filterShortOutputSegments([item]).length) {
           row.status = 'Unavailable';
-          row.reason = 'Invalid timestamp or segment shorter than 5 seconds';
+          row.reason = 'Invalid duration or unsupported segment type';
         }
       }
     }
     let items = filterShortOutputSegments(mappedItems);
     const shortSegmentCount = mappedItems.length - items.length;
     if (shortSegmentCount > 0) {
-      toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds removed from export.`);
+      toast(`${shortSegmentCount} invalid or unsupported segment(s) removed from export.`);
     }
     if (!items.length) {
       if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-        toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was exported.`);
+        toast(`All mapped segments have invalid durations or unsupported movie types; nothing was exported.`);
         return;
       }
       const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
@@ -348,7 +438,7 @@ async function prepareJSONExport() {
 
     const episodeKeys = [...new Set(
       items
-        .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
+        .map(item => getItemCacheKey(item))
     )];
     toast(`Checking IntroDB for existing segments (${episodeKeys.length} media item(s))...`);
     const canonicalExisting = new Map();
@@ -362,8 +452,17 @@ async function prepareJSONExport() {
       }));
     }
 
+    const eligibleMovies = await filterMoviesWithKnownExtraScenes(items.filter(item => !canonicalExisting.get(getItemCacheKey(item))?.error), canonicalExisting);
+    const eligibleSet = new Set(eligibleMovies);
+    for (const item of items) {
+      if (isMovieItem(item) && !canonicalExisting.get(getItemCacheKey(item))?.error && !eligibleSet.has(item)) {
+        const row = view.rows[item[overviewSource]];
+        if (row) { row.status = 'Unavailable'; row.reason = 'Movie excluded by extra-scene checks'; }
+      }
+    }
+    items = items.filter(item => !isMovieItem(item) || canonicalExisting.get(getItemCacheKey(item))?.error || eligibleSet.has(item));
     items = items.filter(item => {
-      const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
+      const key = getItemCacheKey(item);
       const existing = canonicalExisting.get(key);
       const row = view.rows[item[overviewSource]];
       const failed = Boolean(existing.error);
@@ -384,7 +483,7 @@ async function prepareJSONExport() {
       return;
     }
 
-    const exportItems = items;
+    const exportItems = items.map(normalizeExportItem);
     const groups = new Map();
     for (const item of exportItems) {
       const key = item.imdb_id || 'no_id';
@@ -408,7 +507,9 @@ async function prepareJSONExport() {
     let downloaded = 0;
     function downloadNext(index) {
       if (index >= files.length) {
-        toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+        const summary = `${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`;
+        document.getElementById('nfe-export-preview')?.remove();
+        resetCapturedData(`${summary}; captured data cleared.`);
         return;
       }
       const file = files[index];
@@ -480,9 +581,10 @@ async function prepareIntroDBSubmission() {
     setIntrodbStatus('No API key configured');
     return;
   }
-  if (!state.tvdbApiKey) {
+  const requiresTvdb = hasTvItems(state.allItems);
+  if (requiresTvdb && !state.tvdbApiKey) {
     revealApiSettings();
-    toast('Please enter your own TVDB API key in API settings.');
+    toast('Please enter your own TVDB API key in the panel above.');
     setTvdbStatus('No TVDB API key configured');
     return;
   }
@@ -492,7 +594,7 @@ async function prepareIntroDBSubmission() {
   }
 
   state.submitInProgress = true;
-  updateSubmitBtn('Checking TVDB...');
+  updateSubmitBtn(requiresTvdb ? 'Checking TVDB...' : 'Preparing submission...');
   const stopSubmission = () => {
     state.submitInProgress = false;
     updateSubmitBtn('Submit to IntroDB');
@@ -504,33 +606,42 @@ async function prepareIntroDBSubmission() {
   const allMapped = filterShortOutputSegments(mappedItems);
   const shortSegmentCount = mappedItems.length - allMapped.length;
   if (shortSegmentCount > 0) {
-    toast(`${shortSegmentCount} segment(s) shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds skipped.`);
+    toast(`${shortSegmentCount} invalid or unsupported segment(s) skipped.`);
   }
   if (!allMapped.length) {
     if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-      toast(`All mapped segments are shorter than ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds; nothing was submitted.`);
-      setIntrodbStatus(`Nothing submitted: segments must be at least ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds`);
+      toast(`All mapped segments have invalid durations or unsupported movie types; nothing was submitted.`);
+      setIntrodbStatus(`Nothing submitted: segments must be at least 5 seconds`);
       stopSubmission();
       return;
     }
     const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
-    toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : 'No series has a reliable TVDB episode mapping; nothing was submitted.');
-    setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : 'Submission blocked: TVDB mapping unavailable or unreliable');
+    const noMappingMessage = hasTvItems(mapped.capturedItems)
+      ? 'No series has a reliable TVDB episode mapping; nothing was submitted.'
+      : 'No movie has a usable IMDb ID; nothing was submitted.';
+    toast(onlySpecials ? 'Only provider specials were captured; nothing was submitted.' : noMappingMessage);
+    setIntrodbStatus(onlySpecials ? 'Nothing submitted: specials are excluded' : noMappingMessage);
     stopSubmission();
     return;
   }
 
-  const episodeKeys = [...new Set(
+  const mediaKeys = [...new Set(
     allMapped
       .filter(item => item.imdb_id && item.imdb_id !== 'IMDB_PENDING')
-      .map(item => createEpisodeCacheKey(item.imdb_id, item.season, item.episode))
+      .map(getItemCacheKey)
   )];
-  toast(`Checking IntroDB for existing segments (${episodeKeys.length} media item(s))...`);
-  const canonicalExisting = await loadCanonicalExisting(episodeKeys);
+  toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
+  const canonicalExisting = await loadCanonicalExisting(mediaKeys);
 
-  const items = allMapped.filter(item => {
-    const key = createEpisodeCacheKey(item.imdb_id, item.season, item.episode);
-    return !canonicalExisting.get(key)?.has(item.segment_type);
+  const safeMapped = await filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
+  if (!safeMapped.length) {
+    setIntrodbStatus('Nothing submitted: extra scene detected or TMDB check unavailable');
+    stopSubmission();
+    return;
+  }
+  const items = safeMapped.filter(item => {
+    const key = getItemCacheKey(item);
+    return !hasExistingSegment(canonicalExisting.get(key), item);
   });
   const skipped = capturedItems.length - items.length;
   if (!items.length) {
@@ -556,8 +667,13 @@ async function prepareIntroDBSubmission() {
       state.submitInProgress = false;
       const { ok, fail } = state.submitResults;
       updateSubmitBtn('Submit to IntroDB');
-      toast(`IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
-      setIntrodbStatus(`${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
+      const summary = `IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`;
+      if (fail === 0 && ok > 0) {
+        resetCapturedData(`${summary}; captured data cleared.`);
+      } else {
+        toast(summary);
+        setIntrodbStatus(summary);
+      }
       return;
     }
 
@@ -583,9 +699,7 @@ async function prepareIntroDBSubmission() {
   sendNext(0);
 }
 
-export function clearData() {
-  if (state.submitInProgress || state.exportInProgress) { toast('Please wait until the current operation finishes.'); return; }
-  if (!confirm('Delete all captured timestamps?')) return;
+function resetCapturedData(message = 'Data cleared') {
   const introdbApiKey = state.introdbApiKey;
   const panelVisible = state.panelVisible;
   const { apiKey: tvdbApiKey, pin: tvdbPin } = loadTvdbSettings();
@@ -597,7 +711,13 @@ export function clearData() {
   setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
   setIntrodbStatus('');
   updateImdbInput();
-  toast('Data cleared');
+  toast(message);
+}
+
+export function clearData() {
+  if (state.submitInProgress || state.exportInProgress) { toast('Please wait until the current operation finishes.'); return; }
+  if (!confirm('Delete all captured timestamps?')) return;
+  resetCapturedData();
 }
 
 function revealApiSettings() {
@@ -607,6 +727,17 @@ function revealApiSettings() {
 
 function configurePanelCallbacks() {
   window.nfePanelCallbacks = {
+    onDiagnostics: () => {
+      const movies = state.skyShowtimeMovieDiagnostics || [];
+      if (!movies.length) { toast('Open a SkyShowtime movie first to capture its markers.'); return; }
+      const blob = new Blob([JSON.stringify({ provider: 'skyshowtime', movies }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = Object.assign(document.createElement('a'), { href: url, download: 'skyshowtime-movie-diagnostics.json' });
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
     onClose: closePanel,
     onExport: exportJSON,
     onSubmit: submitToIntroDB,
@@ -634,7 +765,7 @@ function configurePanelCallbacks() {
       state.dbSearchDone = false;
       state.dedupCacheV2 = {};
       const searchShowId = state.showId;
-      searchImdbByTitle(query, state.showYear).then(result => {
+      searchImdbByTitle(query, state.showYear, { mediaType: state.mediaType || 'tv' }).then(result => {
         if (result.success) {
           applyImdbIdToShow(result.imdbId, searchShowId);
           if (searchShowId && state.showId !== searchShowId) return;
@@ -650,6 +781,12 @@ function configurePanelCallbacks() {
         console.error('[NFE] Manual IMDb search error:', error);
         setDbStatus('IMDb lookup error');
       });
+    },
+    onTmdbSet: () => {
+      const input = document.getElementById('nfe-tmdb-input');
+      const saved = saveTmdbToken(input.value);
+      input.value = '';
+      toast(saved ? 'TMDB token updated locally; movie checks run on export and upload.' : 'Could not save TMDB token.');
     },
     onApikeySet: () => {
       const value = document.getElementById('nfe-apikey-input').value.trim();

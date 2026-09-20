@@ -43,6 +43,18 @@ test('sessions are provider scoped and Clear data prevents recovery', () => {
   assert.equal(loadSession(first.storage).restoreCaptureSession('netflix'), false);
 });
 
+test('movie capture recovery preserves media type and scene markers', () => {
+  const first = loadSession();
+  first.restoreCaptureSession('skyshowtime');
+  first.state.mediaType = 'movie';
+  first.state.allItems = [{ media_type: 'movie', segment_type: 'post-credits', start_sec: 5400, end_sec: 5460 }];
+  first.saveCaptureSession();
+  const restored = loadSession(first.storage);
+  assert.equal(restored.restoreCaptureSession('skyshowtime'), true);
+  assert.equal(restored.state.mediaType, 'movie');
+  assert.equal(restored.state.allItems[0].segment_type, 'post-credits');
+});
+
 test('corrupt or unavailable storage does not prevent startup', () => {
   const corrupt = loadSession(new Map([['segmentScraper.capture.v1.netflix', '{invalid']]));
   assert.equal(corrupt.restoreCaptureSession('netflix'), false);

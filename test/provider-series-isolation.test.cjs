@@ -18,6 +18,8 @@ function loadExtractor(relativePath, exportName, globals = {}) {
   const catalogs = [];
   const logs = [];
   let source = [
+    fs.readFileSync(path.join(__dirname, '..', 'src/core/output-policy.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'src/normalization/segment-mapper.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8'),
   ].join('\n')
@@ -81,6 +83,53 @@ function netflixPayload(id, title, episodeId) {
     },
   };
 }
+
+test('Netflix captures a late outro after an intro, including restored numeric IDs', () => {
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata');
+  const payload = netflixPayload(100, 'Alpha', 123);
+  netflix.process(payload);
+  assert.equal(netflix.state.allItems.length, 1);
+  // A restored capture can have string IDs while fresh metadata uses numbers.
+  netflix.state.allItems[0]._eid = '123';
+  const episode = payload.video.seasons[0].episodes[0];
+  episode.creditsOffset = 1500;
+  episode.runtime = 1600;
+  netflix.process(payload);
+  netflix.process(payload);
+  assert.deepEqual(plain(netflix.state.allItems.map(item => [item.segment_type, item.start_sec, item.end_sec])), [
+    ['intro', 1, 11], ['outro', 1500, 1600],
+  ]);
+});
+
+test('Netflix does not discard metadata for an episode ID captured under another show', () => {
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata');
+  netflix.process(netflixPayload(100, 'Alpha', 'same-id'));
+  netflix.process(netflixPayload(200, 'Beta', 'same-id'));
+  assert.deepEqual(plain(netflix.state.allItems.map(item => item._showId)), ['100', '200']);
+});
+
+test('Netflix captures a movie outro when creditsOffset and runtime are available', () => {
+  const statuses = [];
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus: message => statuses.push(message) });
+  netflix.process({ video: { id: 1, type: 'movie', title: 'Movie', creditsOffset: 5400, runtime: 6000 } });
+  assert.deepEqual(plain(netflix.state.allItems.map(item => ({
+    media_type: item.media_type,
+    segment_type: item.segment_type,
+    season: item.season,
+    episode: item.episode,
+    start_sec: item.start_sec,
+    end_sec: item.end_sec,
+  }))), [{ media_type: 'movie', segment_type: 'outro', season: null, episode: null, start_sec: 5394, end_sec: 6000 }]);
+  assert.match(statuses[0], /TMDB extra-scene checks/);
+});
+
+test('Netflix does not invent a movie outro end without runtime', () => {
+  const statuses = [];
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus: message => statuses.push(message) });
+  netflix.process({ video: { id: 1, type: 'movie', title: 'Movie', creditsOffset: 5400 } });
+  assert.equal(netflix.state.allItems.length, 0);
+  assert.match(statuses[0], /no complete creditsOffset\/runtime range/);
+});
 
 test('Netflix tags timestamps and catalogs with their own series id', () => {
   const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata');
@@ -362,4 +411,33 @@ test('Prime Video prefers response episode metadata while the player DOM is stal
 
   assert.deepEqual(plain(prime.catalogs.map(catalog => [catalog.episodes[0].season, catalog.episodes[0].episode])), [[2, 1], [2, 2]]);
   assert.deepEqual(plain(prime.state.allItems.map(item => [item.season, item.episode, item._episodeTitle])), [[2, 1, 'First'], [2, 2, 'Second']]);
+});
+
+test('Videoland keeps the full outro and the marked scene separately', () => {
+  const videoland = loadExtractor('src/providers/videoland/extractor.js', 'processVideolandLayout');
+  const payload = videolandPayload('movie-a', 'Movie', 'clip-a');
+  payload.type = 'movie';
+  delete payload.seo.video.season;
+  delete payload.seo.video.episode;
+  payload.content.itemContent.video.chapters = [
+    { type: 'ending_credits', tcStart: 5400, tcEnd: 6000 },
+    { type: 'post_credits_scene', tcStart: 5600, tcEnd: 5700 },
+  ];
+  videoland.process(payload);
+  assert.deepEqual(plain(videoland.state.allItems.map(item => [item.segment_type, item.start_sec, item.end_sec])), [
+    ['outro', 5400, 6000], ['post-credits', 5600, 5700],
+  ]);
+});
+
+test('Netflix movie creditsOffset processing keeps diagnostics in the console', () => {
+  const statuses = [];
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus: value => statuses.push(value) });
+  netflix.process({ video: { id: 'movie-test', type: 'movie', title: 'Movie fixture', creditsOffset: 7800, runtime: 7900, skipMarkers: {} } });
+  assert.equal(netflix.detectedShows[0].mediaType, 'movie');
+  assert.equal(netflix.state.allItems.length, 1);
+  assert.equal(statuses.length, 1);
+  assert.equal(netflix.logs[0][1].creditsOffset, 7800);
+  assert.equal(netflix.logs[0][1].correctedCreditsOffset, 7794);
+  assert.equal(netflix.logs[0][1].creditsStartCorrectionSec, 6);
+  assert.equal(netflix.logs[0][1].captured, true);
 });

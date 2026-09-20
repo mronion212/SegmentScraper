@@ -3,7 +3,8 @@
  * Handles API requests, IMDb lookups, and IntroDB integration
  */
 
-import { state, createEpisodeCacheKey } from './state.js';
+import { state, createMediaCacheKey } from './state.js';
+import { introdbPayload } from './output-policy.js';
 
 const INTRODB_BASE = 'https://api.introdb.app';
 
@@ -16,11 +17,56 @@ function getGmXhr() {
          (typeof GM !== 'undefined' && GM.xmlHttpRequest ? GM.xmlHttpRequest : null);
 }
 
+function filterImdbTitleResults(results, mediaType = 'tv') {
+  const movieQids = new Set(['movie', 'tvmovie', 'videomovie', 'featurefilm', 'film', 'short', 'tvshort']);
+  const allowedQids = String(mediaType).toLowerCase() === 'movie'
+    ? movieQids
+    : new Set(['tvseries', 'tvminiseries', 'tvshort', 'tvspecial']);
+  return (results || []).filter(result => allowedQids.has(String(result?.qid || '').toLowerCase()));
+}
+
+function chooseImdbTitleResult(results, title, year) {
+  const normalizedTitle = String(title || '').trim().toLowerCase();
+  const normalizedYear = year == null ? '' : String(year);
+  let best = results[0];
+  if (normalizedYear) {
+    const byYearAndTitle = results.find(result =>
+      String(result?.y || '') === normalizedYear && String(result?.l || '').trim().toLowerCase() === normalizedTitle
+    );
+    const byYear = results.find(result => String(result?.y || '') === normalizedYear);
+    if (byYearAndTitle) best = byYearAndTitle;
+    else if (byYear) best = byYear;
+  } else {
+    const exact = results.find(result => String(result?.l || '').trim().toLowerCase() === normalizedTitle);
+    if (exact) best = exact;
+  }
+  return best;
+}
+
+function resolveImdbSearchResponse(data, title, year, mediaType) {
+  const results = filterImdbTitleResults(data?.d, mediaType);
+  console.log(`[NFE] Filtered ${mediaType === 'movie' ? 'movie' : 'TV series'} results:`, results.length);
+  if (!results.length) return { success: false, error: 'Not found on IMDb' };
+
+  const best = chooseImdbTitleResult(results, title, year);
+  const imdbId = best?.id;
+  if (!imdbId || !String(imdbId).startsWith('tt')) {
+    return { success: false, error: 'Could not obtain a valid IMDb ID' };
+  }
+
+  return {
+    success: true,
+    imdbId,
+    title: best?.l || title,
+    year: best?.y,
+  };
+}
+
 /**
- * Search IMDb by title and return the best matching series ID
+ * Search IMDb by title and return the best matching media ID.
  */
-export async function searchImdbByTitle(title, year, apiKey) {
-  const query = encodeURIComponent(title.toLowerCase().replace(/[^a-z0-9 ]/g, '').trim());
+export async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
+  const query = encodeURIComponent(String(title || '').toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').trim());
   const url = `https://v3.sg.media-imdb.com/suggestion/x/${query}.json`;
   console.log('[NFE] IMDb search request URL:', url, 'for title:', title, 'year:', year);
 
@@ -42,37 +88,7 @@ export async function searchImdbByTitle(title, year, apiKey) {
           try {
             const data = JSON.parse(response.responseText);
             console.log('[NFE] IMDb search response data:', data);
-            const results = (data.d || []).filter(r => r.qid === 'tvSeries' || r.qid === 'tvMiniSeries');
-            console.log('[NFE] Filtered TV series results:', results.length);
-
-            if (!results.length) {
-              resolve({ success: false, error: 'Not found on IMDb' });
-              return;
-            }
-
-            let best = results[0];
-            if (year) {
-              const byYear = results.find(r => String(r.y) === year && r.l.toLowerCase() === title.toLowerCase());
-              const byYearApprox = results.find(r => String(r.y) === year);
-              if (byYear) best = byYear;
-              else if (byYearApprox) best = byYearApprox;
-            } else {
-              const exact = results.find(r => r.l.toLowerCase() === title.toLowerCase());
-              if (exact) best = exact;
-            }
-
-            const imdbId = best.id;
-            if (!imdbId || !imdbId.startsWith('tt')) {
-              resolve({ success: false, error: 'Could not obtain a valid IMDb ID' });
-              return;
-            }
-
-            resolve({
-              success: true,
-              imdbId,
-              title: best.l,
-              year: best.y
-            });
+            resolve(resolveImdbSearchResponse(data, title, year, mediaType));
           } catch (parseError) {
             console.error('[NFE] IMDb response parse error:', parseError);
             resolve({ success: false, error: 'Failed to parse IMDb response' });
@@ -95,35 +111,7 @@ export async function searchImdbByTitle(title, year, apiKey) {
     const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
     const data = await response.json();
     console.log('[NFE] IMDb search response data:', data);
-    const results = (data.d || []).filter(r => r.qid === 'tvSeries' || r.qid === 'tvMiniSeries');
-    console.log('[NFE] Filtered TV series results:', results.length);
-
-    if (!results.length) {
-      return { success: false, error: 'Not found on IMDb' };
-    }
-
-    let best = results[0];
-    if (year) {
-      const byYear = results.find(r => String(r.y) === year && r.l.toLowerCase() === title.toLowerCase());
-      const byYearApprox = results.find(r => String(r.y) === year);
-      if (byYear) best = byYear;
-      else if (byYearApprox) best = byYearApprox;
-    } else {
-      const exact = results.find(r => r.l.toLowerCase() === title.toLowerCase());
-      if (exact) best = exact;
-    }
-
-    const imdbId = best.id;
-    if (!imdbId || !imdbId.startsWith('tt')) {
-      return { success: false, error: 'Could not obtain a valid IMDb ID' };
-    }
-
-    return {
-      success: true,
-      imdbId,
-      title: best.l,
-      year: best.y
-    };
+    return resolveImdbSearchResponse(data, title, year, mediaType);
   } catch (error) {
     console.error('[NFE] Fetch fallback error:', error);
     return { success: false, error: 'Network error connecting to IMDb (CORS or network issue)' };
@@ -145,23 +133,23 @@ export async function loadExistingSegments(imdbId, apiKey) {
   console.log('[NFE-DEDUP] loadExistingSegments called for imdbId:', imdbId);
 
   // Collect unique episode keys from currently captured items for this imdb_id
-  const episodeKeys = [...new Set(
+  const mediaKeys = [...new Set(
     state.allItems
       .filter(i => i.imdb_id === imdbId)
-      .map(i => createEpisodeCacheKey(imdbId, i.season, i.episode))
+      .map(i => createMediaCacheKey(imdbId, i.media_type || i.mediaType || i._mediaType, i.season, i.episode))
   )];
 
-  console.log('[NFE-DEDUP] loadExistingSegments: unique episode keys collected:', episodeKeys);
+  console.log('[NFE-DEDUP] loadExistingSegments: unique media keys collected:', mediaKeys);
 
   // Load each episode's segments via /segments endpoint
   const results = await Promise.all(
-    episodeKeys.map(key => loadExistingSegmentsForEpisode(key, apiKey))
+    mediaKeys.map(key => loadExistingSegmentsForEpisode(key, apiKey))
   );
 
   // Return all segment types found
   const allSegments = [];
-  for (let i = 0; i < episodeKeys.length; i++) {
-    const key = episodeKeys[i];
+  for (let i = 0; i < mediaKeys.length; i++) {
+    const key = mediaKeys[i];
     const set = results[i];
     for (const segType of set) {
       allSegments.push({ key, segmentType: segType });
@@ -180,10 +168,11 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
   if (useCache && state.dedupCacheV2[key]) {
     return state.dedupCacheV2[key];
   }
-
+  
   const [imdbId, seasonOrMediaType, episode] = key.split('|');
-  if (!/^\d+$/.test(seasonOrMediaType || '') || Number(seasonOrMediaType) < 1
-    || !/^\d+$/.test(episode || '') || Number(episode) < 1) {
+  const isMovie = seasonOrMediaType === 'movie';
+  if (!isMovie && (!/^\d+$/.test(seasonOrMediaType || '') || Number(seasonOrMediaType) < 1
+    || !/^\d+$/.test(episode || '') || Number(episode) < 1)) {
     throw new Error(`IntroDB cannot check ${imdbId} S${seasonOrMediaType}E${episode}: season and episode must be positive integers.`);
   }
   const describeHttpError = (status, body) => {
@@ -191,8 +180,10 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
     try { const json = JSON.parse(body); detail = typeof json.error === 'string' ? json.error.slice(0, 200) : ''; } catch (_) {}
     return new Error(`IntroDB duplicate check returned HTTP ${status} for ${imdbId} S${seasonOrMediaType}E${episode}${detail ? `: ${detail}` : '.'}`);
   };
-  const url = `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(seasonOrMediaType)}&episode=${encodeURIComponent(episode)}`;
-
+  const url = isMovie
+    ? `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&is_movie=true`
+    : `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(seasonOrMediaType)}&episode=${encodeURIComponent(episode)}`;
+  
   const gmXhr = getGmXhr();
 
   const parseExistingSegments = json => {
@@ -217,8 +208,8 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
       return null;
     };
     const add = (segmentType, value) => {
-      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType;
-      if (!['intro', 'recap', 'outro'].includes(normalizedType) || value == null) return;
+      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType === 'post_credits' ? 'post-credits' : segmentType;
+      if (!['intro', 'recap', 'outro', 'post-credits'].includes(normalizedType) || value == null) return;
       set.add(normalizedType);
       const entries = Array.isArray(value) ? value : [value];
       const ranges = entries.map(entry => {
@@ -229,6 +220,7 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
         return {
           startSec: start,
           endSec: end,
+          creditPart: source?.credit_part ?? source?.creditPart ?? null,
         };
       }).filter(Boolean);
       if (ranges.length) rangesByType.set(normalizedType, [...(rangesByType.get(normalizedType) || []), ...ranges]);
@@ -239,11 +231,11 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
     } else if (Array.isArray(json?.segments)) {
       json.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
     }
-    for (const type of ['intro', 'recap', 'outro', 'credits']) add(type, json?.[type]);
+    for (const type of ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits']) add(type, json?.[type]);
     Object.defineProperty(set, 'rangesByType', { value: rangesByType, enumerable: false });
     return set;
   };
-
+  
   return new Promise((resolve, reject) => {
     if (gmXhr) {
       gmXhr({
@@ -299,7 +291,8 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
 export async function submitSegment(item, apiKey) {
   const url = `${INTRODB_BASE}/submit`;
   const gmXhr = getGmXhr();
-
+  const data = introdbPayload(item);
+  
   if (gmXhr) {
     return new Promise((resolve) => {
       gmXhr({
@@ -312,14 +305,7 @@ export async function submitSegment(item, apiKey) {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
         },
-        data: JSON.stringify({
-          imdb_id: item.imdb_id,
-          segment_type: item.segment_type,
-          season: item.season,
-          episode: item.episode,
-          start_sec: item.start_sec,
-          end_sec: item.end_sec,
-        }),
+        data: JSON.stringify(data),
         onload: (response) => {
           resolve({
             success: response.status >= 200 && response.status < 300,
@@ -342,14 +328,7 @@ export async function submitSegment(item, apiKey) {
         'Content-Type': 'application/json',
         'X-API-Key': apiKey,
       },
-      body: JSON.stringify({
-        imdb_id: item.imdb_id,
-        segment_type: item.segment_type,
-        season: item.season,
-        episode: item.episode,
-        start_sec: item.start_sec,
-        end_sec: item.end_sec,
-      }),
+      body: JSON.stringify(data),
     });
 
     return {

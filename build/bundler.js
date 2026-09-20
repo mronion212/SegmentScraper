@@ -41,6 +41,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @grant        unsafeWindow
 // @connect      v3.sg.media-imdb.com
 // @connect      api.introdb.app
+// @connect      api.themoviedb.org
 // @connect      api4.thetvdb.com
 // @connect      atom.skyshowtime.com
 // @connect      raw.githubusercontent.com
@@ -93,10 +94,12 @@ function bundle() {
   // Define file order for proper dependency resolution
   const commonFileOrder = [
     'core/state.js',
+    'core/output-policy.js',
     'core/capture-session.js',
     'core/update-check.js',
     'core/network.js',
     'core/introdb-settings.js',
+    'core/tmdb.js',
     'core/tvdb.js',
     'config/provider-config.js',
     'normalization/segment-mapper.js',

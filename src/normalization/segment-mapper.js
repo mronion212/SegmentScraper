@@ -10,7 +10,39 @@ export const SEGMENT_TYPES = {
   INTRO: 'intro',
   RECAP: 'recap',
   OUTRO: 'outro',
+  POST_CREDITS: 'post-credits',
 };
+
+/**
+ * Build a full movie outro plus an optional, explicitly timed extra scene.
+ * A credits marker after a known scene cannot identify the full outro.
+ */
+export function splitCreditRange({
+  startSec,
+  endSec,
+  runtimeSec = null,
+  afterCreditsStartSec = null,
+  afterCreditsEndSec = null,
+  afterCreditsDetected = false,
+}) {
+  const start = startSec == null ? NaN : Number(startSec);
+  const end = runtimeSec == null ? Number(endSec) : Number(runtimeSec);
+  if (endSec == null && runtimeSec == null) return [];
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) return [];
+  const sceneStart = afterCreditsStartSec == null ? null : Number(afterCreditsStartSec);
+  const sceneEnd = afterCreditsEndSec == null ? null : Number(afterCreditsEndSec);
+  const hasScene = afterCreditsDetected || sceneStart !== null || sceneEnd !== null;
+  // A partial scene must not leave an apparently safe standalone outro.
+  if (hasScene && !Number.isFinite(sceneEnd)) return [];
+  if (hasScene && (!Number.isFinite(sceneStart) || sceneStart <= start || sceneStart >= end)) return [];
+  if (Number.isFinite(sceneEnd) && (sceneEnd <= sceneStart || sceneEnd > end)) return [];
+  const parts = [{ startSec: start, endSec: end, creditPart: null }];
+  // Runtime is an outro boundary only, never a substitute for the scene end.
+  if (hasScene && Number.isFinite(sceneEnd)) {
+    parts.push({ startSec: sceneStart, endSec: sceneEnd, segmentType: SEGMENT_TYPES.POST_CREDITS, creditPart: null });
+  }
+  return parts;
+}
 
 /**
  * Provider-specific segment name mappings
@@ -71,6 +103,8 @@ export function normalizeSegmentType(providerSegmentType, providerName) {
  * @param {string} [params.imdbId] - IMDb ID (optional, defaults to IMDB_PENDING)
  * @param {string} [params.showId] - Provider series identifier used to isolate multiple series
  * @param {string} [params.episodeTitle] - Provider episode title used only for TVDB mapping
+ * @param {string} [params.mediaType] - Media type, currently `tv` or `movie`
+ * @param {string} [params.creditPart] - Movie credit part around an after-credits scene
  * @returns {Object|null} - Normalized segment item or null if type not recognized
  */
 export function createNormalizedSegment({
@@ -83,7 +117,9 @@ export function createNormalizedSegment({
   endSec,
   imdbId = 'IMDB_PENDING',
   showId = '',
-  episodeTitle = ''
+  episodeTitle = '',
+  mediaType = 'tv',
+  creditPart = null,
 }) {
   const segmentType = normalizeSegmentType(providerSegmentType, providerName);
   if (!segmentType) return null;
@@ -92,6 +128,8 @@ export function createNormalizedSegment({
     _eid: episodeId,
     _episodeTitle: episodeTitle,
     ...(showId ? { _showId: String(showId) } : {}),
+    ...(String(mediaType).toLowerCase() === 'movie' ? { media_type: 'movie' } : {}),
+    ...(creditPart ? { credit_part: creditPart } : {}),
     imdb_id: imdbId,
     segment_type: segmentType,
     season,

@@ -1,14 +1,19 @@
 /** Netflix-specific metadata interception and segment extraction. */
 
 import { state } from '../../core/state.js';
+import { capturedSegmentKey } from '../../core/output-policy.js';
 import { createNormalizedSegment } from '../../normalization/segment-mapper.js';
 import { setProviderEpisodeCatalog } from '../../core/tvdb.js';
-import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
+import { handleDetectedShow, recordExtractedSegments, setDbStatus } from '../bootstrap.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
 
 export const NETFLIX_TITLE_OVERRIDES = {
   '81748089': 'tt2431250',
 };
+
+// Netflix movie creditsOffset consistently lands six seconds into the visible
+// credits. Keep the correction movie-only; series markers use a different path.
+const NETFLIX_MOVIE_CREDITS_LEAD_SEC = 6;
 
 function isNetflixSpecialSeason(season) {
   if (Number(season?.seq) === 0 || season?.isSpecial === true) return true;
@@ -25,11 +30,80 @@ function isNetflixSpecialEpisode(season, episode) {
   return ['special', 'supplemental', 'bonus', 'extra', 'trailer'].includes(type);
 }
 
+function coerceNetflixSeconds(value) {
+  const number = Number(value);
+  if (Number.isFinite(number)) return number;
+  const parts = String(value || '').trim().split(':').map(Number);
+  if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
+  if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return null;
+}
+
 export function processNetflixMetadata(data) {
   const video = data.video;
   if (!video) return;
 
   const showId = video.id != null ? String(video.id) : null;
+  if (String(video.type || '').toLowerCase() === 'movie') {
+    handleDetectedShow({
+      title: video.title,
+      showId,
+      year: video.year || video.releaseYear || '',
+      mediaType: 'movie',
+    });
+
+    const creditsOffset = coerceNetflixSeconds(video.creditsOffset);
+    const runtime = coerceNetflixSeconds(video.runtime);
+    const correctedCreditsOffset = creditsOffset == null
+      ? null
+      : Math.max(0, creditsOffset - NETFLIX_MOVIE_CREDITS_LEAD_SEC);
+    const movieId = showId || String(video.title || 'netflix-movie');
+    const movieItem = correctedCreditsOffset != null && runtime != null && correctedCreditsOffset > 0 && runtime > creditsOffset
+      ? createNormalizedSegment({
+        providerName: 'netflix',
+        episodeId: `${movieId}_movie_outro`,
+        showId,
+        season: null,
+        episode: null,
+        imdbId: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
+        episodeTitle: video.title || '',
+        mediaType: 'movie',
+        providerSegmentType: 'creditsOffset',
+        startSec: correctedCreditsOffset,
+        endSec: runtime,
+      })
+      : null;
+
+    console.info('[NFE] Netflix movie credits marker processed', {
+      title: video.title,
+      movieId: showId,
+      creditsOffset: creditsOffset ?? null,
+      correctedCreditsOffset: correctedCreditsOffset ?? null,
+      creditsStartCorrectionSec: NETFLIX_MOVIE_CREDITS_LEAD_SEC,
+      runtime: runtime ?? null,
+      captured: Boolean(movieItem),
+      skipMarkers: video.skipMarkers ?? {},
+    });
+
+    if (movieItem) {
+      logCapturedTimestamps({
+        prefix: 'NFE',
+        showTitle: video.title,
+        mediaType: 'movie',
+        episodeTitle: video.title || '',
+        providerIdLabel: 'movieId',
+        providerId: showId,
+        items: [movieItem],
+      });
+      recordExtractedSegments([movieItem]);
+      setDbStatus('Netflix movie outro captured; TMDB extra-scene checks run on export and upload.');
+    } else {
+      // A runtime is required as the actual media boundary. Never invent an
+      // outro end at EOF when Netflix did not provide one.
+      setDbStatus('Netflix movie: no complete creditsOffset/runtime range; no timestamps captured.');
+    }
+    return;
+  }
   const year = video.seasons?.[0]?.year || '';
   handleDetectedShow({
     title: video.title,
@@ -49,10 +123,10 @@ export function processNetflixMetadata(data) {
   ), showId);
 
   const extractedItems = [];
+  const capturedKeys = new Set(state.allItems.map(capturedSegmentKey));
   for (const season of video.seasons || []) {
     for (const episode of season.episodes || []) {
       const episodeId = episode.episodeId || episode.id;
-      if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
 
       const common = {
         providerName: 'netflix',
@@ -90,7 +164,9 @@ export function processNetflixMetadata(data) {
       const episodeItems = [];
       for (const segment of segments) {
         const item = createNormalizedSegment({ ...common, ...segment });
-        if (item) {
+        // Metadata can arrive in stages: an intro must not hide a later outro.
+        if (item && !capturedKeys.has(capturedSegmentKey(item))) {
+          capturedKeys.add(capturedSegmentKey(item));
           episodeItems.push(item);
           extractedItems.push(item);
         }

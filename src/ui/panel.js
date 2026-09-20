@@ -51,6 +51,7 @@ function setupPanelEventListeners() {
 
   bindPanelCallback(closeBtn, 'onClose', '[NFE] Close button clicked');
   bindPanelCallback(exportBtn, 'onExport', '[NFE] Export button clicked');
+  bindPanelCallback(document.getElementById('nfe-diagnostics'), 'onDiagnostics');
   bindPanelCallback(submitBtn, 'onSubmit', '[NFE] Submit button clicked');
   bindPanelCallback(clearBtn, 'onClear', '[NFE] Clear button clicked');
   bindPanelCallback(imdbSetBtn, 'onImdbSet', '[NFE] IMDB set button clicked');
@@ -61,6 +62,8 @@ function setupPanelEventListeners() {
   bindButtonClickOnEnter(apikeyInput, () => document.getElementById('nfe-apikey-set'));
 
   bindPanelCallback(tvdbSetBtn, 'onTvdbSet');
+  bindPanelCallback(document.getElementById('nfe-tmdb-set'), 'onTmdbSet');
+  bindButtonClickOnEnter(document.getElementById('nfe-tmdb-input'), () => document.getElementById('nfe-tmdb-set'));
   tvdbInputs.filter(Boolean).forEach(input => bindButtonClickOnEnter(input, () => tvdbSetBtn));
 }
 
@@ -148,7 +151,7 @@ export function createPanel() {
     <div id="nfe-title-display" style="color:${colors.textSecondary};font-size:11px;margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:13px"></div>
 
     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
-      <div id="nfe-imdb-status" style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">IMDb ID: ${state.imdbId || 'Not set'}</div>
+      <div id="nfe-imdb-status" style="font-size:9px;color:${colors.textMuted};font-weight:700;text-transform:uppercase;letter-spacing:0.7px;margin-bottom:7px">${state.mediaType === 'movie' ? 'Movie' : 'TV'} · IMDb ID: ${state.imdbId || 'Not set'}</div>
       <div style="display:flex;gap:4px">
         <input id="nfe-imdb-input" aria-label="IMDb ID or search title" type="text" placeholder="ID (e.g. tt123456)..." value="${state.imdbId}"
           style="flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;
@@ -198,6 +201,7 @@ export function createPanel() {
       onmouseenter="this.style.background='${providerColors.primaryDark}'" onmouseleave="this.style.background='${providerColors.primary}'">
       Show timestamps
     </button>
+    ${currentProvider === 'skyshowtime' ? `<button id="nfe-diagnostics" style="width:100%;padding:8px;margin-bottom:6px;border:1px solid ${colors.border};border-radius:8px;background:${colors.panelBg};color:#fff;cursor:pointer">Download movie diagnostics</button><div style="font-size:11px;color:${colors.textMuted};margin-bottom:8px">Very short movie credits are held for review. Missing scene markers do not confirm that there is no extra scene.</div>` : ''}
 
      <details id="nfe-settings"><summary>API settings</summary>
      <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
@@ -247,6 +251,16 @@ export function createPanel() {
      <div id="nfe-session-status" role="status" style="font-size:11px;color:#aaa;margin:8px 0;line-height:1.4"></div>
      <div id="nfe-introdb-status" role="status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
 
+     <div style="margin-bottom:10px;font-size:11px;color:${colors.textSecondary}">
+       <label for="nfe-tmdb-input">TMDB API Read Access Token (movie scene check)</label>
+       <div style="display:flex;gap:4px;margin:5px 0">
+         <input id="nfe-tmdb-input" type="password" autocomplete="off" placeholder="Paste token; blank clears it"
+           style="min-width:0;flex:1;background:#242424;border:1px solid #303030;border-radius:6px;color:#fff;padding:6px 8px"/>
+         <button id="nfe-tmdb-set" style="background:${providerColors.primary};border:0;border-radius:6px;color:#fff;padding:6px 10px;cursor:pointer">Save</button>
+       </div>
+       <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer" style="color:${colors.textSecondary}">Get a TMDB token</a> · Saved locally. Movie export/upload requires a successful check. Missing keywords do not prove scene absence.
+       <div>This product uses the TMDB API but is not endorsed or certified by TMDB.</div>
+     </div>
      <button id="nfe-submit"
        style="width:100%;background:${providerColors.secondary};border:none;border-radius:8px;color:#fff;
               padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
@@ -368,6 +382,11 @@ export function updateCounters() {
   
   const rq = $('nfe-cnt-req');
   if (rq) rq.textContent = state.showIds.size;
+  const mediaLabel = $('nfe-cnt-series-label');
+  if (mediaLabel) {
+    const hasMovie = state.allItems.some(item => String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie');
+    mediaLabel.textContent = hasMovie ? 'Media' : 'Series';
+  }
   
   const fl = $('nfe-cnt-files');
   if (fl) {

@@ -12,15 +12,17 @@ function loadSkyShowtimeExtractor(globals = {}) {
   const logs = [];
   let source = [
     fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'src', 'normalization', 'segment-mapper.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'skyshowtime', 'extractor.js'), 'utf8'),
   ].join('\n')
     .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?function\b|const\b|let\b|var\b|class\b)/g, '');
-  source += '\nglobalThis.skyExports = { findSkyShowtimeEpisodes, isSkyShowtimeCatalogueUrl, processSkyShowtimeMetadata, setupSkyShowtimeInterception };';
+  source += '\nglobalThis.skyExports = { findSkyShowtimeEpisodes, findSkyShowtimeMovies, isSkyShowtimeCatalogueUrl, processSkyShowtimeMetadata, setupSkyShowtimeInterception };';
 
   const context = vm.createContext({
     state,
     detectedShows,
+    updateCounters() {},
     console: { info(...args) { logs.push(args); }, warn() {}, error() {} },
     handleDetectedShow(show) {
       detectedShows.push(show);
@@ -166,13 +168,161 @@ test('deduplicates repeated catalogue responses per episode and segment type', (
   assert.equal(sky.logs.length, 3);
 });
 
-test('matches only the SkyShowtime provider-series catalogue endpoint', () => {
+test('captures SkyShowtime movie credits only with an explicit end marker', () => {
+  const sky = loadSkyShowtimeExtractor();
+  const payload = {
+    data: {
+      attributes: {
+        providerVariantId: 'movie-123',
+        type: 'MOVIE',
+        titleLong: 'Example Movie',
+        year: 2025,
+        durationMilliseconds: 6000000,
+        formats: {
+          HD: {
+            markers: {
+              SOCR: 5400000,
+              EOCR: 6000000,
+              SOAC: 5680000,
+              EOAC: 5800000,
+            },
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(sky.processSkyShowtimeMetadata(payload), 2);
+  assert.deepEqual(plain(sky.detectedShows), [{
+    title: 'Example Movie',
+    showId: 'movie-123',
+    year: 2025,
+    mediaType: 'movie',
+  }]);
+  assert.deepEqual(plain(sky.state.providerEpisodes), []);
+  assert.deepEqual(plain(sky.state.allItems), [{
+    _eid: 'movie-123::movie::outro',
+    _episodeTitle: 'Example Movie',
+    _showId: 'movie-123',
+    media_type: 'movie',
+    imdb_id: 'IMDB_PENDING',
+    segment_type: 'outro',
+    season: null,
+    episode: null,
+    start_sec: 5400,
+    end_sec: 6000,
+  }, {
+    _eid: 'movie-123::movie::post-credits',
+    _episodeTitle: 'Example Movie',
+    _showId: 'movie-123',
+    media_type: 'movie',
+    imdb_id: 'IMDB_PENDING',
+    segment_type: 'post-credits',
+    season: null,
+    episode: null,
+    start_sec: 5680,
+    end_sec: 5800,
+  }]);
+});
+
+test('uses SkyShowtime movie runtime when no explicit credits end is present', () => {
+  const sky = loadSkyShowtimeExtractor();
+  const payload = {
+    data: {
+      attributes: {
+        providerVariantId: 'movie-456',
+        type: 'MOVIE',
+        title: 'Movie without end marker',
+        durationMilliseconds: 6000000,
+        formats: { HD: { markers: { SOCR: 5400000 } } },
+      },
+    },
+  };
+
+  assert.equal(sky.processSkyShowtimeMetadata(payload), 1);
+  assert.deepEqual(plain(sky.state.allItems.map(item => [item.start_sec, item.end_sec])), [[5400, 6000]]);
+});
+
+test('uses a marker-bearing quality format and JSON-API movie id', () => {
+  const sky = loadSkyShowtimeExtractor();
+  const payload = {
+    data: {
+      id: 'movie-wrapped-123',
+      attributes: {
+        entityType: 'Movie',
+        titleLong: 'Wrapped Movie',
+        releaseYear: 2024,
+        durationMilliseconds: 6000000,
+        formats: {
+          HD: { markers: {} },
+          UHDSDR: { markers: { startOfCredits: 5400000, endOfCredits: 6000000 } },
+        },
+      },
+    },
+  };
+
+  assert.equal(sky.processSkyShowtimeMetadata(payload), 1);
+  assert.deepEqual(plain(sky.detectedShows), [{
+    title: 'Wrapped Movie',
+    showId: 'movie-wrapped-123',
+    year: 2024,
+    mediaType: 'movie',
+  }]);
+  assert.deepEqual(plain(sky.state.allItems.map(item => [item._showId, item.start_sec, item.end_sec])), [
+    ['movie-wrapped-123', 5400, 6000],
+  ]);
+});
+
+test('keeps only the requested movie variant from a mixed SkyShowtime response', () => {
+  const sky = loadSkyShowtimeExtractor();
+  const payload = {
+    data: {
+      attributes: {
+        items: [
+          {
+            id: 'opening-credit-variant',
+            attributes: {
+              entityType: 'Movie',
+              titleLong: 'Movie with alternate variants',
+              durationMilliseconds: 6000000,
+              formats: { HD: { markers: { SOCR: 54000, EOCR: 174000 } } },
+            },
+          },
+          {
+            id: 'full-movie-variant',
+            attributes: {
+              entityType: 'Movie',
+              titleLong: 'Movie with alternate variants',
+              durationMilliseconds: 6000000,
+              formats: { HD: { markers: { SOCR: 4993238, EOCR: 6000000 } } },
+            },
+          },
+        ],
+      },
+    },
+  };
+
+  assert.equal(sky.processSkyShowtimeMetadata(
+    payload,
+    'page-fetch: https://atom.skyshowtime.com/adapter-calypso/v3/catalogue/provider_variant_id/full-movie-variant'
+  ), 1);
+  assert.deepEqual(plain(sky.state.allItems.map(item => ({
+    id: item._showId,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [{ id: 'full-movie-variant', start: 4993.238, end: 6000 }]);
+});
+
+test('matches SkyShowtime series and movie catalogue endpoints only', () => {
   const sky = loadSkyShowtimeExtractor();
   assert.equal(sky.isSkyShowtimeCatalogueUrl(
     'https://atom.skyshowtime.com/adapter-calypso/v3/catalogue/provider_series_id/series-123?country=NL'
   ), true);
   assert.equal(sky.isSkyShowtimeCatalogueUrl(
     'https://atom.skyshowtime.com/adapter-calypso/v3/catalogue/provider_variant_id/episode-3'
+  ), true);
+  assert.equal(sky.isSkyShowtimeCatalogueUrl(
+    'https://atom.skyshowtime.com/adapter-calypso/v3/catalogue/uuid/movie-123'
   ), false);
   assert.equal(sky.isSkyShowtimeCatalogueUrl('https://www.netflix.com/memberapi/metadata'), false);
 });
@@ -194,6 +344,41 @@ test('captures a SkyShowtime catalogue response from page fetch automatically', 
   );
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(sky.state.allItems.length, 4);
+});
+
+test('captures a SkyShowtime movie response from a provider-variant fetch', async () => {
+  const payload = {
+    data: {
+      attributes: {
+        providerVariantId: 'movie-fetch-123',
+        type: 'MOVIE',
+        titleLong: 'Fetched Movie',
+        year: 2025,
+        durationMilliseconds: 6000000,
+        formats: { HD: { markers: { SOCR: 5400000, EOCR: 6000000 } } },
+      },
+    },
+  };
+  const response = {
+    clone: () => ({ json: async () => payload }),
+  };
+  const pageWindow = {
+    fetch: async () => response,
+    performance: { getEntriesByType: () => [] },
+  };
+  const sky = loadSkyShowtimeExtractor({ unsafeWindow: pageWindow, window: pageWindow });
+  sky.setupSkyShowtimeInterception();
+
+  await pageWindow.fetch(
+    'https://atom.skyshowtime.com/adapter-calypso/v3/catalogue/provider_variant_id/movie-fetch-123'
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(plain(sky.state.allItems.map(item => ({
+    id: item._showId,
+    type: item.media_type,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [{ id: 'movie-fetch-123', type: 'movie', start: 5400, end: 6000 }]);
 });
 
 test('captures metadata forwarded by the SkyShowtime dedicated-worker bridge', () => {
@@ -232,6 +417,7 @@ test('captures metadata forwarded by the SkyShowtime dedicated-worker bridge', (
   const worker = new pageWindow.Worker('/assets/player-worker.js');
   assert.equal(worker.url, 'blob:segment-scraper-worker');
   assert.match(workerSource, /worker-fetch/);
+  assert.match(workerSource, /provider_variant_id/);
   assert.match(workerSource, /https:\/\/www\.skyshowtime\.com\/assets\/player-worker\.js/);
   let stopped = false;
   worker.listeners[0]({
@@ -247,4 +433,73 @@ test('captures metadata forwarded by the SkyShowtime dedicated-worker bridge', (
 
   assert.equal(stopped, true);
   assert.equal(sky.state.allItems.length, 4);
+});
+
+// Reproduces the reported exported boundaries, not a captured provider response.
+for (const [title, start, end, expected] of [
+  ['Nobody', 5495, 5502, 0],
+  ['Nobody 2', 4993.238, 5365, 1],
+  ['The Naked Gun', 5106.893, 5114, 0],
+  ['Mission: Impossible', 9763.504, 10177, 1],
+  ['Scream 7', 6624.743, 6836, 1],
+  ['M3gan 2.0', 6755.499, 7200, 1],
+  ['Five Nights at Freddys 2', 6241, 6248, 0],
+]) {
+  test(`reviews reported SkyShowtime boundary pattern: ${title}`, () => {
+    const sky = loadSkyShowtimeExtractor();
+    sky.processSkyShowtimeMetadata({ type: 'movie', id: title, title, durationSeconds: end,
+      formats: { HD: { markers: { SOCR: start * 1000 } } } });
+    assert.equal(sky.state.allItems.length, expected);
+    assert.equal(sky.state.skyShowtimeMovieDiagnostics[0].sceneStatus, 'unknown');
+    assert.equal(sky.state.skyShowtimeMovieDiagnostics[0].reviewReasons.length, expected ? 0 : 1);
+  });
+}
+
+// Reduced timing fields from the catalogue response supplied during investigation.
+test('supplied catalogue markers distinguish missing boundaries from conversion errors', () => {
+  for (const [title, durationMilliseconds, markers, expected] of [
+    ['Nobody', 5502000, { SOCR: 5495000 }, 0],
+    ['Nobody 2', 5365000, { SOCR: 4993238 }, 1],
+    ['The Naked Gun', 5114000, { SOCR: 5106893, SOLC: 4454241, EOLC: 5106893 }, 0],
+  ]) {
+    const sky = loadSkyShowtimeExtractor();
+    sky.processSkyShowtimeMetadata({ type: 'ASSET/PROGRAMME', id: title, attributes: {
+      title, providerVariantId: title, classification: ['MOVIES'], durationMilliseconds,
+      durationSeconds: durationMilliseconds / 1000,
+      formats: { HD: { chapterMarkers: [], startOfCredits: markers.SOCR, markers } },
+    } });
+    assert.equal(sky.state.allItems.length, expected);
+    const report = sky.state.skyShowtimeMovieDiagnostics[0];
+    assert.deepEqual(JSON.parse(JSON.stringify(report.formats.HD.markers)), markers);
+    assert.equal(report.sceneStatus, 'unknown');
+    if (expected) assert.equal(sky.state.allItems[0].start_sec, 4993.238);
+  }
+});
+
+test('diagnostics retain all quality timing fields without playback credentials', () => {
+  const sky = loadSkyShowtimeExtractor();
+  sky.processSkyShowtimeMetadata({ type: 'movie', id: 'diag', title: 'Diagnostic', durationSeconds: 5502,
+    token: 'private-token', formats: {
+      HD: { playbackUrl: 'https://example.test/?token=secret', markers: { SOCR: 5495000, unknownMarker: 5100000 } },
+      UHDSDR: { startOfCredits: 5100000, markers: { SOAC: 5300000, EOAC: 5350000 } },
+    } });
+  const report = sky.state.skyShowtimeMovieDiagnostics[0];
+  assert.equal(report.formats.HD.markers.unknownMarker, 5100000);
+  assert.equal(report.formats.UHDSDR.fields.startOfCredits, 5100000);
+  assert.equal(report.formats.UHDSDR.markers.SOAC, 5300000);
+  assert.doesNotMatch(JSON.stringify(report), /private-token|secret|playbackUrl/);
+  assert.equal(sky.state.allItems.length, 0); // Do not silently mix different versions.
+});
+
+test('later SkyShowtime metadata replaces a previously captured movie boundary', () => {
+  const sky = loadSkyShowtimeExtractor();
+  const payload = start => ({ type: 'movie', id: 'updated', title: 'Updated movie', durationSeconds: 5502,
+    formats: { HD: { markers: { SOCR: start * 1000 } } } });
+  sky.processSkyShowtimeMetadata(payload(5200));
+  sky.processSkyShowtimeMetadata(payload(5100));
+  assert.equal(sky.state.allItems.length, 1);
+  assert.equal(sky.state.allItems[0].start_sec, 5100);
+  sky.processSkyShowtimeMetadata(payload(5495));
+  assert.equal(sky.state.allItems.length, 0);
+  assert.equal(sky.state.skyShowtimeMovieDiagnostics.length, 3);
 });

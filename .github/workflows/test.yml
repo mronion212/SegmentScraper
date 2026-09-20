@@ -1,0 +1,14 @@
+name: Shared script and desktop checks
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Reject stale desktop shared code
+        run: node build/desktop-core.cjs --check
+      - name: Check both clients and generated userscript
+        run: node --test

@@ -13,6 +13,7 @@ function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
     imdbIdsByShowId: {},
     showTitle: '',
     showId: null,
+    mediaType: 'tv',
     providerEpisodes: [],
   };
   const detectedShows = [];
@@ -21,6 +22,7 @@ function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
   let nextTimerId = 1;
   let source = [
     fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'src', 'normalization', 'segment-mapper.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'prime-video', 'extractor.js'), 'utf8'),
   ].join('\n')
     .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
@@ -44,6 +46,7 @@ function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
       detectedShows.push(show);
       state.showTitle = show.title;
       state.showId = show.showId;
+      state.mediaType = show.mediaType || 'tv';
     },
     recordExtractedSegments(items) {
       state.allItems.push(...items);
@@ -671,6 +674,355 @@ test('prefers END_CREDITS over NEXT_UP when Prime supplies both outro timecodes'
   }))), [{ type: 'outro', start: 2900, end: 3156 }]);
 });
 
+test('captures Prime movie credits from END_CREDITS and ignores NEXT_UP', () => {
+  const { document } = primeDetailDocument();
+  const titleId = 'amzn1.dv.gti.12345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document);
+  prime.state.imdbIdsByShowId = { [titleId]: 'tt800' };
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: {
+      catalog: { type: 'MOVIE', title: 'Example Movie', releaseYear: 2025 },
+    },
+    transitionTimecodes: {
+      result: {
+        events: [
+          { eventType: 'NEXT_UP', startTimeMs: 5700000, endTimeMs: 6000000 },
+          { eventType: 'END_CREDITS', startTimeMs: 5400000, endTimeMs: 5700000 },
+        ],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.deepEqual(plain(prime.state.allItems), [{
+    _eid: `${titleId}_movie_outro`,
+    _episodeTitle: 'Example Movie',
+    _showId: titleId,
+    media_type: 'movie',
+    imdb_id: 'tt800',
+    segment_type: 'outro',
+    season: null,
+    episode: null,
+    start_sec: 5400,
+    end_sec: 5700,
+  }]);
+  assert.deepEqual(plain(prime.detectedShows), [{
+    title: 'Example Movie',
+    showId: titleId,
+    year: 2025,
+    mediaType: 'movie',
+  }]);
+  assert.equal(prime.logs.find(([message]) => message.includes('Captured timestamps'))[0], '[PVE] Captured timestamps · Example Movie · MOVIE · outro: 01:30:00.000 → 01:35:00.000');
+});
+
+test('captures Prime movie credits from the skipElements transition-timecode shape', () => {
+  const document = {
+    title: 'Prime Video: Legacy Shape Movie',
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    getElementById() { return null; },
+  };
+  const titleId = 'amzn1.dv.gti.15345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document);
+  prime.state.imdbIdsByShowId = { [titleId]: 'tt804' };
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: {
+      catalog: { type: 'MOVIE', title: 'Legacy Shape Movie' },
+      playback: { runtimeSeconds: 6000 },
+    },
+    transitionTimecodes: {
+      skipElements: [{ elementType: 'END_CREDITS', startTimecodeMs: 5400000 }],
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    imdb_id: item.imdb_id,
+    media_type: item.media_type,
+    type: item.segment_type,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [{
+    imdb_id: 'tt804',
+    media_type: 'movie',
+    type: 'outro',
+    start: 5400,
+    end: 6000,
+  }]);
+});
+
+test('captures Prime movie credits from an endCreditsStart-only response', () => {
+  const document = {
+    title: 'Prime Video: Root Marker Movie',
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    getElementById() { return null; },
+  };
+  const titleId = 'amzn1.dv.gti.16345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document);
+  prime.state.imdbIdsByShowId = { [titleId]: 'tt805' };
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: {
+      catalog: { type: 'MOVIE', title: 'Root Marker Movie' },
+      playback: { durationInSeconds: 6000 },
+    },
+    transitionTimecodes: { endCreditsStart: 5400000 },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => [item.start_sec, item.end_sec])), [[5400, 6000]]);
+});
+
+test('captures Prime movie outro and post-credits scene separately', () => {
+  const { document } = primeDetailDocument();
+  const titleId = 'amzn1.dv.gti.13345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document);
+  prime.state.imdbIdsByShowId = { [titleId]: 'tt803' };
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: {
+      catalog: { type: 'MOVIE', title: 'Movie with two credit parts', releaseYear: 2025 },
+    },
+    transitionTimecodes: {
+      result: {
+        events: [
+          { eventType: 'END_CREDITS', startTimeMs: 5400000, endTimeMs: 6000000 },
+          { eventType: 'AFTER_CREDITS', startTimeMs: 5600000, endTimeMs: 5800000 },
+        ],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    id: item._eid,
+    part: item.credit_part,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [
+    { id: `${titleId}_movie_outro`, start: 5400, end: 6000 },
+    { id: `${titleId}_movie_post-credits`, start: 5600, end: 5800 },
+  ]);
+});
+
+test('captures Prime mid-credits markers as an extra-scene candidate', () => {
+  const { document } = primeDetailDocument();
+  const titleId = 'amzn1.dv.gti.13345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document);
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: {
+      catalog: { type: 'MOVIE', title: 'Movie with a mid-credits scene', releaseYear: 2025 },
+    },
+    transitionTimecodes: {
+      result: {
+        events: [
+          { eventType: 'END_CREDITS', startTimeMs: 5400000, endTimeMs: 6000000 },
+          { eventType: 'DURING_CREDITS_SCENE', startTimeMs: 5550000, endTimeMs: 5600000 },
+        ],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => [item.segment_type, item.start_sec, item.end_sec])), [
+    ['outro', 5400, 6000], ['post-credits', 5550, 5600],
+  ]);
+});
+
+test('re-splits Prime movie credits when the after-credits event arrives later', () => {
+  const document = {
+    title: 'Prime Video: Split Movie',
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    getElementById() { return null; },
+  };
+  const titleId = 'amzn1.dv.gti.14345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document);
+
+  const url = `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`;
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { type: 'MOVIE', title: 'Split Movie' } },
+    transitionTimecodes: {
+      result: { events: [{ eventType: 'END_CREDITS', startTimeMs: 5400000, endTimeMs: 6000000 }] },
+    },
+  }, '', url);
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: { events: [{ eventType: 'AFTER_CREDITS', startTimeMs: 5600000, endTimeMs: 5800000 }] },
+    },
+  }, '', url);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    part: item.credit_part,
+    start: item.start_sec,
+    end: item.end_sec,
+  }))), [
+    { start: 5400, end: 6000 },
+    { start: 5600, end: 5800 },
+  ]);
+});
+
+test('drains a transition response when movie metadata arrives after it', () => {
+  const { document } = primeDetailDocument();
+  const titleId = 'amzn1.dv.gti.32345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document, { deferTimers: true });
+  prime.state.imdbIdsByShowId = { [titleId]: 'tt801' };
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: {
+        events: [{ eventType: 'END_CREDITS', startTimeMs: 5400000, endTimeMs: 5700000 }],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.equal(prime.state.primeVideoPendingByTitleId.size, 1);
+  assert.equal(prime.state.primeVideoPollingTitleIds.size, 1);
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: {
+      catalog: { type: 'MOVIE', title: 'Late Movie Metadata', releaseYear: 2025 },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.deepEqual(plain(prime.state.allItems), [{
+    _eid: `${titleId}_movie_outro`,
+    _episodeTitle: 'Late Movie Metadata',
+    _showId: titleId,
+    media_type: 'movie',
+    imdb_id: 'tt801',
+    segment_type: 'outro',
+    season: null,
+    episode: null,
+    start_sec: 5400,
+    end_sec: 5700,
+  }]);
+  assert.equal(prime.state.primeVideoPendingByTitleId.size, 0);
+  assert.equal(prime.state.primeVideoPollingTitleIds.size, 0);
+  prime.runTimers();
+  assert.equal(prime.state.primeVideoPendingByTitleId.size, 0);
+});
+
+test('recognizes an untyped Prime movie playback response without episode context', () => {
+  const document = {
+    title: 'Prime Video: Untyped Movie',
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    getElementById() { return null; },
+  };
+  const titleId = 'amzn1.dv.gti.42345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document);
+  prime.state.imdbIdsByShowId = { [titleId]: 'tt802' };
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: {
+        events: [{ eventType: 'END_CREDITS', startTimeMs: 5400000, endTimeMs: 5700000 }],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.equal(prime.state.mediaType, 'movie');
+  assert.deepEqual(plain(prime.state.allItems.map(item => ({
+    imdb_id: item.imdb_id,
+    media_type: item.media_type,
+    season: item.season,
+    episode: item.episode,
+    start_sec: item.start_sec,
+    end_sec: item.end_sec,
+  }))), [{
+    imdb_id: 'tt802',
+    media_type: 'movie',
+    season: null,
+    episode: null,
+    start_sec: 5400,
+    end_sec: 5700,
+  }]);
+  assert.deepEqual(plain(prime.detectedShows), [{
+    title: 'Untyped Movie',
+    showId: titleId,
+    mediaType: 'movie',
+  }]);
+});
+
+test('classifies an untyped Prime movie credit response before attempting TV episode polling', () => {
+  const document = {
+    title: 'Prime Video: Untyped Movie',
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    getElementById() { return null; },
+  };
+  const titleId = 'amzn1.dv.gti.43345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document, { deferTimers: true });
+
+  prime.processPrimeVideoMetadata({
+    transitionTimecodes: {
+      result: { events: [{ eventType: 'END_CREDITS', startTimeMs: 5400000 }] },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.equal(prime.state.mediaType, 'movie');
+  assert.equal(prime.state.primeVideoPollingTitleIds.size, 0);
+  assert.equal(prime.state.primeVideoPendingByTitleId.size, 0);
+});
+
+test('does not use Prime NEXT_UP as a movie credits end when END_CREDITS is incomplete', () => {
+  const { document } = primeDetailDocument();
+  const titleId = 'amzn1.dv.gti.22345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document);
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { type: 'MOVIE', title: 'Movie with scene' } },
+    transitionTimecodes: {
+      result: {
+        events: [
+          { eventType: 'END_CREDITS', startTimeMs: 5400000 },
+          { eventType: 'NEXT_UP', startTimeMs: 5700000, endTimeMs: 6000000 },
+        ],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.deepEqual(plain(prime.state.allItems), []);
+});
+
+test('waits for the Prime movie duration before finalizing an END_CREDITS start', () => {
+  let duration = 0;
+  const document = {
+    title: 'Prime Video: Delayed Duration Movie',
+    querySelector() { return null; },
+    querySelectorAll(css) {
+      return css === '#dv-web-player video, [id^="dv-web-player"] video, video'
+        ? [{ get duration() { return duration; } }]
+        : [];
+    },
+    getElementById() { return null; },
+  };
+  const titleId = 'amzn1.dv.gti.23345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document, { deferTimers: true });
+  prime.state.imdbIdsByShowId = { [titleId]: 'tt806' };
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { type: 'MOVIE', title: 'Delayed Duration Movie' } },
+    transitionTimecodes: {
+      result: {
+        events: [
+          { eventType: 'END_CREDITS', startTimeMs: 5400000 },
+          { eventType: 'NEXT_UP', startTimeMs: 5700000, endTimeMs: 6000000 },
+        ],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.deepEqual(plain(prime.state.allItems), []);
+  assert.equal(prime.state.primeVideoMovieDurationPolls.size, 1);
+
+  duration = 6000;
+  prime.runTimers();
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => [item.start_sec, item.end_sec])), [[5400, 6000]]);
+  assert.equal(prime.state.primeVideoMovieDurationPolls.size, 0);
+});
+
 test('batches Prime segments arriving in separate playback responses', () => {
   const { document, ids } = primeDetailDocument();
   const prime = loadPrimeVideoExtractor(document, { deferTimers: true });
@@ -700,4 +1052,38 @@ test('batches Prime segments arriving in separate playback responses', () => {
   const captureLogs = prime.logs.filter(([message]) => message.includes('Captured timestamps'));
   assert.equal(captureLogs.length, 1);
   assert.equal(captureLogs[0][1].segments.length, 2);
+});
+
+test('Prime combines credits around a scene regardless of provider event order', () => {
+  const { document } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document);
+  const titleId = 'amzn1.dv.gti.13345678-1234-4abc-8def-123456789012';
+  const url = `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`;
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { type: 'MOVIE', title: 'Out of order credits' } },
+    transitionTimecodes: { result: { events: [
+      { eventType: 'END_CREDITS', startTimeMs: 5800000, endTimeMs: 6000000 },
+      { eventType: 'AFTER_CREDITS', startTimeMs: 5600000, endTimeMs: 5800000 },
+      { eventType: 'END_CREDITS', startTimeMs: 5400000, endTimeMs: 5600000 },
+    ] } },
+  }, '', url);
+  assert.deepEqual(plain(prime.state.allItems.map(item => [item.segment_type, item.start_sec, item.end_sec])), [
+    ['outro', 5400, 6000], ['post-credits', 5600, 5800],
+  ]);
+});
+
+test('Prime removes an earlier candidate when later scene metadata proves it starts too late', () => {
+  const { document } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document);
+  const titleId = 'amzn1.dv.gti.13345678-1234-4abc-8def-123456789012';
+  const url = `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`;
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: { catalog: { type: 'MOVIE', title: 'Late credits' } },
+    transitionTimecodes: { result: { events: [{ eventType: 'END_CREDITS', startTimeMs: 5800000, endTimeMs: 6000000 }] } },
+  }, '', url);
+  assert.equal(prime.state.allItems.length, 1);
+  prime.processPrimeVideoMetadata({ transitionTimecodes: { result: { events: [
+    { eventType: 'AFTER_CREDITS', startTimeMs: 5600000, endTimeMs: 5700000 },
+  ] } } }, '', url);
+  assert.equal(prime.state.allItems.length, 0);
 });

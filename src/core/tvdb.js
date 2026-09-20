@@ -122,7 +122,7 @@ async function getTvdbToken(forceRefresh = false) {
   return loginPromise;
 }
 
-async function authenticatedTvdbGet(path) {
+async function authenticatedTvdbGet(path, includeEnvelope = false) {
   let token = await getTvdbToken(false);
   let response = await tvdbRequest({ path, token });
   if (response.status === 401) {
@@ -133,7 +133,21 @@ async function authenticatedTvdbGet(path) {
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`TVDB request failed (HTTP ${response.status || 0})`);
   }
-  return response.body?.data;
+  return includeEnvelope ? response.body : response.body?.data;
+}
+
+// Follow every page: using only page zero can silently lose later seasons.
+async function fetchAllTvdbEpisodes(basePath) {
+  const episodes = [];
+  for (let page = 0; page < 500; page++) {
+    const envelope = await authenticatedTvdbGet(`${basePath}${basePath.includes('?') ? '&' : '?'}page=${page}`, true);
+    const rows = envelope?.data?.series?.episodes || envelope?.data?.episodes;
+    if (!Array.isArray(rows)) throw new Error('TVDB returned an invalid episode catalogue');
+    episodes.push(...rows);
+    if (envelope.links?.next == null) return episodes;
+    if (!rows.length) throw new Error('TVDB pagination returned an empty page with a next link');
+  }
+  throw new Error('TVDB episode catalogue exceeded the pagination limit');
 }
 
 function cachedTvdbGet(cache, key, path) {
@@ -152,9 +166,9 @@ async function fetchTvdbEpisodeList(seriesId, language = TVDB_EPISODE_LANGUAGE) 
   const encodedSeriesId = encodeURIComponent(seriesId);
   const encodedLanguage = encodeURIComponent(normalizedLanguage);
   const cacheKey = `series:${seriesId}|seasonType:${TVDB_SEASON_TYPE}|language:${normalizedLanguage}|page:0`;
-  const path = `/series/${encodedSeriesId}/episodes/${TVDB_SEASON_TYPE}/${encodedLanguage}?page=0`;
-  const data = await cachedTvdbGet(episodeListCache, cacheKey, path);
-  return data?.series?.episodes || data?.episodes || [];
+  const path = `/series/${encodedSeriesId}/episodes/${TVDB_SEASON_TYPE}/${encodedLanguage}`;
+  if (!episodeListCache.has(cacheKey)) episodeListCache.set(cacheKey, fetchAllTvdbEpisodes(path).catch(error => { episodeListCache.delete(cacheKey); throw error; }));
+  return episodeListCache.get(cacheKey);
 }
 
 async function fetchTvdbEpisodeTranslation(episodeId, language = TVDB_EPISODE_LANGUAGE) {
