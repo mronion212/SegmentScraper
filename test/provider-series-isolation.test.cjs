@@ -18,6 +18,7 @@ function loadExtractor(relativePath, exportName, globals = {}) {
   const catalogs = [];
   const logs = [];
   let source = [
+    fs.readFileSync(path.join(__dirname, '..', 'src/core/output-policy.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', 'src/normalization/segment-mapper.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8'),
@@ -83,6 +84,38 @@ function netflixPayload(id, title, episodeId) {
   };
 }
 
+test('Netflix captures a late outro after an intro, including restored numeric IDs', () => {
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata');
+  const payload = netflixPayload(100, 'Alpha', 123);
+  netflix.process(payload);
+  assert.equal(netflix.state.allItems.length, 1);
+  // A restored capture can have string IDs while fresh metadata uses numbers.
+  netflix.state.allItems[0]._eid = '123';
+  const episode = payload.video.seasons[0].episodes[0];
+  episode.creditsOffset = 1500;
+  episode.runtime = 1600;
+  netflix.process(payload);
+  netflix.process(payload);
+  assert.deepEqual(plain(netflix.state.allItems.map(item => [item.segment_type, item.start_sec, item.end_sec])), [
+    ['intro', 1, 11], ['outro', 1500, 1600],
+  ]);
+});
+
+test('Netflix does not discard metadata for an episode ID captured under another show', () => {
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata');
+  netflix.process(netflixPayload(100, 'Alpha', 'same-id'));
+  netflix.process(netflixPayload(200, 'Beta', 'same-id'));
+  assert.deepEqual(plain(netflix.state.allItems.map(item => item._showId)), ['100', '200']);
+});
+
+test('Netflix movie credit offsets remain withheld pending playback verification', () => {
+  const statuses = [];
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus: message => statuses.push(message) });
+  netflix.process({ video: { id: 1, type: 'movie', title: 'Movie', creditsOffset: 5400, runtime: 6000 } });
+  assert.equal(netflix.state.allItems.length, 0);
+  assert.match(statuses[0], /unverified/);
+});
+
 test('Netflix tags timestamps and catalogs with their own series id', () => {
   const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata');
   netflix.state.imdbIdsByShowId = { '100': 'tt100', '200': 'tt200' };
@@ -97,7 +130,7 @@ test('Netflix tags timestamps and catalogs with their own series id', () => {
   assert.deepEqual(plain(netflix.catalogs.map(catalog => catalog.showId)), ['100', '200']);
   assert.deepEqual(plain(netflix.logs), [
     [
-      '[NFE] Captured timestamps · Alpha · S01E01',
+      '[NFE] Captured timestamps · Alpha · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Alpha episode',
         episodeId: 'alpha-1',
@@ -105,7 +138,7 @@ test('Netflix tags timestamps and catalogs with their own series id', () => {
       },
     ],
     [
-      '[NFE] Captured timestamps · Beta · S01E01',
+      '[NFE] Captured timestamps · Beta · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Beta episode',
         episodeId: 'beta-1',
@@ -137,13 +170,13 @@ test('Netflix logs multi-episode metadata as one timestamp entry per episode', (
     segments: details.segments,
   }))), [
     {
-      message: '[NFE] Captured timestamps · Alpha · S01E01',
+      message: '[NFE] Captured timestamps · Alpha · S01E01 · intro: 00:01.000 → 00:11.000',
       title: 'Alpha episode',
       episodeId: 'alpha-1',
       segments: [{ type: 'intro', start: '00:01.000', end: '00:11.000', start_sec: 1, end_sec: 11 }],
     },
     {
-      message: '[NFE] Captured timestamps · Alpha · S01E02',
+      message: '[NFE] Captured timestamps · Alpha · S01E02 · recap: 00:00.000 → 00:12.500 · intro: 00:12.500 → 01:28.000',
       title: 'Second episode',
       episodeId: 'alpha-2',
       segments: [
@@ -193,11 +226,11 @@ test('Videoland tags timestamps and incremental catalogs with their own program 
     ['program-b', 'tt400'],
   ]);
   assert.deepEqual(plain(videoland.state.allItems[0]._tvdbEpisodeLanguages), ['eng', 'nld']);
-  assert.equal(videoland.state.allItems[0]._tvdbRequireTitleMatch, true);
+  assert.equal(videoland.state.allItems[0]._tvdbRequireTitleMatch, undefined);
   assert.deepEqual(plain(videoland.catalogs.map(catalog => catalog.showId)), ['program-a', 'program-b']);
   assert.deepEqual(plain(videoland.logs), [
     [
-      '[VLE] Captured timestamps · Alpha · S01E01',
+      '[VLE] Captured timestamps · Alpha · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Alpha episode',
         clipId: 'clip-a',
@@ -205,7 +238,7 @@ test('Videoland tags timestamps and incremental catalogs with their own program 
       },
     ],
     [
-      '[VLE] Captured timestamps · Beta · S01E01',
+      '[VLE] Captured timestamps · Beta · S01E01 · intro: 00:01.000 → 00:11.000',
       {
         title: 'Beta episode',
         clipId: 'clip-b',

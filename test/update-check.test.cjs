@@ -5,6 +5,7 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const currentVersion = require('../package.json').version;
+const newerVersion = (Number(currentVersion.split('.')[0]) + 1) + '.0.0';
 
 function loadUpdateCheck() {
   const state = {};

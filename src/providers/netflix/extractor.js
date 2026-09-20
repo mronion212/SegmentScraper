@@ -1,6 +1,7 @@
 /** Netflix-specific metadata interception and segment extraction. */
 
 import { state } from '../../core/state.js';
+import { capturedSegmentKey } from '../../core/output-policy.js';
 import { createNormalizedSegment } from '../../normalization/segment-mapper.js';
 import { setProviderEpisodeCatalog } from '../../core/tvdb.js';
 import { handleDetectedShow, recordExtractedSegments, setDbStatus } from '../bootstrap.js';
@@ -63,10 +64,10 @@ export function processNetflixMetadata(data) {
   ), showId);
 
   const extractedItems = [];
+  const capturedKeys = new Set(state.allItems.map(capturedSegmentKey));
   for (const season of video.seasons || []) {
     for (const episode of season.episodes || []) {
       const episodeId = episode.episodeId || episode.id;
-      if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
 
       const common = {
         providerName: 'netflix',
@@ -104,7 +105,9 @@ export function processNetflixMetadata(data) {
       const episodeItems = [];
       for (const segment of segments) {
         const item = createNormalizedSegment({ ...common, ...segment });
-        if (item) {
+        // Metadata can arrive in stages: an intro must not hide a later outro.
+        if (item && !capturedKeys.has(capturedSegmentKey(item))) {
+          capturedKeys.add(capturedSegmentKey(item));
           episodeItems.push(item);
           extractedItems.push(item);
         }

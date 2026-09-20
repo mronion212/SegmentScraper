@@ -8,6 +8,12 @@ import { createCore } from '../app/shared-core.mjs';
 const job={id:'file-1',report:{duration:7200,chapters:[],analysis:{status:'needs-review',scenes:[]}}};
 const draft={imdb_id:'tt1234567',media_type:'movie',endingReviewed:true,sceneReview:[],segments:[{segment_type:'outro',start_sec:6900.125,end_sec:7100.5}]};
 const none={intro:null,recap:null,outro:null,post_credits:null};
+test('desktop shared core retains late segments and normalizes capture IDs', () => {
+ const core = createCore({request() {}});
+ const intro = {_showId:'100',_eid:123,season:1,episode:1,segment_type:'intro',start_sec:1,end_sec:11};
+ assert.equal(core.capturedSegmentKey(intro),core.capturedSegmentKey({...intro,_eid:'123'}));
+ assert.notEqual(core.capturedSegmentKey(intro),core.capturedSegmentKey({...intro,segment_type:'outro',start_sec:1500,end_sec:1600}));
+});
 function mock({existing=none,keywords=[],fail=false,imdb=true}={}) {
  const calls=[];
  const fetcher=async(url,options={})=>{

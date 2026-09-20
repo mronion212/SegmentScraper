@@ -4,19 +4,20 @@
  */
 
 import { state, createState, createMediaCacheKey } from '../core/state.js';
-import { outputSegmentAllowed } from '../core/output-policy.js';
+import { outputSegmentAllowed, capturedSegmentKey } from '../core/output-policy.js';
+import { restoreCaptureSession, scheduleCaptureSave, saveCaptureSession, clearCaptureSession } from '../core/capture-session.js';
 import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
-import { injectBtn, getNextEpBtn } from '../ui/button.js';
+import { injectBtn, getNextEpBtn, removePlayerButton } from '../ui/button.js';
 import { setProviderName, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput, showExportPreview, showRequiredUpdate } from '../ui/panel.js';
 import { getProviderConfig } from '../config/provider-config.js';
 import { loadIntrodbSettings, saveIntrodbSettings } from '../core/introdb-settings.js';
 import { checkTmdbExtraScenes, saveTmdbToken } from '../core/tmdb.js';
 import { loadTvdbSettings, saveTvdbSettings, mapSeriesItemsToTvdb } from '../core/tvdb.js';
 
-const BUTTON_IDLE_DELAY_MS = 3000;
+
 let activeProviderConfig = getProviderConfig('netflix');
-let buttonHideTimer;
+
 
 function getItemShowId(item) {
   return item?._showId != null ? String(item._showId) : '';
@@ -92,6 +93,7 @@ async function filterMoviesWithKnownExtraScenes(items, existingByKey) {
 }
 
 function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
+  scheduleCaptureSave();
   const normalizedShowId = showId != null ? String(showId) : '';
   const hasTaggedItems = state.allItems.some(item => getItemShowId(item));
   state.allItems.forEach(item => {
@@ -109,6 +111,8 @@ function applyImdbIdToShow(imdbId, showId, { overwrite = false } = {}) {
 
 export function setDbStatus(msg) {
   state.dbStatusMsg = msg;
+  const feedback = document.getElementById('nfe-imdb-feedback');
+  if (feedback) feedback.textContent = msg;
   const el = document.getElementById('nfe-imdb-status');
   if (el) el.textContent = `${state.mediaType === 'movie' ? 'Movie' : 'TV'} · IMDb ID: ${state.imdbId || 'Not set'}`;
 }
@@ -182,7 +186,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     updateImdbInput();
     setDbStatus(`Manual override applied · ID: ${imdbOverride}`);
     updateCounters();
-    loadExistingSegments(imdbOverride);
+    loadExistingSegments(imdbOverride).catch(error => setIntrodbStatus(error.message));
     return;
   }
 
@@ -199,7 +203,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
       updateImdbInput();
       setDbStatus(`Found: ${result.imdbId}`);
       updateCounters();
-      loadExistingSegments(result.imdbId);
+      loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
     } else {
       if (!isCurrentShow()) return;
       setDbStatus(`IMDb lookup failed: ${result.error}`);
@@ -215,7 +219,16 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
 export function recordExtractedSegments(items) {
   if (state.updateRequired) return;
   if (!items.length) return;
+  const keys = new Set(state.allItems.map(capturedSegmentKey));
+  items = items.filter(item => {
+    const key = capturedSegmentKey(item);
+    if (keys.has(key)) return false;
+    keys.add(key);
+    return true;
+  });
+  if (!items.length) return;
   state.allItems.push(...items);
+  scheduleCaptureSave();
   state.interceptedCount++;
   updateCounters();
   toast(`+${items.length} timestamps captured · total: ${state.allItems.length}`);
@@ -226,8 +239,26 @@ export function isAlreadyInIntroDB(item) {
   return hasExistingSegment(state.dedupCacheV2[key], item);
 }
 
-async function mapCapturedItemsWithTvdb(action) {
-  const capturedItems = state.allItems.slice();
+function hasExistingSegment(existing, item) {
+  if (!existing) return false;
+  const ranges = existing.rangesByType?.get(item.segment_type);
+  if (ranges?.length) {
+    const start = Number(item.start_sec);
+    const end = Number(item.end_sec);
+    return ranges.some(range => {
+      const sameRange = Number.isFinite(start) && Number.isFinite(end) &&
+        Math.abs(Number(range.startSec) - start) < 0.01 &&
+        Math.abs(Number(range.endSec) - end) < 0.01;
+      if (!sameRange) return false;
+      return true;
+    });
+  }
+  return existing.has?.(item.segment_type) ?? false;
+}
+
+const overviewSource = Symbol('overviewSource');
+
+async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.slice()) {
   const pendingItems = capturedItems.filter(item => !item.imdb_id || item.imdb_id === 'IMDB_PENDING');
   if (pendingItems.length) {
     toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
@@ -319,118 +350,203 @@ function normalizeExportItem(item) {
   return isMovieItem(item) ? normalizeMovieExportItem(item) : item;
 }
 
+async function loadCanonicalExisting(episodeKeys) {
+  const results = new Map();
+  // Avoid bursts of hundreds of requests for large captured catalogues.
+  for (let index = 0; index < episodeKeys.length; index += 4) {
+    const batch = await Promise.all(episodeKeys.slice(index, index + 4).map(async key => [
+      key, await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
+    ]));
+    for (const [key, value] of batch) results.set(key, value);
+  }
+  return results;
+}
+
 export async function exportJSON() {
+  if (state.exportInProgress || state.submitInProgress) {
+    toast('An operation is already in progress. Please wait.');
+    return;
+  }
+  state.exportInProgress = true;
+  try { await prepareJSONExport(); }
+  catch (error) {
+    toast(error.message || 'Export failed. Please try again.');
+    setIntrodbStatus('Export stopped. Please try again when the connection is available.');
+  } finally { state.exportInProgress = false; }
+}
+
+async function prepareJSONExport() {
   if (!state.allItems.length) {
     toast('No timestamps yet.');
     return;
   }
-  const requiresTvdb = hasTvItems(state.allItems);
-  if (requiresTvdb && !state.tvdbApiKey) {
-    toast('Please enter your own TVDB API key before exporting JSON.');
-    setTvdbStatus('No TVDB API key configured');
-    return;
-  }
-  if (state.submitInProgress) {
-    toast('Submission in progress, please wait...');
-    return;
-  }
-
-  toast(requiresTvdb ? 'Validating JSON export against TVDB...' : 'Preparing movie JSON export...');
-  const mapped = await mapCapturedItemsWithTvdb('JSON export');
-  const mappedItems = mapped.items;
-  let items = filterShortOutputSegments(mappedItems);
-  const shortSegmentCount = mappedItems.length - items.length;
-  if (shortSegmentCount > 0) {
-    toast(`${shortSegmentCount} invalid or unsupported segment(s) removed from export.`);
-  }
-  if (!items.length) {
-    if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-      toast(`All mapped segments have invalid durations or unsupported movie types; nothing was exported.`);
+  const capturedItems = state.allItems.map((item, index) => ({ ...item, [overviewSource]: index }));
+  const view = {
+    items: [], fileCount: 0, duplicateCount: 0, checking: true,
+    rows: capturedItems.map(item => ({ item, status: 'Checking', reason: '' })),
+    message: 'Checking TVDB mapping and IntroDB…',
+  };
+  const refresh = showExportPreview(view);
+  try {
+    if (hasTvItems(capturedItems) && !state.tvdbApiKey) {
+      revealApiSettings();
+      toast('Please enter your own TVDB API key before exporting JSON.');
+      setTvdbStatus('No TVDB API key configured');
+      view.message = 'TVDB API key missing. Timestamps remain available; JSON download is disabled.';
       return;
     }
-    const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
-    const noMappingMessage = hasTvItems(mapped.capturedItems)
-      ? 'No series has a reliable TVDB episode mapping; nothing was exported.'
-      : 'No movie has a usable IMDb ID; nothing was exported.';
-    toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
-    return;
-  }
-
-  const mediaKeys = [...new Set(
-    items
-      .map(getItemCacheKey)
-  )];
-  toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
-  const canonicalExisting = new Map(await Promise.all(mediaKeys.map(async key => [
-    key,
-    await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
-  ])));
-
-  items = await filterMoviesWithKnownExtraScenes(items, canonicalExisting);
-  if (!items.length) {
-    toast('No movies eligible for export; see the scene exclusion or TMDB check message.');
-    return;
-  }
-  const beforeCount = items.length;
-  items = items.filter(item => {
-    const key = getItemCacheKey(item);
-    return !hasExistingSegment(canonicalExisting.get(key), item);
-  });
-  const duplicateCount = beforeCount - items.length;
-  if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
-  if (!items.length) {
-    toast('Nothing left to export after removing duplicates.');
-    return;
-  }
-
-  const exportItems = items.map(normalizeExportItem);
-  const groups = new Map();
-  for (const item of exportItems) {
-    const key = item.imdb_id || 'no_id';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
-  }
-
-  const files = [];
-  const maxItemsPerFile = 100;
-  for (const [imdbId, groupItems] of groups) {
-    const total = Math.ceil(groupItems.length / maxItemsPerFile);
-    for (let index = 0; index < total; index++) {
-      files.push({
-        imdbId,
-        part: total > 1 ? `_part${index + 1}of${total}` : '',
-        data: groupItems.slice(index * maxItemsPerFile, (index + 1) * maxItemsPerFile),
-      });
-    }
-  }
-
-  let downloaded = 0;
-  function downloadNext(index) {
-    if (index >= files.length) {
-      toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+    if (state.submitInProgress) {
+      toast('Submission in progress, please wait...');
       return;
     }
-    const file = files[index];
-    const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = Object.assign(document.createElement('a'), {
-      href: url,
-      download: `timestamps_${file.imdbId}${file.part}.json`,
+
+    toast('Validating JSON export against TVDB...');
+    const mapped = await mapCapturedItemsWithTvdb('JSON export', capturedItems);
+    const mappedItems = mapped.items;
+    for (const row of view.rows) {
+      row.status = 'Unavailable';
+      row.reason = !row.item.imdb_id || row.item.imdb_id === 'IMDB_PENDING'
+        ? 'Missing IMDb ID' : 'No reliable TVDB mapping / excluded special';
+    }
+    for (const item of mappedItems) {
+      const row = view.rows[item[overviewSource]];
+      if (row) {
+        row.canonical = item;
+        row.status = 'Checking';
+        row.reason = '';
+        if (!filterShortOutputSegments([item]).length) {
+          row.status = 'Unavailable';
+          row.reason = 'Invalid duration or unsupported segment type';
+        }
+      }
+    }
+    let items = filterShortOutputSegments(mappedItems);
+    const shortSegmentCount = mappedItems.length - items.length;
+    if (shortSegmentCount > 0) {
+      toast(`${shortSegmentCount} invalid or unsupported segment(s) removed from export.`);
+    }
+    if (!items.length) {
+      if (mappedItems.length && shortSegmentCount === mappedItems.length) {
+        toast(`All mapped segments have invalid durations or unsupported movie types; nothing was exported.`);
+        return;
+      }
+      const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
+      const noMappingMessage = 'No series has a reliable TVDB episode mapping; nothing was exported.';
+      toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
+      return;
+    }
+
+    const episodeKeys = [...new Set(
+      items
+        .map(item => getItemCacheKey(item))
+    )];
+    toast(`Checking IntroDB for existing segments (${episodeKeys.length} media item(s))...`);
+    const canonicalExisting = new Map();
+    for (let index = 0; index < episodeKeys.length; index += 4) {
+      await Promise.all(episodeKeys.slice(index, index + 4).map(async key => {
+        try {
+          canonicalExisting.set(key, await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }));
+        } catch (error) {
+          canonicalExisting.set(key, { error: error?.message || 'IntroDB duplicate check failed.' });
+        }
+      }));
+    }
+
+    const eligibleMovies = await filterMoviesWithKnownExtraScenes(items.filter(item => !canonicalExisting.get(getItemCacheKey(item))?.error), canonicalExisting);
+    const eligibleSet = new Set(eligibleMovies);
+    for (const item of items) {
+      if (isMovieItem(item) && !canonicalExisting.get(getItemCacheKey(item))?.error && !eligibleSet.has(item)) {
+        const row = view.rows[item[overviewSource]];
+        if (row) { row.status = 'Unavailable'; row.reason = 'Movie excluded by extra-scene checks'; }
+      }
+    }
+    items = items.filter(item => !isMovieItem(item) || canonicalExisting.get(getItemCacheKey(item))?.error || eligibleSet.has(item));
+    items = items.filter(item => {
+      const key = getItemCacheKey(item);
+      const existing = canonicalExisting.get(key);
+      const row = view.rows[item[overviewSource]];
+      const failed = Boolean(existing.error);
+      const duplicate = !failed && hasExistingSegment(existing, item);
+      if (row) {
+        row.status = failed ? 'Unavailable' : duplicate ? 'In IntroDB' : 'NEW';
+        row.reason = failed ? existing.error : '';
+        row.existingRanges = failed ? [] : existing.rangesByType?.get(item.segment_type) || [];
+      }
+      if (failed) toast(existing.error);
+      return !failed && !duplicate;
     });
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    downloaded++;
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setTimeout(() => downloadNext(index + 1), 400);
-  }
+    const duplicateCount = view.rows.filter(row => row.status === 'In IntroDB').length;
+    view.duplicateCount = duplicateCount;
+    if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
+    if (!items.length) {
+      toast('Nothing left to export after removing duplicates.');
+      return;
+    }
 
-  showExportPreview({
-    items: exportItems,
-    fileCount: files.length,
-    duplicateCount,
-    onConfirm: () => downloadNext(0),
-  });
+    const exportItems = items.map(normalizeExportItem);
+    const groups = new Map();
+    for (const item of exportItems) {
+      const key = item.imdb_id || 'no_id';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+
+    const files = [];
+    const maxItemsPerFile = 100;
+    for (const [imdbId, groupItems] of groups) {
+      const total = Math.ceil(groupItems.length / maxItemsPerFile);
+      for (let index = 0; index < total; index++) {
+        files.push({
+          imdbId,
+          part: total > 1 ? `_part${index + 1}of${total}` : '',
+          data: groupItems.slice(index * maxItemsPerFile, (index + 1) * maxItemsPerFile),
+        });
+      }
+    }
+
+    let downloaded = 0;
+    function downloadNext(index) {
+      if (index >= files.length) {
+        toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+        return;
+      }
+      const file = files[index];
+      const blob = new Blob([JSON.stringify({ items: file.data }, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = Object.assign(document.createElement('a'), {
+        href: url,
+        download: `timestamps_${file.imdbId}${file.part}.json`,
+      });
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      downloaded++;
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setTimeout(() => downloadNext(index + 1), 400);
+    }
+
+    Object.assign(view, {
+      items: exportItems,
+      fileCount: files.length,
+      duplicateCount,
+      onConfirm: () => downloadNext(0),
+    });
+  } catch (error) {
+    view.message = error.message || 'Validation failed. JSON download is disabled.';
+    toast(view.message);
+  } finally {
+    view.checking = false;
+    for (const row of view.rows) {
+      if (row.status === 'Checking') {
+        row.status = 'Unavailable';
+        row.reason = view.message || 'Validation could not be completed';
+      }
+    }
+    view.message = view.items.length
+      ? 'Only verified NEW timestamps are included in the JSON download.'
+      : 'JSON download unavailable. ' + (view.message.includes('Checking') ? 'No verified new timestamps.' : view.message);
+    refresh?.(view);
+  }
 }
 
 function updateSubmitBtn(label) {
@@ -439,17 +555,33 @@ function updateSubmitBtn(label) {
 }
 
 export async function submitToIntroDB() {
+  if (state.exportInProgress || state.submitInProgress) {
+    toast('An operation is already in progress. Please wait.');
+    return;
+  }
+  try { await prepareIntroDBSubmission(); }
+  catch (error) {
+    state.submitInProgress = false;
+    updateSubmitBtn('Submit to IntroDB');
+    toast(error.message || 'Submission failed. Please try again.');
+    setIntrodbStatus('Submission stopped. Please try again when the connection is available.');
+  }
+}
+
+async function prepareIntroDBSubmission() {
   if (!state.allItems.length) {
     toast('No timestamps to submit.');
     return;
   }
   if (!state.introdbApiKey) {
-    toast('Please enter your IntroDB API key in the panel above.');
+    revealApiSettings();
+    toast('Please enter your IntroDB API key in API settings.');
     setIntrodbStatus('No API key configured');
     return;
   }
   const requiresTvdb = hasTvItems(state.allItems);
   if (requiresTvdb && !state.tvdbApiKey) {
+    revealApiSettings();
     toast('Please enter your own TVDB API key in the panel above.');
     setTvdbStatus('No TVDB API key configured');
     return;
@@ -477,7 +609,7 @@ export async function submitToIntroDB() {
   if (!allMapped.length) {
     if (mappedItems.length && shortSegmentCount === mappedItems.length) {
       toast(`All mapped segments have invalid durations or unsupported movie types; nothing was submitted.`);
-      setIntrodbStatus(`Nothing submitted: segments must be at least ${MIN_OUTPUT_SEGMENT_DURATION_SECONDS} seconds`);
+      setIntrodbStatus(`Nothing submitted: segments must be at least 5 seconds`);
       stopSubmission();
       return;
     }
@@ -497,10 +629,7 @@ export async function submitToIntroDB() {
       .map(getItemCacheKey)
   )];
   toast(`Checking IntroDB for existing segments (${mediaKeys.length} media item(s))...`);
-  const canonicalExisting = new Map(await Promise.all(mediaKeys.map(async key => [
-    key,
-    await loadExistingSegmentsForEpisode(key, undefined, { useCache: false, writeCache: false }),
-  ])));
+  const canonicalExisting = await loadCanonicalExisting(mediaKeys);
 
   const safeMapped = await filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
   if (!safeMapped.length) {
@@ -564,17 +693,25 @@ export async function submitToIntroDB() {
 }
 
 export function clearData() {
+  if (state.submitInProgress || state.exportInProgress) { toast('Please wait until the current operation finishes.'); return; }
   if (!confirm('Delete all captured timestamps?')) return;
   const introdbApiKey = state.introdbApiKey;
+  const panelVisible = state.panelVisible;
   const { apiKey: tvdbApiKey, pin: tvdbPin } = loadTvdbSettings();
   for (const key of Object.keys(state)) delete state[key];
-  Object.assign(state, createState(activeProviderConfig.name), { introdbApiKey, tvdbApiKey, tvdbPin });
+  Object.assign(state, createState(activeProviderConfig.name), { introdbApiKey, tvdbApiKey, tvdbPin, panelVisible });
+  clearCaptureSession();
   updateCounters();
   updatePanelTitle();
   setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
   setIntrodbStatus('');
   updateImdbInput();
   toast('Data cleared');
+}
+
+function revealApiSettings() {
+  const settings = document.getElementById('nfe-settings');
+  if (settings) settings.open = true;
 }
 
 function configurePanelCallbacks() {
@@ -602,7 +739,7 @@ function configurePanelCallbacks() {
       state.dedupCacheV2 = {};
       setDbStatus(`ID saved: ${value}`);
       updateCounters();
-      loadExistingSegments(value);
+      loadExistingSegments(value).catch(error => setIntrodbStatus(error.message));
       lookupImdbTitle(value).then(result => {
         if (!result.success) return;
         state.showTitle = result.title;
@@ -625,7 +762,7 @@ function configurePanelCallbacks() {
           updateImdbInput();
           setDbStatus(`Found: ${result.imdbId}`);
           updateCounters();
-          loadExistingSegments(result.imdbId);
+          loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
         } else {
           setDbStatus(`IMDb lookup failed: ${result.error}`);
         }
@@ -670,6 +807,7 @@ function configurePanelCallbacks() {
 
 function setupPanelHandler() {
   document.addEventListener('click', event => {
+    if (event.target.closest?.('#nfe-export-preview')) return;
     const panel = document.getElementById('nfe-panel');
     const button = document.getElementById('nfe-btn');
     if (panel && state.panelVisible && !panel.contains(event.target) && !button?.contains(event.target)) closePanel();
@@ -677,88 +815,32 @@ function setupPanelHandler() {
 }
 
 function syncVisibility() {
-  if (!state.panelVisible) return;
-  if (state.updateRequired) {
-    const panel = document.getElementById('nfe-panel');
-    if (panel) {
-      panel.style.opacity = '1';
-      panel.style.pointerEvents = 'auto';
-    }
-    return;
+  const panel = document.getElementById("nfe-panel");
+  if (panel && state.panelVisible) {
+    panel.style.opacity = "1";
+    panel.style.pointerEvents = "auto";
   }
-  const controls =
-    document.querySelector('[data-uia="controls-standard"]') ||
-    document.querySelector('[class*="PlayerControls"]') ||
-    document.querySelector('.watch-video--bottom-controls-container');
-  if (!controls) return;
-  const panel = document.getElementById('nfe-panel');
-  if (!panel) return;
-  const visible = parseFloat(getComputedStyle(controls).opacity) > 0.05;
-  const opacity = visible ? '1' : '0';
-  const pointerEvents = visible ? 'auto' : 'none';
-  if (panel.style.opacity !== opacity) panel.style.opacity = opacity;
-  if (panel.style.pointerEvents !== pointerEvents) panel.style.pointerEvents = pointerEvents;
-}
-
-function setButtonVisibility(visible) {
-  const button = document.getElementById('nfe-btn');
-  if (!button) return;
-  const opacity = visible ? '0.85' : '0';
-  const pointerEvents = visible ? 'auto' : 'none';
-  if (button.style.opacity !== opacity) button.style.opacity = opacity;
-  if (button.style.pointerEvents !== pointerEvents) button.style.pointerEvents = pointerEvents;
-}
-
-function resetButtonIdleTimer() {
-  clearTimeout(buttonHideTimer);
-  setButtonVisibility(true);
-  buttonHideTimer = setTimeout(() => {
-    buttonHideTimer = null;
-    setButtonVisibility(false);
-  }, BUTTON_IDLE_DELAY_MS);
-}
-
-function setupControlVisibilityHandler() {
-  let framePending = false;
-  let trailingSyncTimer = null;
-  const scheduleFrame = typeof requestAnimationFrame === 'function'
-    ? requestAnimationFrame
-    : callback => setTimeout(callback, 0);
-
-  document.addEventListener('mousemove', () => {
-    if (framePending) return;
-    framePending = true;
-    scheduleFrame(() => {
-      framePending = false;
-      resetButtonIdleTimer();
-      syncVisibility();
-      if (trailingSyncTimer != null) clearTimeout(trailingSyncTimer);
-      trailingSyncTimer = setTimeout(() => {
-        trailingSyncTimer = null;
-        syncVisibility();
-      }, 250);
-    });
-  }, true);
 }
 
 export function bootstrapProvider({
   providerName,
   setupInterception,
-  isPlayerPage = () => true,
+  isPlayerPage = () => Boolean(document.querySelector('video')),
 }) {
   activeProviderConfig = getProviderConfig(providerName);
   Object.assign(state, createState(activeProviderConfig.name));
+  restoreCaptureSession(providerName);
+  window.addEventListener('pagehide', saveCaptureSession);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) saveCaptureSession(); });
   loadIntrodbSettings();
   loadTvdbSettings();
   setProviderName(providerName);
   configurePanelCallbacks();
   setupInterception();
   setupPanelHandler();
-  setupControlVisibilityHandler();
   checkForRequiredUpdate().then(result => {
     if (!result.required) return;
-    state.allItems = [];
-    state.interceptedCount = 0;
+    saveCaptureSession();
     const showNotice = () => {
       if (document.body) showRequiredUpdate();
       else setTimeout(showNotice, 50);
@@ -767,31 +849,51 @@ export function bootstrapProvider({
   });
 
   let lastPath = location.pathname;
-  setInterval(() => {
+  let refreshTimer = null;
+  const refreshControls = () => {
+    refreshTimer = null;
+    if (!document.body) return;
     if (state.updateRequired) {
-      if (!document.getElementById('nfe-panel') && document.body) showRequiredUpdate();
-      syncVisibility();
+      if (!document.getElementById('nfe-panel')) showRequiredUpdate();
       return;
     }
-
     const inPlayer = isPlayerPage();
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
-      document.getElementById('nfe-btn')?.remove();
+      scheduleCaptureSave();
       if (!inPlayer) {
         document.getElementById('nfe-panel')?.remove();
         state.panelVisible = false;
       }
     }
-    if (inPlayer) {
-      const buttonMissing = !document.getElementById('nfe-btn');
-      if (buttonMissing) {
-        injectBtn(providerName, getNextEpBtn);
-        resetButtonIdleTimer();
-      }
-      syncVisibility();
+    if (inPlayer) injectBtn(providerName, getNextEpBtn);
+    else removePlayerButton();
+    const host = document.fullscreenElement || document.body;
+    for (const id of ['nfe-panel', 'nfe-export-preview', 'nfe-toast']) {
+      const element = document.getElementById(id);
+      if (element && element.parentElement !== host) host.appendChild(element);
     }
-  }, 1000);
+    syncVisibility();
+  };
+  const scheduleRefresh = () => {
+    if (refreshTimer === null) refreshTimer = setTimeout(refreshControls, 100);
+  };
+  const observePlayer = () => {
+    refreshControls();
+    if (typeof MutationObserver !== 'function') return;
+    const observer = new MutationObserver(records => {
+      if (records.every(record => record.target.closest?.('[id^="nfe-"]'))) return;
+      scheduleRefresh();
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  };
+  if (document.documentElement) observePlayer();
+  else document.addEventListener('DOMContentLoaded', observePlayer, { once: true });
+  document.addEventListener('fullscreenchange', refreshControls);
+  window.addEventListener('popstate', scheduleRefresh);
+  window.addEventListener('resize', scheduleRefresh);
+  // Backstop for history changes that do not mutate the player DOM.
+  setInterval(() => { if (!document.hidden) refreshControls(); }, 5000);
 
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
   win.__segmentScraper = {

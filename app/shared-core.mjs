@@ -56,6 +56,9 @@ const createState = (providerName) => ({
   interceptedCount: 0,
   panelVisible: false,
   submitInProgress: false,
+  exportInProgress: false,
+  sessionSavedAt: '',
+  sessionStorageError: false,
   submitResults: { ok: 0, fail: 0 },
   dedupCacheV2: {},
   introdbApiKey: '',
@@ -77,6 +80,9 @@ return { createEpisodeCacheKey, createMediaCacheKey, createSegmentCacheKey, crea
 const { state, createMediaCacheKey } = stateModule;
 const output_policy = (() => {
 /** Shared wire format and timing rules for both clients. Client-specific scene policy stays explicit. */
+function capturedSegmentKey(item) {
+  return JSON.stringify([String(item._showId || ''), String(item._eid), item.season, item.episode, item.segment_type, Number(item.start_sec), Number(item.end_sec)]);
+}
 function outputSegmentAllowed(item) {
   const movie=item?.is_movie===true||String(item?.media_type||item?.mediaType||item?._mediaType||'').toLowerCase()==='movie';
   const start=Number(item?.start_sec),end=Number(item?.end_sec);
@@ -87,7 +93,7 @@ function introdbPayload(item) {
   return {imdb_id:item.imdb_id,segment_type:item.segment_type,start_sec:item.start_sec,end_sec:item.end_sec,...(movie?{is_movie:true}:{season:item.season,episode:item.episode})};
 }
 
-return { outputSegmentAllowed, introdbPayload };
+return { capturedSegmentKey, outputSegmentAllowed, introdbPayload };
 })();
 const { outputSegmentAllowed, introdbPayload } = output_policy;
 const network = (() => {
@@ -103,7 +109,7 @@ const INTRODB_BASE = 'https://api.introdb.app';
  * Get GM_xmlhttpRequest if available (Tampermonkey/Greasemonkey)
  */
 function getGmXhr() {
-  return (typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null) || 
+  return (typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null) ||
          (typeof _GM_xmlhttpRequest !== 'undefined' ? _GM_xmlhttpRequest : null) ||
          (typeof GM !== 'undefined' && GM.xmlHttpRequest ? GM.xmlHttpRequest : null);
 }
@@ -160,7 +166,7 @@ async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
   const query = encodeURIComponent(String(title || '').toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').trim());
   const url = `https://v3.sg.media-imdb.com/suggestion/x/${query}.json`;
   console.log('[NFE] IMDb search request URL:', url, 'for title:', title, 'year:', year);
-  
+
   const gmXhr = getGmXhr();
   console.log('[NFE] GM_xmlhttpRequest available:', !!gmXhr, 'using fetch fallback');
   if (gmXhr) {
@@ -196,10 +202,10 @@ async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
       });
     });
   }
-  
+
   console.log('[NFE] Using fetch fallback (may fail due to CORS)');
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
     const data = await response.json();
     console.log('[NFE] IMDb search response data:', data);
     return resolveImdbSearchResponse(data, title, year, mediaType);
@@ -212,10 +218,10 @@ async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
 /**
  * Load existing segments from IntroDB for deduplication
  * Uses GM_xmlhttpRequest to avoid CORS issues
- * 
+ *
  * This function collects unique episode keys from the currently captured items
  * and calls /segments endpoint once per unique episode.
- * 
+ *
  * @param {string} imdbId - IMDb ID to load segments for
  * @param {string} apiKey - IntroDB API key (optional)
  * @returns {Promise<Array>} - Array of { key, segmentType } objects
@@ -262,6 +268,15 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
   
   const [imdbId, seasonOrMediaType, episode] = key.split('|');
   const isMovie = seasonOrMediaType === 'movie';
+  if (!isMovie && (!/^\d+$/.test(seasonOrMediaType || '') || Number(seasonOrMediaType) < 1
+    || !/^\d+$/.test(episode || '') || Number(episode) < 1)) {
+    throw new Error(`IntroDB cannot check ${imdbId} S${seasonOrMediaType}E${episode}: season and episode must be positive integers.`);
+  }
+  const describeHttpError = (status, body) => {
+    let detail = '';
+    try { const json = JSON.parse(body); detail = typeof json.error === 'string' ? json.error.slice(0, 200) : ''; } catch (_) {}
+    return new Error(`IntroDB duplicate check returned HTTP ${status} for ${imdbId} S${seasonOrMediaType}E${episode}${detail ? `: ${detail}` : '.'}`);
+  };
   const url = isMovie
     ? `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&is_movie=true`
     : `${INTRODB_BASE}/segments?imdb_id=${encodeURIComponent(imdbId)}&season=${encodeURIComponent(seasonOrMediaType)}&episode=${encodeURIComponent(episode)}`;
@@ -269,6 +284,9 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
   const gmXhr = getGmXhr();
 
   const parseExistingSegments = json => {
+    if (!json || typeof json !== 'object' || json.error || json.errors) {
+      throw new Error('IntroDB returned an invalid response. Please try again.');
+    }
     const set = new Set();
     const rangesByType = new Map();
     const coerceExistingSeconds = value => {
@@ -315,11 +333,14 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
     return set;
   };
   
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (gmXhr) {
       gmXhr({
         method: 'GET',
         url: url,
+        timeout: 15000,
+        ontimeout: () => reject(new Error('IntroDB duplicate check timed out. Please try again.')),
+        onabort: () => reject(new Error('IntroDB duplicate check was interrupted. Please try again.')),
         headers: { 'Accept': 'application/json' },
         onload: (response) => {
           try {
@@ -328,33 +349,34 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
               const set = parseExistingSegments(json);
               if (writeCache) state.dedupCacheV2[key] = set;
               resolve(set);
-            } else {
+            } else if (response.status === 404) {
               if (writeCache) state.dedupCacheV2[key] = new Set();
               resolve(new Set());
+            } else {
+              reject(describeHttpError(response.status, response.responseText));
             }
           } catch (_) {
-            if (writeCache) state.dedupCacheV2[key] = new Set();
-            resolve(new Set());
+            reject(new Error('IntroDB returned an invalid response. Please try again.'));
           }
         },
         onerror: () => {
-          if (writeCache) state.dedupCacheV2[key] = new Set();
-          resolve(new Set());
+          reject(new Error('IntroDB duplicate check failed. Please try again.'));
         }
       });
     } else {
       // Fallback to fetch (will likely fail due to CORS)
-      fetch(url)
-        .then(response => response.json())
+      fetch(url, { signal: AbortSignal.timeout(15000) })
+        .then(async response => {
+          if (response.status === 404) return {};
+          if (!response.ok) throw describeHttpError(response.status, await response.text());
+          return response.json();
+        })
         .then(json => {
           const set = parseExistingSegments(json);
           if (writeCache) state.dedupCacheV2[key] = set;
           resolve(set);
         })
-        .catch(() => {
-          if (writeCache) state.dedupCacheV2[key] = new Set();
-          resolve(new Set());
-        });
+        .catch(reject);
     }
   });
 }
@@ -373,6 +395,9 @@ async function submitSegment(item, apiKey) {
       gmXhr({
         method: 'POST',
         url: url,
+        timeout: 15000,
+        ontimeout: () => resolve({ success: false, status: 0 }),
+        onabort: () => resolve({ success: false, status: 0 }),
         headers: {
           'Content-Type': 'application/json',
           'X-API-Key': apiKey,
@@ -390,18 +415,19 @@ async function submitSegment(item, apiKey) {
       });
     });
   }
-  
+
   // Fallback to fetch
   try {
     const response = await fetch(url, {
       method: 'POST',
+      signal: AbortSignal.timeout(15000),
       headers: {
         'Content-Type': 'application/json',
         'X-API-Key': apiKey,
       },
       body: JSON.stringify(data),
     });
-    
+
     return {
       success: response.status >= 200 && response.status < 300,
       status: response.status
@@ -431,7 +457,7 @@ async function lookupImdbTitle(imdbId) {
             ontimeout: reject,
           });
         })
-      : await fetch(url).then(response => response.text());
+      : await fetch(url, { signal: AbortSignal.timeout(15000) }).then(response => response.text());
     const result = (JSON.parse(responseText).d || []).find(item => item.id === imdbId);
     return result ? { success: true, title: result.l, year: result.y } : { success: false };
   } catch (_) {
@@ -510,6 +536,7 @@ function tvdbRequest({ method = 'GET', path, token = '', data }) {
   }
 
   return fetch(url, {
+    signal: AbortSignal.timeout(15000),
     method,
     headers,
     body: data === undefined ? undefined : JSON.stringify(data),
@@ -1162,8 +1189,8 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
       Array.isArray(item._tvdbEpisodeLanguages) ? item._tvdbEpisodeLanguages : []
     ).map(language => String(language || '').trim().toLowerCase()))]
       .filter(Boolean);
-    const useGtstAbsoluteTitleMatch = imdbId === GTST_IMDB_ID &&
-      regularItems.every(item => item._tvdbAbsoluteTitleMatch === true);
+    // GTST always uses absolute numbering, including captures restored from older releases.
+    const useGtstAbsoluteTitleMatch = imdbId === GTST_IMDB_ID;
 
     let result;
     let tvdbEpisodes = [];

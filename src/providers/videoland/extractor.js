@@ -272,7 +272,6 @@ export function processVideolandLayout(json) {
       _episodeTitle: episodeTitle,
       _showId: showId,
       _tvdbEpisodeLanguages: ['eng', 'nld'],
-      _tvdbRequireTitleMatch: true,
       ...(useGtstAbsoluteTitleMatch ? { _tvdbAbsoluteTitleMatch: true } : {}),
       imdb_id: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
       segment_type: segmentType,

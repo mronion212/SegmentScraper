@@ -6,14 +6,14 @@ import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { recordProviderEpisode } from '../../core/tvdb.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
 
-const PRIME_VIDEO_METADATA_URL_MATCH = 'GetVodPlaybackResources';
+const PRIME_VIDEO_METADATA_URL_PATTERN = /getvodplaybackresources/i;
 const PRIME_VIDEO_ID_PATTERN = /^(?:[A-Z0-9]{9,12}|amzn1\.dv\.gti\.[a-f0-9-]{20,})$/i;
 const PRIME_VIDEO_CARD_SELECTOR = '[data-testid="episode-list-item"], li[id^="av-ep-episode-"]';
 const PRIME_VIDEO_EPISODE_HEADING_PATTERN = /^\s*(\d+)\s*[.\-:]\s*(.*?)\s*$/;
 const PRIME_VIDEO_POLL_INTERVAL_MS = 250;
 const PRIME_VIDEO_MAX_POLL_ATTEMPTS = 40;
 const PRIME_VIDEO_SELECTION_TTL_MS = 60000;
-const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 1000;
+const PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS = 5000;
 const PRIME_VIDEO_SEGMENT_BATCH_DELAY_MS = 500;
 const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set([
   'SKIP_RECAP',
@@ -26,6 +26,48 @@ const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set([
   'AFTER_CREDIT_SCENE',
   'POST_CREDIT_SCENE',
 ]);
+
+/** Keep Prime diagnostics in the regular Console log stream. */
+function logPrimeVideo(message, details) {
+  if (typeof console === 'undefined') return;
+  const writeLog = typeof console.log === 'function'
+    ? console.log.bind(console)
+    : typeof console.info === 'function'
+      ? console.info.bind(console)
+      : null;
+  if (!writeLog) return;
+  if (details === undefined) writeLog(`[PVE] ${message}`);
+  else writeLog(`[PVE] ${message}`, details);
+}
+
+function isPrimeVideoMetadataUrl(url) {
+  return PRIME_VIDEO_METADATA_URL_PATTERN.test(String(url || ''));
+}
+
+function readPrimeVideoRequestBody(body) {
+  if (typeof body === 'string') return body;
+  if (!body) return '';
+  try {
+    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) return body.toString();
+    if (typeof FormData !== 'undefined' && body instanceof FormData && typeof body.entries === 'function') {
+      return [...body.entries()]
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+        .join('&');
+    }
+  } catch (_) {}
+  return '';
+}
+
+async function readPrimeVideoFetchRequestBody(input, init) {
+  const initBody = readPrimeVideoRequestBody(init?.body);
+  if (initBody) return initBody;
+  try {
+    if (input && typeof input === 'object' && typeof input.clone === 'function') {
+      return await input.clone().text().catch(() => '');
+    }
+  } catch (_) {}
+  return '';
+}
 
 function isPrimeVideoTitleId(value) {
   return typeof value === 'string' && PRIME_VIDEO_ID_PATTERN.test(value);
@@ -75,6 +117,11 @@ function extractPrimeVideoTitleId(bodyText, url) {
     if (legacyIdMatch) return legacyIdMatch[1];
   }
   if (!bodyText) return null;
+  const queryIdMatch = String(bodyText).match(/(?:^|[?&])(?:titleId|cGTI|asin|ASIN)=([^&#]+)/i);
+  if (queryIdMatch) {
+    const titleId = decodeURIComponent(queryIdMatch[1]);
+    if (isPrimeVideoTitleId(titleId)) return titleId;
+  }
   try {
     const found = findPrimeVideoTitleIdInObject(JSON.parse(bodyText));
     if (found) return found;
@@ -654,13 +701,13 @@ export async function preloadPrimeVideoSeasonCatalogs(root = document, options =
     if (readPrimeVideoDetailId(urlKey) === currentDetailId) return;
 
     try {
-      const response = await fetchImpl(urlKey, { credentials: 'same-origin' });
+      const response = await fetchImpl(urlKey, { credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
       if (!response?.ok) throw new Error(`HTTP ${response?.status || 'error'}`);
       const seasonDocument = parseHtml(await response.text());
       const found = scanPrimeVideoEpisodeCatalog(seasonDocument);
       total += found;
       if (found) {
-        console.info('[PVE] Preloaded Prime Video season catalogue:', {
+        logPrimeVideo('Preloaded Prime Video season catalogue:', {
           url: urlKey,
           episodes: found,
         });
@@ -822,6 +869,15 @@ function flushPrimeVideoSegmentBatch(titleId) {
   if (!batch) return;
   state.primeVideoSegmentBatches.delete(titleId);
   const items = batch.items.filter(item => !state.allItems.some(existing => existing._eid === item._eid));
+  logPrimeVideo('Flushing Prime Video segment batch:', {
+    titleId,
+    showId: batch.showId,
+    season: batch.season,
+    episode: batch.episode,
+    received: batch.items.length,
+    newItems: items.length,
+    skippedExisting: batch.items.length - items.length,
+  });
   logPrimeVideoTimestamps(titleId, batch.showId, batch.season, batch.episode, batch.episodeTitle, items);
   recordExtractedSegments(items);
 }
@@ -1152,6 +1208,16 @@ function finalizePrimeVideoEvents(titleId, season, episode, data, episodeTitle =
       console.warn('[PVE] Prime returned an outro event without a usable start time:', outroCandidates);
     }
   }
+  logPrimeVideo(extractedItems.length
+    ? 'Prepared Prime Video segment ranges:'
+    : 'No usable Prime Video segment ranges in playback metadata:', {
+    titleId,
+    showId,
+    season,
+    episode,
+    eventTypes: events.map(getPrimeVideoEventType),
+    segments: extractedItems.map(item => ({ type: item.segment_type, start: item.start_sec, end: item.end_sec })),
+  });
   queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle, extractedItems);
 }
 
@@ -1197,7 +1263,12 @@ function pollPrimeVideoEpisode(titleId, attempt) {
 export function processPrimeVideoMetadata(data, bodyText, url) {
   ensurePrimeVideoState();
   const titleId = extractPrimeVideoTitleId(bodyText, url);
-  if (!titleId) return;
+  const eventTypes = (data?.transitionTimecodes?.result?.events || []).map(getPrimeVideoEventType);
+  if (!titleId) {
+    logPrimeVideo('Skipped playback metadata without a recognizable title ID:', { url: String(url || ''), bodyLength: String(bodyText || '').length, eventTypes });
+    return;
+  }
+  logPrimeVideo('Received Prime Video playback metadata:', { titleId, eventTypes });
   const movieMetadata = findPrimeVideoMovieMetadata(data);
   if (movieMetadata) {
     const movieTitle = movieMetadata.title || titleId;
@@ -1248,7 +1319,10 @@ export function processPrimeVideoMetadata(data, bodyText, url) {
       }, mapped.showId);
     }
   }
-  if (!hasPrimeVideoSegmentEvents(data)) return;
+  if (!hasPrimeVideoSegmentEvents(data)) {
+    logPrimeVideo('Playback metadata contained no supported segment events:', { titleId, eventTypes: (data?.transitionTimecodes?.result?.events || []).map(getPrimeVideoEventType) });
+    return;
+  }
   if (state.primeVideoTitleMap.has(titleId)) {
     const { season, episode, episodeTitle, showId } = state.primeVideoTitleMap.get(titleId);
     setPrimeVideoActiveEpisode({ season, episode, episodeTitle, showId });
@@ -1290,7 +1364,7 @@ export function processPrimeVideoMetadata(data, bodyText, url) {
   const inferredSnapshot = inferNextPrimeVideoEpisode();
   if (inferredSnapshot) {
     inferredSnapshot.episodeTitle ||= state.primeVideoEpisodeTitleByTitleId.get(titleId) || '';
-    console.info('[PVE] Inferred next episode from the scanned season boundary:', {
+    logPrimeVideo('Inferred next episode from the scanned season boundary:', {
       titleId,
       season: inferredSnapshot.season,
       episode: inferredSnapshot.episode,
@@ -1307,6 +1381,7 @@ export function processPrimeVideoMetadata(data, bodyText, url) {
 export function setupPrimeVideoInterception() {
   ensurePrimeVideoState();
   const scanCatalog = () => {
+    if (document.hidden) return;
     try {
       scanPrimeVideoEpisodeCatalog();
       preloadPrimeVideoSeasonCatalogs();
@@ -1317,9 +1392,10 @@ export function setupPrimeVideoInterception() {
   setInterval(scanCatalog, PRIME_VIDEO_CATALOG_SCAN_INTERVAL_MS);
   if (typeof MutationObserver === 'function') {
     let scanTimer = null;
-    const observer = new MutationObserver(() => {
-      if (scanTimer != null) clearTimeout(scanTimer);
-      scanTimer = setTimeout(scanCatalog, PRIME_VIDEO_POLL_INTERVAL_MS);
+    const observer = new MutationObserver(records => {
+      if (records.every(record => record.target.closest?.('[id^="nfe-"]'))) return;
+      if (scanTimer != null) return;
+      scanTimer = setTimeout(() => { scanTimer = null; scanCatalog(); }, PRIME_VIDEO_POLL_INTERVAL_MS);
     });
     observer.observe(document.documentElement || document.body, {
       subtree: true,
@@ -1346,8 +1422,9 @@ export function setupPrimeVideoInterception() {
       return originalOpen(method, requestUrl, ...rest);
     };
     xhr.send = function (body, ...rest) {
-      bodyText = typeof body === 'string' ? body : '';
-      if (url && url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) {
+      bodyText = readPrimeVideoRequestBody(body);
+      if (isPrimeVideoMetadataUrl(url)) {
+        logPrimeVideo('Intercepted Prime Video playback XHR:', { url });
         xhr.addEventListener('load', () => {
           try { processPrimeVideoMetadata(JSON.parse(xhr.responseText), bodyText, url); }
           catch (error) { console.error('[PVE] Failed to process XHR response:', error); }
@@ -1364,18 +1441,20 @@ export function setupPrimeVideoInterception() {
   const originalFetch = win.fetch.bind(win);
   win.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : (input?.url ? String(input.url) : String(input || ''));
-    if (!url.includes(PRIME_VIDEO_METADATA_URL_MATCH)) return originalFetch(input, init);
+    if (!isPrimeVideoMetadataUrl(url)) return originalFetch(input, init);
 
     return (async () => {
-      let bodyText = '';
-      try {
-        if (init && typeof init.body === 'string') bodyText = init.body;
-        else if (input && typeof input === 'object' && input.clone) bodyText = await input.clone().text().catch(() => '');
-      } catch (_) {}
+      logPrimeVideo('Intercepted Prime Video playback fetch:', { url });
+      const bodyText = await readPrimeVideoFetchRequestBody(input, init);
       const response = await originalFetch(input, init);
       try { processPrimeVideoMetadata(await response.clone().json(), bodyText, url); }
       catch (error) { console.error('[PVE] Failed to process fetch response:', error); }
       return response;
     })();
   };
+  logPrimeVideo('Prime Video interception initialized.', {
+    page: String(win.location?.href || (typeof location !== 'undefined' ? location.href : '')),
+    xhr: typeof OriginalXHR === 'function',
+    fetch: typeof win.fetch === 'function',
+  });
 }

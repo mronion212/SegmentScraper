@@ -1,4 +1,7 @@
 /** Shared wire format and timing rules for both clients. Client-specific scene policy stays explicit. */
+export function capturedSegmentKey(item) {
+  return JSON.stringify([String(item._showId || ''), String(item._eid), item.season, item.episode, item.segment_type, Number(item.start_sec), Number(item.end_sec)]);
+}
 export function outputSegmentAllowed(item) {
   const movie=item?.is_movie===true||String(item?.media_type||item?.mediaType||item?._mediaType||'').toLowerCase()==='movie';
   const start=Number(item?.start_sec),end=Number(item?.end_sec);

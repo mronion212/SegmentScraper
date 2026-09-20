@@ -21,8 +21,8 @@ export const PANEL_COLORS = {
   panelBg: '#181818',
   border: '#2c2c2c',
   text: '#fff',
-  textSecondary: '#777',
-  textMuted: '#444',
+  textSecondary: '#b0b0b0',
+  textMuted: '#999',
   accent: '#E50914',
 };
 
@@ -127,22 +127,6 @@ export const PROVIDER_CONFIGS = {
       title: 'SegmentScraper',
     },
     captureHint: 'Series segments and movie credits are captured automatically from SkyShowtime catalogue metadata.',
-  },
-  crunchyroll: {
-    name: 'Crunchyroll',
-    match: 'https://www.crunchyroll.com/*',
-    colors: {
-      primary: '#f47521',
-      primaryDark: '#c85d17',
-      secondary: '#1565c0',
-      secondaryDark: '#0d47a1',
-    },
-    nameColor: '#f47521',
-    infoAccent: '#f47521',
-    branding: {
-      title: 'SegmentScraper',
-    },
-    captureHint: 'Segments are fetched per episode, so all seasons and episodes must be checked.',
   },
 };
 

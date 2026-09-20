@@ -67,6 +67,7 @@ function tvdbRequest({ method = 'GET', path, token = '', data }) {
   }
 
   return fetch(url, {
+    signal: AbortSignal.timeout(15000),
     method,
     headers,
     body: data === undefined ? undefined : JSON.stringify(data),
@@ -719,8 +720,8 @@ export async function mapSeriesItemsToTvdb(items, providerCatalog) {
       Array.isArray(item._tvdbEpisodeLanguages) ? item._tvdbEpisodeLanguages : []
     ).map(language => String(language || '').trim().toLowerCase()))]
       .filter(Boolean);
-    const useGtstAbsoluteTitleMatch = imdbId === GTST_IMDB_ID &&
-      regularItems.every(item => item._tvdbAbsoluteTitleMatch === true);
+    // GTST always uses absolute numbering, including captures restored from older releases.
+    const useGtstAbsoluteTitleMatch = imdbId === GTST_IMDB_ID;
 
     let result;
     let tvdbEpisodes = [];

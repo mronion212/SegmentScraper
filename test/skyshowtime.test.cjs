@@ -134,7 +134,7 @@ test('maps SkyShowtime marker names and inherited season metadata', () => {
   ]);
   assert.deepEqual(plain(sky.logs.slice(0, 2)), [
     [
-      '[SSE] Captured timestamps · Example Series · S02E03',
+      '[SSE] Captured timestamps · Example Series · S02E03 · recap: 00:00.000 → 00:12.345 · intro: 00:12.345 → 01:28.000 · outro: 58:20.123 → 01:00:00.000',
       {
         title: 'Third Episode',
         providerVariantId: 'episode-3',
@@ -146,7 +146,7 @@ test('maps SkyShowtime marker names and inherited season metadata', () => {
       },
     ],
     [
-      '[SSE] Captured timestamps · Example Series · S02E04',
+      '[SSE] Captured timestamps · Example Series · S02E04 · outro: 01:57.000 → 02:00.000',
       {
         title: 'Fourth Episode',
         providerVariantId: 'episode-4',

@@ -66,3 +66,9 @@ test('module transformation preserves code immediately following imports', () =>
     'const matcher = /https?:\\/\\//;',
   ].join('\n'));
 });
+
+test('release disables Crunchyroll activation and excludes its extractor', () => {
+  const { content } = generateInMemory();
+  assert.doesNotMatch(content, /@match[^\n]*crunchyroll|@connect[^\n]*crunchyroll/);
+  assert.doesNotMatch(content, /processCrunchyroll|providers\/crunchyroll|static\.crunchyroll/);
+});
