@@ -10,9 +10,9 @@ Desktop 1.10.0 adds an English review/upload workflow, IMDb identity lookup, sha
 
 Desktop 1.11.0 adds automatic movie-ending analysis using FFmpeg, credit-text heuristics, a 12× overview and short boundary previews. It can submit a reviewed scene-safe outro and one mid-/post-credits scene. The online userscript captures Netflix movie outros, while movie credit capture for the other streaming providers is temporarily disabled until their markers are verified against playback. Multiple real scenes are preserved in local reports because IntroDB does not currently model them separately. Applicable future changes must be carried to both clients; shared code and CI checks enforce generated-code parity (see `AGENTS.md`).
 
-Userscript 1.12.3 contains the provider fixes, Netflix movie boundary correction, movie scene checks, and completed-export cleanup described below. The generated userscript uses `@version 1.12.3`.
+Userscript 1.12.4 contains the provider fixes, Netflix movie boundary correction, movie scene checks, completed-export cleanup, and temporary non-Netflix movie-capture gate described below. The generated userscript uses `@version 1.12.4`.
 
-Desktop Alpha 0.1 is an experimental test release based on package version 1.12.3. Its review workflow, movie-ending analysis, uploads and local workspace are still under development; always review suggested boundaries before uploading.
+Desktop Alpha 0.1 is an experimental test release based on the published 1.12.3 desktop build. Its review workflow, movie-ending analysis, uploads and local workspace are still under development; always review suggested boundaries before uploading.
 
 Desktop 1.12.1 reduces image processing before scaling, creates boundary clips on demand, and offers an optional last-15-minute scan with explicit coverage warnings. The default remains the last quarter. Provider 4K streams still require downloading and decoding the selected source window; scan speed and approximate time remaining are displayed.
 
