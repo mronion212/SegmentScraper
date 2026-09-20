@@ -5,7 +5,7 @@ import {existsSync} from 'node:fs';
 import {mkdtemp,rm,stat} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {analyzeCredits,disposeAnalysis,createReviewClip,analysisStart,frameFeatures,proposeTimeline} from '../app/analysis.mjs';
+import {analyzeCredits,disposeAnalysis,createReviewClip,analysisStart,analysisDuration,frameFeatures,proposeTimeline} from '../app/analysis.mjs';
 import {createApp} from '../app/server.mjs';
 import {once} from 'node:events';
 
@@ -41,7 +41,8 @@ test('real FFmpeg ending scan detects synthetic credits/scenes and creates playa
   execFileSync(ffmpeg,['-v','error','-xerror','-i',a.file,'-f','null','-'],{windowsHide:true});
  }
  // Input seek must retain absolute source times, including nonzero offsets.
- const tail=await analyzeCredits({input:file,remote:false},{duration:80,chapters:[]},{scanFraction:.5,executable:ffmpeg});t.after(()=>disposeAnalysis(tail));assert.equal(tail.analysis.scanStart,40);assert.ok(Math.abs(tail.analysis.creditsStart-42)<1);assert.ok(tail.analysis.scenes.some(s=>Math.abs(s.start_sec-62)<1));
+  const containerTail=await analyzeCredits({input:file,remote:false},{duration:90,video_duration:80,chapters:[]},{scanFraction:1,executable:ffmpeg});t.after(()=>disposeAnalysis(containerTail));assert.equal(containerTail.analysis.scanEnd,80);
+  const tail=await analyzeCredits({input:file,remote:false},{duration:80,chapters:[]},{scanFraction:.5,executable:ffmpeg});t.after(()=>disposeAnalysis(tail));assert.equal(tail.analysis.scanStart,40);assert.ok(Math.abs(tail.analysis.creditsStart-42)<1);assert.ok(tail.analysis.scenes.some(s=>Math.abs(s.start_sec-62)<1));
 });
 test('cancelled/missing FFmpeg never yields a successful analysis',async()=>{
  const controller=new AbortController();controller.abort();await assert.rejects(analyzeCredits({input:path.resolve('missing.mkv')},{duration:100,chapters:[]},{signal:controller.signal,executable:ffmpeg}));
@@ -61,3 +62,8 @@ test('analysis API uses the inspected source, reports progress and invalidates o
 });
 
 test('bounded scan windows preserve explicit coverage and reject invalid input',()=>{assert.equal(analysisStart(6448.61,'last-15-minutes'),5548.61);assert.equal(analysisStart(80,'last-15-minutes'),0);assert.equal(analysisStart(80,.25),60);assert.throws(()=>analysisStart(80,'bad'));});
+test('ending analysis follows the video stream when the container has an audio tail',()=>{
+ assert.equal(analysisDuration({duration:900,video_duration:884}),884);
+ assert.equal(analysisDuration({duration:900,video_duration:905}),900);
+ assert.equal(analysisDuration({duration:900}),900);
+});

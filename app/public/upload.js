@@ -123,7 +123,13 @@ function renderEndingAnalysis(job){
  const p=job?.analysisProgress;
  $('analysis-progress').replaceChildren();
  if(p){const elapsed=Math.max(0,((p.finishedAt||Date.now())-p.startedAt)/1000),speed=elapsed>0?(p.scannedSeconds||0)/elapsed:0,eta=p.phase==='scanning'&&elapsed>=5&&speed>0?` | ~${Math.ceil((p.totalSeconds-p.scannedSeconds)/speed/60)} min remaining | ${speed.toFixed(1)}x source speed`:'';const progress=el('progress');progress.max=100;progress.value=p.percent||0;progress.setAttribute('aria-label','Ending analysis progress');$('analysis-progress').append(progress,el('p',`${(p.phase||'').replaceAll('-',' ')} · ${p.percent||0}% · ${Math.floor(((p.finishedAt||Date.now())-p.startedAt)/1000)}s elapsed${p.totalSeconds?` · ${Math.round(p.scannedSeconds||0)} / ${Math.round(p.totalSeconds)} source seconds scanned`:''}${eta}`));}
- if(job?.analysisError)$('analysis-progress').append(el('p',job.analysisError,'review-warning'));
+ if(job?.analysisError){
+  $('analysis-progress').append(el('p',job.analysisError,'review-warning'));
+  if(job.remote&&job.status!=='analyzing'){
+   const fallback=button('Download & inspect locally',async()=>{await api('download-and-inspect',{id:job.id});analysisSnapshot='';await poll();notice('The provider file is downloading locally. Run Analyze ending when inspection finishes.');});
+   fallback.className='secondary analysis-fallback';$('analysis-progress').append(fallback);
+  }
+ }
  const analysis=job?.report?.analysis;const snapshot=JSON.stringify([job?.id,analysis,job?.previews]);if(snapshot===analysisSnapshot)return;
  const nextEvidenceKey=JSON.stringify([job?.id,analysis]);const preserved=nextEvidenceKey===evidenceKey?[...document.querySelectorAll('.scene-decision')].map(n=>n.value):[];analysisSnapshot=snapshot;evidenceKey=nextEvidenceKey;
  $('analysis-findings').replaceChildren();$('analysis-previews').replaceChildren();$('use-analysis').disabled=!analysis;

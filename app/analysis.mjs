@@ -6,7 +6,18 @@ import { randomUUID } from 'node:crypto';
 
 const WIDTH=320, HEIGHT=180, FPS=2, FRAME_BYTES=WIDTH*HEIGHT;
 const round=n=>Math.round(n*1000)/1000;
-export const ANALYSIS_VERSION='credits-tail/v3';
+export const ANALYSIS_VERSION='credits-tail/v4';
+
+/**
+ * Container duration can include an audio or metadata tail after the video
+ * stream has ended. Ending analysis must follow decoded video, otherwise a
+ * perfectly valid file can be reported as truncated near EOF.
+ */
+export function analysisDuration(report) {
+  const duration=Number(report?.duration),videoDuration=Number(report?.video_duration);
+  if(Number.isFinite(videoDuration)&&videoDuration>0)return Number.isFinite(duration)&&duration>0?Math.min(duration,videoDuration):videoDuration;
+  return Number.isFinite(duration)&&duration>0?duration:null;
+}
 
 export function analysisStart(duration, scanFraction=.25) {
   if(![.25,.5,1,'last-15-minutes'].includes(scanFraction))throw new Error('Invalid analysis window.');
@@ -92,9 +103,9 @@ export function proposeTimeline({duration,start,samples,blackRanges=[],chapters=
 }
 
 function inputArgs(source){
-  if(source.remote){const url=new URL(source.input);if(url.protocol!=='https:'||url.username||url.password)throw new Error('Invalid provider analysis URL.');return ['-rw_timeout','15000000','-protocol_whitelist','https,http,tls,tcp,crypto'];}
+  if(source.remote){const url=new URL(source.input);if(url.protocol!=='https:'||url.username||url.password)throw new Error('Invalid provider analysis URL.');return ['-hwaccel','auto','-rw_timeout','60000000','-reconnect','1','-reconnect_streamed','1','-reconnect_delay_max','10','-protocol_whitelist','https,http,tls,tcp,crypto'];}
   if(!path.isAbsolute(source.input))throw new Error('Analysis requires an inspected local file.');
-  return ['-protocol_whitelist','file,crypto,data'];
+  return ['-hwaccel','auto','-protocol_whitelist','file,crypto,data'];
 }
 function runFfmpeg(args,{signal,onFrame,onProgress,onLine,executable=process.env.FFMPEG_PATH||'ffmpeg',timeout=30*60*1000}={}){
   return new Promise((resolve,reject)=>{
@@ -112,7 +123,7 @@ function runFfmpeg(args,{signal,onFrame,onProgress,onLine,executable=process.env
 }
 
 export async function analyzeCredits(source,report,{signal,onProgress=()=>{},scanFraction=.25,executable,artifactRoot}={}){
-  const duration=report.duration;
+  const duration=analysisDuration(report);
   if(!Number.isFinite(duration)||duration<=0)throw new Error('Inspect the video duration before analyzing credits.');
   const start=analysisStart(duration,scanFraction),length=duration-start;
   const samples=[],blackRanges=[];
@@ -133,6 +144,7 @@ export async function analyzeCredits(source,report,{signal,onProgress=()=>{},sca
   // Decoder failures/truncation must not masquerade as a complete ending scan.
   if(samples.at(-1).time<duration-2)throw new Error('The ending scan stopped before the end of the video. Download and retry locally.');
   const analysis=proposeTimeline({duration,start,samples,blackRanges,chapters:report.chapters});
+    if(Number.isFinite(Number(report.duration))&&Number(report.duration)-duration>2)analysis.warnings.push(`The container reports ${round(Number(report.duration)-duration)} extra seconds after the video stream. Analysis follows the video stream and does not infer a scene from that tail.`);
     // Generate boundary clips on demand: remote seeks can be expensive.
     analysis.warnings.push('Black transitions and visual candidates are sampled every 0.5 seconds. Refine boundaries using the original-speed clips.');
     if(start>0)analysis.warnings.push(`Only the final ${Math.round(length)} seconds were scanned. Earlier scenes are not checked; expand the window if credits begin before it.`);

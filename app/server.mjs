@@ -10,7 +10,7 @@ import { pipeline } from 'node:stream/promises';
 import { collectVideos, inspectFile, inspectRemote, probeAvailable } from './media.mjs';
 import { Debrid } from './providers.mjs';
 import { createUploadService } from './upload.mjs';
-import { analyzeCredits, disposeAnalysis, createReviewClip, analysisStart, ANALYSIS_VERSION } from './analysis.mjs';
+import { analyzeCredits, disposeAnalysis, createReviewClip, analysisStart, analysisDuration, ANALYSIS_VERSION } from './analysis.mjs';
 import { openWorkspace, fingerprint, savedJob, cleanDraft } from './workspace.mjs';
 
 const publicDir = fileURLToPath(new URL('./public/', import.meta.url));
@@ -142,6 +142,16 @@ export function createApp({ downloadDir = path.resolve('app-data/downloads'), pr
           return send(res,200,{clip:{...clip,file:undefined,url:`/preview/${clip.id}`}});
         }finally{job.clipBusy=false;}
       }
+      if(url.pathname==='/api/download-and-inspect'){
+        const job=jobs.find(j=>j.id===body.id&&j.remote&&['done','cancelled'].includes(j.status)&&!j.clipBusy);
+        if(!job)throw new Error('Choose a failed provider inspection first.');
+        const provider=connections.get(job.providerName);
+        if(!provider)throw new Error('Reconnect the original provider before downloading locally.');
+        uploads.invalidate(job.id);
+        await disposeAnalysis(job.analysisResult);job.analysisResult=null;job.report=null;job.fingerprint=null;job.draft=undefined;
+        job.remote=false;job.provider=provider;job.controller=new AbortController();job.status='queued';job.error=null;job.analysisProgress=null;job.analysisError=null;
+        await persist();void work();return send(res,202,{ok:true});
+      }
       if(url.pathname==='/api/resume'){
         const job=jobs.find(j=>j.id===body.id&&terminal.has(j.status)&&!j.clipBusy);if(!job)throw new Error('Choose an idle task.');
         uploads.invalidate(job.id);
@@ -159,7 +169,7 @@ export function createApp({ downloadDir = path.resolve('app-data/downloads'), pr
         const job=jobs.find(j=>j.id===body.jobId&&j.report&&['done','cancelled'].includes(j.status));
         if(!job)throw new Error('Choose a completed inspection first.');
         if(jobs.some(j=>j.status==='analyzing'||j.clipBusy))throw new Error('An ending analysis or preview is already running.');
-        const scanStart=analysisStart(job.report.duration,body.scanFraction??.25);
+        const scanStart=analysisStart(analysisDuration(job.report),body.scanFraction??.25);
         await verifySource(job);
         const prior=job.report.analysis;
         if(!job.remote&&!body.force&&prior?.version===ANALYSIS_VERSION&&prior.scanStart===scanStart&&job.analysisResult?.artifacts?.length){
@@ -181,7 +191,7 @@ export function createApp({ downloadDir = path.resolve('app-data/downloads'), pr
             if(controller.signal.aborted||job.controller!==controller){await disposeAnalysis(result);return;}
             job.analysisResult=result;job.report.analysis=result.analysis;job.status='done';
             job.analysisProgress={...job.analysisProgress,finishedAt:Date.now(),phase:'ready-for-review',percent:100};
-          }catch(error){if(job.controller!==controller)return;job.status=controller.signal.aborted?'cancelled':'done';job.analysisProgress={...job.analysisProgress,finishedAt:Date.now(),phase:controller.signal.aborted?'cancelled':'failed'};job.analysisError=controller.signal.aborted?'Analysis cancelled.':job.remote?'Provider analysis failed. Download the video and analyze it locally.':error.message;}
+          }catch(error){if(job.controller!==controller)return;job.status=controller.signal.aborted?'cancelled':'done';job.analysisProgress={...job.analysisProgress,finishedAt:Date.now(),phase:controller.signal.aborted?'cancelled':'failed'};const detail=error instanceof Error?error.message:'Unknown analysis error.';job.analysisError=controller.signal.aborted?'Analysis cancelled.':job.remote?`Provider analysis failed: ${detail} Download the video and analyze it locally, or use the local fallback below.`:detail;}
           finally{checkpoint();}
         })();
         return send(res,202,{ok:true});

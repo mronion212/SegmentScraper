@@ -35,6 +35,8 @@ test('chapters preserve precision and flag invalid, overlapping and out-of-durat
   assert.equal(report.chapters[4].start_sec, null);
   assert.equal(report.status, 'review');
   assert.ok(report.chapters.every(c => c.needs_review));
+  assert.equal(chapterReport({ format: { duration: '100' }, streams: [{ codec_type: 'video', duration: '84' }], chapters: [] }, 'film.mp4').video_duration, 84);
+  assert.equal(chapterReport({ format: { duration: '100' }, streams: [{ codec_type: 'video', tags: { DURATION: '00:01:24.000000000' } }], chapters: [] }, 'film.mp4').video_duration, 84);
   assert.equal(chapterReport({}, 'film.mp4').status, 'no-chapters');
 });
 test('recursive local collection filters sidecars and deduplicates paths', async t => {
@@ -182,6 +184,35 @@ test('remote chapter inspection does not invoke downloader or expose signed URLs
   const jobs = await until(request, jobs => jobs[0]?.status === 'done');
   assert.equal(downloads, 0); assert.equal(jobs[0].report.media_type, 'movie'); assert.equal(jobs[0].savedPath, undefined);
   assert.ok(!JSON.stringify(jobs).includes('signed'));
+});
+test('failed remote analysis can be switched to a local download and inspection', async t => {
+  const folder = await mkdtemp(path.join(os.tmpdir(), 'chapter-fallback-')); t.after(() => rm(folder, { recursive: true, force: true }));
+  let analyzedRemote = false, downloaded = null;
+  const provider = {
+    list: async () => [],
+    details: async () => ({ ready: true, files: [{ id: '1', name: 'Film.mkv', downloadable: true }] }),
+    downloadLink: async () => 'https://cdn/file',
+  };
+  const { request } = await start(t, {
+    downloadDir: folder,
+    providerFactory: () => provider,
+    remoteProbe: async () => ({ duration: 100, chapters: [] }),
+    probe: async file => ({ name: path.basename(file), duration: 100, chapters: [] }),
+    downloader: async (url, destination) => { downloaded = destination; await writeFile(destination, 'video'); },
+    analyzer: async source => { analyzedRemote = source.remote; throw new Error('stream ended before EOF'); },
+  });
+  await request('connect', { provider: 'torbox', token: 'key' });
+  await request('inspect-provider', { provider: 'torbox', id: '7', files: ['1'], mode: 'movie' });
+  let jobs = await until(request, rows => rows[0]?.status === 'done');
+  const jobId = jobs[0].id;
+  await request('analyze-credits', { jobId, scanFraction: 1 });
+  jobs = await until(request, rows => rows[0]?.analysisError);
+  assert.equal(analyzedRemote, true);
+  assert.match(jobs[0].analysisError, /stream ended/);
+  assert.equal((await request('download-and-inspect', { id: jobId })).status, 202);
+  jobs = await until(request, rows => rows[0]?.status === 'done' && !rows[0].remote && rows[0].savedPath);
+  assert.equal(jobs[0].remote, false);
+  assert.equal(downloaded, jobs[0].savedPath);
 });
 
 test('credential vault persists only encryption output, serializes updates and removes accounts', async t => {
