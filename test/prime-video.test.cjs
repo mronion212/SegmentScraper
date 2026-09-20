@@ -804,6 +804,30 @@ test('captures Prime movie outro and post-credits scene separately', () => {
   ]);
 });
 
+test('captures Prime mid-credits markers as an extra-scene candidate', () => {
+  const { document } = primeDetailDocument();
+  const titleId = 'amzn1.dv.gti.13345678-1234-4abc-8def-123456789012';
+  const prime = loadPrimeVideoExtractor(document);
+
+  prime.processPrimeVideoMetadata({
+    catalogMetadata: {
+      catalog: { type: 'MOVIE', title: 'Movie with a mid-credits scene', releaseYear: 2025 },
+    },
+    transitionTimecodes: {
+      result: {
+        events: [
+          { eventType: 'END_CREDITS', startTimeMs: 5400000, endTimeMs: 6000000 },
+          { eventType: 'DURING_CREDITS_SCENE', startTimeMs: 5550000, endTimeMs: 5600000 },
+        ],
+      },
+    },
+  }, '', `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(titleId)}`);
+
+  assert.deepEqual(plain(prime.state.allItems.map(item => [item.segment_type, item.start_sec, item.end_sec])), [
+    ['outro', 5400, 6000], ['post-credits', 5550, 5600],
+  ]);
+});
+
 test('re-splits Prime movie credits when the after-credits event arrives later', () => {
   const document = {
     title: 'Prime Video: Split Movie',

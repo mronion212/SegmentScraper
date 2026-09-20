@@ -25,6 +25,29 @@ const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set([
   'POST_CREDITS',
   'AFTER_CREDIT_SCENE',
   'POST_CREDIT_SCENE',
+  'MID_CREDITS',
+  'DURING_CREDITS',
+  'MID_CREDIT',
+  'DURING_CREDIT',
+  'MID_CREDITS_SCENE',
+  'DURING_CREDITS_SCENE',
+  'MID_CREDIT_SCENE',
+  'DURING_CREDIT_SCENE',
+]);
+
+const PRIME_VIDEO_EXTRA_SCENE_EVENT_TYPES = new Set([
+  'AFTER_CREDITS',
+  'POST_CREDITS',
+  'AFTER_CREDIT_SCENE',
+  'POST_CREDIT_SCENE',
+  'MID_CREDITS',
+  'DURING_CREDITS',
+  'MID_CREDIT',
+  'DURING_CREDIT',
+  'MID_CREDITS_SCENE',
+  'DURING_CREDITS_SCENE',
+  'MID_CREDIT_SCENE',
+  'DURING_CREDIT_SCENE',
 ]);
 
 /** Keep Prime diagnostics in the regular Console log stream. */
@@ -1070,13 +1093,8 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
   }
   clearPrimeVideoMovieDurationPoll(titleId);
 
-  const afterCreditsEvents = events.filter(event => [
-    'AFTER_CREDITS',
-    'POST_CREDITS',
-    'AFTER_CREDIT_SCENE',
-    'POST_CREDIT_SCENE',
-  ].includes(getPrimeVideoEventType(event)));
-  const afterCreditsEvent = afterCreditsEvents
+  const extraSceneEvents = events.filter(event => PRIME_VIDEO_EXTRA_SCENE_EVENT_TYPES.has(getPrimeVideoEventType(event)));
+  const extraSceneEvent = extraSceneEvents
     .map(event => ({
       event,
       startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
@@ -1088,9 +1106,9 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
     startSec: creditRange.startTimeMs / 1000,
     endSec: creditRange.endTimeMs / 1000,
     runtimeSec: runtimeMs == null ? null : runtimeMs / 1000,
-    afterCreditsDetected: afterCreditsEvents.length > 0,
-    afterCreditsStartSec: afterCreditsEvent?.startTimeMs == null ? null : afterCreditsEvent.startTimeMs / 1000,
-    afterCreditsEndSec: afterCreditsEvent?.endTimeMs == null ? null : afterCreditsEvent.endTimeMs / 1000,
+    afterCreditsDetected: extraSceneEvents.length > 0,
+    afterCreditsStartSec: extraSceneEvent?.startTimeMs == null ? null : extraSceneEvent.startTimeMs / 1000,
+    afterCreditsEndSec: extraSceneEvent?.endTimeMs == null ? null : extraSceneEvent.endTimeMs / 1000,
   });
   for (const range of ranges) {
     appendPrimeVideoSegment(
@@ -1107,7 +1125,7 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
       range.creditPart
     );
   }
-  if (!ranges.length) console.warn('[PVE] Movie credits conflict with scene markers; withholding timestamps.', { titleId, creditRange, afterCreditsEvent });
+  if (!ranges.length) console.warn('[PVE] Movie credits conflict with scene markers; withholding timestamps.', { titleId, creditRange, extraSceneEvent });
 
   const existingMovieItems = state.allItems.filter(item =>
     String(item?._showId || '') === String(titleId) &&

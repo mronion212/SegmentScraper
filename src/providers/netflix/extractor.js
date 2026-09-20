@@ -11,6 +11,10 @@ export const NETFLIX_TITLE_OVERRIDES = {
   '81748089': 'tt2431250',
 };
 
+// Netflix movie creditsOffset consistently lands six seconds into the visible
+// credits. Keep the correction movie-only; series markers use a different path.
+const NETFLIX_MOVIE_CREDITS_LEAD_SEC = 6;
+
 function isNetflixSpecialSeason(season) {
   if (Number(season?.seq) === 0 || season?.isSpecial === true) return true;
   const specialTypes = new Set(['special', 'specials', 'supplemental', 'bonus', 'extras', 'trailer', 'trailers']);
@@ -26,23 +30,78 @@ function isNetflixSpecialEpisode(season, episode) {
   return ['special', 'supplemental', 'bonus', 'extra', 'trailer'].includes(type);
 }
 
+function coerceNetflixSeconds(value) {
+  const number = Number(value);
+  if (Number.isFinite(number)) return number;
+  const parts = String(value || '').trim().split(':').map(Number);
+  if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
+  if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return null;
+}
+
 export function processNetflixMetadata(data) {
   const video = data.video;
   if (!video) return;
 
   const showId = video.id != null ? String(video.id) : null;
   if (String(video.type || '').toLowerCase() === 'movie') {
-    handleDetectedShow({ title: video.title, showId, year: video.year || '', mediaType: 'movie' });
-    // Netflix's single creditsOffset is not evidence of the FIRST credits.
-    // Keep movie candidates out of submissions until their meaning is verified.
-    console.info('[NFE] Netflix movie markers require playback verification', {
+    handleDetectedShow({
+      title: video.title,
+      showId,
+      year: video.year || video.releaseYear || '',
+      mediaType: 'movie',
+    });
+
+    const creditsOffset = coerceNetflixSeconds(video.creditsOffset);
+    const runtime = coerceNetflixSeconds(video.runtime);
+    const correctedCreditsOffset = creditsOffset == null
+      ? null
+      : Math.max(0, creditsOffset - NETFLIX_MOVIE_CREDITS_LEAD_SEC);
+    const movieId = showId || String(video.title || 'netflix-movie');
+    const movieItem = correctedCreditsOffset != null && runtime != null && correctedCreditsOffset > 0 && runtime > creditsOffset
+      ? createNormalizedSegment({
+        providerName: 'netflix',
+        episodeId: `${movieId}_movie_outro`,
+        showId,
+        season: null,
+        episode: null,
+        imdbId: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
+        episodeTitle: video.title || '',
+        mediaType: 'movie',
+        providerSegmentType: 'creditsOffset',
+        startSec: correctedCreditsOffset,
+        endSec: runtime,
+      })
+      : null;
+
+    console.info('[NFE] Netflix movie credits marker processed', {
       title: video.title,
       movieId: showId,
-      creditsOffset: video.creditsOffset ?? null,
-      runtime: video.runtime ?? null,
+      creditsOffset: creditsOffset ?? null,
+      correctedCreditsOffset: correctedCreditsOffset ?? null,
+      creditsStartCorrectionSec: NETFLIX_MOVIE_CREDITS_LEAD_SEC,
+      runtime: runtime ?? null,
+      captured: Boolean(movieItem),
       skipMarkers: video.skipMarkers ?? {},
     });
-    setDbStatus('Netflix movie: creditsOffset alone is unverified; no timestamps captured. Check the movie markers in the console.');
+
+    if (movieItem) {
+      logCapturedTimestamps({
+        prefix: 'NFE',
+        showTitle: video.title,
+        mediaType: 'movie',
+        episodeTitle: video.title || '',
+        providerIdLabel: 'movieId',
+        providerId: showId,
+        items: [movieItem],
+      });
+      recordExtractedSegments([movieItem]);
+      setDbStatus('Netflix movie outro captured; TMDB extra-scene checks run on export and upload.');
+    } else {
+      // A runtime is required as the actual media boundary. Never invent an
+      // outro end at EOF when Netflix did not provide one.
+      setDbStatus('Netflix movie: no complete creditsOffset/runtime range; no timestamps captured.');
+    }
     return;
   }
   const year = video.seasons?.[0]?.year || '';

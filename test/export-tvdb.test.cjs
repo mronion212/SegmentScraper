@@ -20,6 +20,27 @@ test('large exports limit concurrent duplicate checks to four', async () => {
   assert.equal(bootstrap.calls.previews[0].items.length, 10);
 });
 
+test('confirmed JSON export clears captured data after all files are downloaded', async () => {
+  const movieItem = {
+    imdb_id: 'ttmovie-clear-export',
+    media_type: 'movie',
+    segment_type: 'outro',
+    start_sec: 5400,
+    end_sec: 5700,
+  };
+  const bootstrap = loadBootstrap({
+    stateOverrides: { allItems: [movieItem], tvdbApiKey: '' },
+  });
+
+  await bootstrap.exportJSON();
+  bootstrap.calls.previews[0].onConfirm();
+  await new Promise(resolve => setTimeout(resolve, 450));
+
+  assert.deepEqual(bootstrap.state.allItems, []);
+  assert.equal(bootstrap.calls.clearCaptureSessions, 1);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('captured data cleared')));
+});
+
 test('export and submission stop on unknown duplicate status and allow a later retry', async () => {
   let fail = true;
   const bootstrap = loadBootstrap({
@@ -39,8 +60,8 @@ test('export and submission stop on unknown duplicate status and allow a later r
   assert.equal(bootstrap.calls.previews.length, 2);
 });
 
-function loadBootstrap({ mappingResult = items => ({ success: true, method: 'title', items, stats: {} }), stateOverrides = {}, existingSegmentsByKey = new Map(), tmdbResult = { status: 'unknown' } }) {
-  const calls = { map: [], dedup: [], toasts: [], previews: [], submissions: [], confirmations: [], infoLogs: [], warnLogs: [] };
+function loadBootstrap({ mappingResult = items => ({ success: true, method: 'title', items, stats: {} }), stateOverrides = {}, existingSegmentsByKey = new Map(), tmdbResult = { status: 'unknown' }, submitResult = { success: true } }) {
+  const calls = { map: [], dedup: [], toasts: [], previews: [], submissions: [], confirmations: [], infoLogs: [], warnLogs: [], clearCaptureSessions: 0 };
   const state = {
     allItems: [
       { _eid: 'regular', _episodeTitle: 'Regular', imdb_id: 'tt123', segment_type: 'intro', season: 4, episode: 8, start_sec: 1, end_sec: 2 },
@@ -83,7 +104,8 @@ function loadBootstrap({ mappingResult = items => ({ success: true, method: 'tit
       body: { appendChild() {}, removeChild() {} },
       querySelector: () => null,
     },
-    createState: () => ({}),
+    createState: () => ({ allItems: [], introdbApiKey: '', panelVisible: false }),
+    clearCaptureSession: () => { calls.clearCaptureSessions++; },
     createEpisodeCacheKey: (imdbId, season, episode) => `${imdbId}|${season}|${episode}`,
     createMediaCacheKey: (imdbId, mediaType, season, episode) => String(mediaType).toLowerCase() === 'movie'
       ? `${imdbId}|movie`
@@ -98,7 +120,7 @@ function loadBootstrap({ mappingResult = items => ({ success: true, method: 'tit
     },
     submitSegment: async item => {
       calls.submissions.push(item);
-      return { success: true };
+      return submitResult;
     },
     injectBtn: () => {},
     getNextEpBtn: () => null,
@@ -128,6 +150,7 @@ function loadBootstrap({ mappingResult = items => ({ success: true, method: 'tit
   return {
     exportJSON: context.bootstrapExports.exportJSON,
     submitToIntroDB: context.bootstrapExports.submitToIntroDB,
+    state,
     calls,
   };
 }
@@ -329,6 +352,48 @@ test('IntroDB submission removes segments shorter than five seconds', async () =
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.submissions)), [eligibleItem]);
   assert.match(bootstrap.calls.confirmations[0], /Submit 1 timestamp/);
   assert.ok(bootstrap.calls.toasts.some(message => message.includes('invalid or unsupported segment(s) skipped')));
+});
+
+test('fully successful IntroDB submission clears captured data and preserves API settings', async () => {
+  const movieItem = {
+    imdb_id: 'ttmovie-clear-submit',
+    media_type: 'movie',
+    segment_type: 'outro',
+    start_sec: 5400,
+    end_sec: 5700,
+  };
+  const bootstrap = loadBootstrap({
+    stateOverrides: { allItems: [movieItem], tvdbApiKey: '' },
+  });
+
+  await bootstrap.submitToIntroDB();
+  await new Promise(resolve => setTimeout(resolve, 220));
+
+  assert.deepEqual(bootstrap.state.allItems, []);
+  assert.equal(bootstrap.state.introdbApiKey, 'introdb-key');
+  assert.equal(bootstrap.calls.clearCaptureSessions, 1);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('captured data cleared')));
+});
+
+test('partially failed IntroDB submission retains captured data for retry', async () => {
+  const movieItem = {
+    imdb_id: 'ttmovie-keep-after-failure',
+    media_type: 'movie',
+    segment_type: 'outro',
+    start_sec: 5400,
+    end_sec: 5700,
+  };
+  const bootstrap = loadBootstrap({
+    stateOverrides: { allItems: [movieItem], tvdbApiKey: '' },
+    submitResult: { success: false, status: 500 },
+  });
+
+  await bootstrap.submitToIntroDB();
+  await new Promise(resolve => setTimeout(resolve, 220));
+
+  assert.deepEqual(bootstrap.state.allItems, [movieItem]);
+  assert.equal(bootstrap.calls.clearCaptureSessions, 0);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('1 failed')));
 });
 
 test('movie JSON export bypasses TVDB and uses a movie deduplication key', async () => {

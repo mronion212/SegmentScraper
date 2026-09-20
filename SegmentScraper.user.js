@@ -3132,7 +3132,9 @@ async function prepareJSONExport() {
     let downloaded = 0;
     function downloadNext(index) {
       if (index >= files.length) {
-        toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+        const summary = `${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`;
+        document.getElementById('nfe-export-preview')?.remove();
+        resetCapturedData(`${summary}; captured data cleared.`);
         return;
       }
       const file = files[index];
@@ -3290,8 +3292,13 @@ async function prepareIntroDBSubmission() {
       state.submitInProgress = false;
       const { ok, fail } = state.submitResults;
       updateSubmitBtn('Submit to IntroDB');
-      toast(`IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
-      setIntrodbStatus(`${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
+      const summary = `IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`;
+      if (fail === 0 && ok > 0) {
+        resetCapturedData(`${summary}; captured data cleared.`);
+      } else {
+        toast(summary);
+        setIntrodbStatus(summary);
+      }
       return;
     }
 
@@ -3317,9 +3324,7 @@ async function prepareIntroDBSubmission() {
   sendNext(0);
 }
 
-function clearData() {
-  if (state.submitInProgress || state.exportInProgress) { toast('Please wait until the current operation finishes.'); return; }
-  if (!confirm('Delete all captured timestamps?')) return;
+function resetCapturedData(message = 'Data cleared') {
   const introdbApiKey = state.introdbApiKey;
   const panelVisible = state.panelVisible;
   const { apiKey: tvdbApiKey, pin: tvdbPin } = loadTvdbSettings();
@@ -3331,7 +3336,13 @@ function clearData() {
   setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
   setIntrodbStatus('');
   updateImdbInput();
-  toast('Data cleared');
+  toast(message);
+}
+
+function clearData() {
+  if (state.submitInProgress || state.exportInProgress) { toast('Please wait until the current operation finishes.'); return; }
+  if (!confirm('Delete all captured timestamps?')) return;
+  resetCapturedData();
 }
 
 function revealApiSettings() {
@@ -3539,6 +3550,10 @@ const NETFLIX_TITLE_OVERRIDES = {
   '81748089': 'tt2431250',
 };
 
+// Netflix movie creditsOffset consistently lands six seconds into the visible
+// credits. Keep the correction movie-only; series markers use a different path.
+const NETFLIX_MOVIE_CREDITS_LEAD_SEC = 6;
+
 function isNetflixSpecialSeason(season) {
   if (Number(season?.seq) === 0 || season?.isSpecial === true) return true;
   const specialTypes = new Set(['special', 'specials', 'supplemental', 'bonus', 'extras', 'trailer', 'trailers']);
@@ -3554,23 +3569,78 @@ function isNetflixSpecialEpisode(season, episode) {
   return ['special', 'supplemental', 'bonus', 'extra', 'trailer'].includes(type);
 }
 
+function coerceNetflixSeconds(value) {
+  const number = Number(value);
+  if (Number.isFinite(number)) return number;
+  const parts = String(value || '').trim().split(':').map(Number);
+  if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
+  if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return null;
+}
+
 function processNetflixMetadata(data) {
   const video = data.video;
   if (!video) return;
 
   const showId = video.id != null ? String(video.id) : null;
   if (String(video.type || '').toLowerCase() === 'movie') {
-    handleDetectedShow({ title: video.title, showId, year: video.year || '', mediaType: 'movie' });
-    // Netflix's single creditsOffset is not evidence of the FIRST credits.
-    // Keep movie candidates out of submissions until their meaning is verified.
-    console.info('[NFE] Netflix movie markers require playback verification', {
+    handleDetectedShow({
+      title: video.title,
+      showId,
+      year: video.year || video.releaseYear || '',
+      mediaType: 'movie',
+    });
+
+    const creditsOffset = coerceNetflixSeconds(video.creditsOffset);
+    const runtime = coerceNetflixSeconds(video.runtime);
+    const correctedCreditsOffset = creditsOffset == null
+      ? null
+      : Math.max(0, creditsOffset - NETFLIX_MOVIE_CREDITS_LEAD_SEC);
+    const movieId = showId || String(video.title || 'netflix-movie');
+    const movieItem = correctedCreditsOffset != null && runtime != null && correctedCreditsOffset > 0 && runtime > creditsOffset
+      ? createNormalizedSegment({
+        providerName: 'netflix',
+        episodeId: `${movieId}_movie_outro`,
+        showId,
+        season: null,
+        episode: null,
+        imdbId: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
+        episodeTitle: video.title || '',
+        mediaType: 'movie',
+        providerSegmentType: 'creditsOffset',
+        startSec: correctedCreditsOffset,
+        endSec: runtime,
+      })
+      : null;
+
+    console.info('[NFE] Netflix movie credits marker processed', {
       title: video.title,
       movieId: showId,
-      creditsOffset: video.creditsOffset ?? null,
-      runtime: video.runtime ?? null,
+      creditsOffset: creditsOffset ?? null,
+      correctedCreditsOffset: correctedCreditsOffset ?? null,
+      creditsStartCorrectionSec: NETFLIX_MOVIE_CREDITS_LEAD_SEC,
+      runtime: runtime ?? null,
+      captured: Boolean(movieItem),
       skipMarkers: video.skipMarkers ?? {},
     });
-    setDbStatus('Netflix movie: creditsOffset alone is unverified; no timestamps captured. Check the movie markers in the console.');
+
+    if (movieItem) {
+      logCapturedTimestamps({
+        prefix: 'NFE',
+        showTitle: video.title,
+        mediaType: 'movie',
+        episodeTitle: video.title || '',
+        providerIdLabel: 'movieId',
+        providerId: showId,
+        items: [movieItem],
+      });
+      recordExtractedSegments([movieItem]);
+      setDbStatus('Netflix movie outro captured; TMDB extra-scene checks run on export and upload.');
+    } else {
+      // A runtime is required as the actual media boundary. Never invent an
+      // outro end at EOF when Netflix did not provide one.
+      setDbStatus('Netflix movie: no complete creditsOffset/runtime range; no timestamps captured.');
+    }
     return;
   }
   const year = video.seasons?.[0]?.year || '';
@@ -3735,6 +3805,29 @@ const PRIME_VIDEO_SUPPORTED_EVENT_TYPES = new Set([
   'POST_CREDITS',
   'AFTER_CREDIT_SCENE',
   'POST_CREDIT_SCENE',
+  'MID_CREDITS',
+  'DURING_CREDITS',
+  'MID_CREDIT',
+  'DURING_CREDIT',
+  'MID_CREDITS_SCENE',
+  'DURING_CREDITS_SCENE',
+  'MID_CREDIT_SCENE',
+  'DURING_CREDIT_SCENE',
+]);
+
+const PRIME_VIDEO_EXTRA_SCENE_EVENT_TYPES = new Set([
+  'AFTER_CREDITS',
+  'POST_CREDITS',
+  'AFTER_CREDIT_SCENE',
+  'POST_CREDIT_SCENE',
+  'MID_CREDITS',
+  'DURING_CREDITS',
+  'MID_CREDIT',
+  'DURING_CREDIT',
+  'MID_CREDITS_SCENE',
+  'DURING_CREDITS_SCENE',
+  'MID_CREDIT_SCENE',
+  'DURING_CREDIT_SCENE',
 ]);
 
 /** Keep Prime diagnostics in the regular Console log stream. */
@@ -4780,13 +4873,8 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
   }
   clearPrimeVideoMovieDurationPoll(titleId);
 
-  const afterCreditsEvents = events.filter(event => [
-    'AFTER_CREDITS',
-    'POST_CREDITS',
-    'AFTER_CREDIT_SCENE',
-    'POST_CREDIT_SCENE',
-  ].includes(getPrimeVideoEventType(event)));
-  const afterCreditsEvent = afterCreditsEvents
+  const extraSceneEvents = events.filter(event => PRIME_VIDEO_EXTRA_SCENE_EVENT_TYPES.has(getPrimeVideoEventType(event)));
+  const extraSceneEvent = extraSceneEvents
     .map(event => ({
       event,
       startTimeMs: readPrimeVideoEventTimeMs(event, 'start'),
@@ -4798,9 +4886,9 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
     startSec: creditRange.startTimeMs / 1000,
     endSec: creditRange.endTimeMs / 1000,
     runtimeSec: runtimeMs == null ? null : runtimeMs / 1000,
-    afterCreditsDetected: afterCreditsEvents.length > 0,
-    afterCreditsStartSec: afterCreditsEvent?.startTimeMs == null ? null : afterCreditsEvent.startTimeMs / 1000,
-    afterCreditsEndSec: afterCreditsEvent?.endTimeMs == null ? null : afterCreditsEvent.endTimeMs / 1000,
+    afterCreditsDetected: extraSceneEvents.length > 0,
+    afterCreditsStartSec: extraSceneEvent?.startTimeMs == null ? null : extraSceneEvent.startTimeMs / 1000,
+    afterCreditsEndSec: extraSceneEvent?.endTimeMs == null ? null : extraSceneEvent.endTimeMs / 1000,
   });
   for (const range of ranges) {
     appendPrimeVideoSegment(
@@ -4817,7 +4905,7 @@ function finalizePrimeVideoMovieEvents(titleId, movieTitle, data, runtimeMsOverr
       range.creditPart
     );
   }
-  if (!ranges.length) console.warn('[PVE] Movie credits conflict with scene markers; withholding timestamps.', { titleId, creditRange, afterCreditsEvent });
+  if (!ranges.length) console.warn('[PVE] Movie credits conflict with scene markers; withholding timestamps.', { titleId, creditRange, extraSceneEvent });
 
   const existingMovieItems = state.allItems.filter(item =>
     String(item?._showId || '') === String(titleId) &&

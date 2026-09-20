@@ -507,7 +507,9 @@ async function prepareJSONExport() {
     let downloaded = 0;
     function downloadNext(index) {
       if (index >= files.length) {
-        toast(`${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`);
+        const summary = `${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`;
+        document.getElementById('nfe-export-preview')?.remove();
+        resetCapturedData(`${summary}; captured data cleared.`);
         return;
       }
       const file = files[index];
@@ -665,8 +667,13 @@ async function prepareIntroDBSubmission() {
       state.submitInProgress = false;
       const { ok, fail } = state.submitResults;
       updateSubmitBtn('Submit to IntroDB');
-      toast(`IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
-      setIntrodbStatus(`${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`);
+      const summary = `IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`;
+      if (fail === 0 && ok > 0) {
+        resetCapturedData(`${summary}; captured data cleared.`);
+      } else {
+        toast(summary);
+        setIntrodbStatus(summary);
+      }
       return;
     }
 
@@ -692,9 +699,7 @@ async function prepareIntroDBSubmission() {
   sendNext(0);
 }
 
-export function clearData() {
-  if (state.submitInProgress || state.exportInProgress) { toast('Please wait until the current operation finishes.'); return; }
-  if (!confirm('Delete all captured timestamps?')) return;
+function resetCapturedData(message = 'Data cleared') {
   const introdbApiKey = state.introdbApiKey;
   const panelVisible = state.panelVisible;
   const { apiKey: tvdbApiKey, pin: tvdbPin } = loadTvdbSettings();
@@ -706,7 +711,13 @@ export function clearData() {
   setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
   setIntrodbStatus('');
   updateImdbInput();
-  toast('Data cleared');
+  toast(message);
+}
+
+export function clearData() {
+  if (state.submitInProgress || state.exportInProgress) { toast('Please wait until the current operation finishes.'); return; }
+  if (!confirm('Delete all captured timestamps?')) return;
+  resetCapturedData();
 }
 
 function revealApiSettings() {

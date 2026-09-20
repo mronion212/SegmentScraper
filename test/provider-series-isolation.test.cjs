@@ -108,12 +108,27 @@ test('Netflix does not discard metadata for an episode ID captured under another
   assert.deepEqual(plain(netflix.state.allItems.map(item => item._showId)), ['100', '200']);
 });
 
-test('Netflix movie credit offsets remain withheld pending playback verification', () => {
+test('Netflix captures a movie outro when creditsOffset and runtime are available', () => {
   const statuses = [];
   const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus: message => statuses.push(message) });
   netflix.process({ video: { id: 1, type: 'movie', title: 'Movie', creditsOffset: 5400, runtime: 6000 } });
+  assert.deepEqual(plain(netflix.state.allItems.map(item => ({
+    media_type: item.media_type,
+    segment_type: item.segment_type,
+    season: item.season,
+    episode: item.episode,
+    start_sec: item.start_sec,
+    end_sec: item.end_sec,
+  }))), [{ media_type: 'movie', segment_type: 'outro', season: null, episode: null, start_sec: 5394, end_sec: 6000 }]);
+  assert.match(statuses[0], /TMDB extra-scene checks/);
+});
+
+test('Netflix does not invent a movie outro end without runtime', () => {
+  const statuses = [];
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus: message => statuses.push(message) });
+  netflix.process({ video: { id: 1, type: 'movie', title: 'Movie', creditsOffset: 5400 } });
   assert.equal(netflix.state.allItems.length, 0);
-  assert.match(statuses[0], /unverified/);
+  assert.match(statuses[0], /no complete creditsOffset\/runtime range/);
 });
 
 test('Netflix tags timestamps and catalogs with their own series id', () => {
@@ -414,12 +429,15 @@ test('Videoland keeps the full outro and the marked scene separately', () => {
   ]);
 });
 
-test('Netflix movie creditsOffset is logged as unverified rather than uploaded', () => {
+test('Netflix movie creditsOffset processing keeps diagnostics in the console', () => {
   const statuses = [];
   const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus: value => statuses.push(value) });
   netflix.process({ video: { id: 'movie-test', type: 'movie', title: 'Movie fixture', creditsOffset: 7800, runtime: 7900, skipMarkers: {} } });
   assert.equal(netflix.detectedShows[0].mediaType, 'movie');
-  assert.equal(netflix.state.allItems.length, 0);
+  assert.equal(netflix.state.allItems.length, 1);
   assert.equal(statuses.length, 1);
   assert.equal(netflix.logs[0][1].creditsOffset, 7800);
+  assert.equal(netflix.logs[0][1].correctedCreditsOffset, 7794);
+  assert.equal(netflix.logs[0][1].creditsStartCorrectionSec, 6);
+  assert.equal(netflix.logs[0][1].captured, true);
 });
