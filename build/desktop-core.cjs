@@ -9,7 +9,7 @@ for (const name of modules) {
  const names = [...source.matchAll(/export (?:async )?(?:function|const|let) (\w+)/g)].map(m => m[1]);
  output += `const ${name.replaceAll('-', '_')} = (() => {\n${source.replace(/^import .*;\r?\n/gm, '').replace(/export (?=(?:async )?(?:function|const|let))/g, '')}\nreturn { ${names.join(', ')} };\n})();\n`;
  if (name === 'state') output += 'const { state, createMediaCacheKey } = stateModule;\n';
- if (name === 'output-policy') output += 'const { outputSegmentAllowed, introdbPayload } = output_policy;\n';
+ if (name === 'output-policy') output += 'const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries } = output_policy;\n';
 }
 // Other modules expect the imported state object, not the module namespace.
 output = output.replace('const state = (() =>', 'const stateModule = (() =>');

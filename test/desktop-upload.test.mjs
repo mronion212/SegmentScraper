@@ -29,16 +29,22 @@ function mock({existing=none,keywords=[],fail=false,imdb=true}={}) {
 async function idle(service){for(let i=0;i<100;i++){if(!service.active())return service.list().at(-1);await new Promise(r=>setTimeout(r,1));}assert.fail('Service did not settle');}
 test('movie uploads use official IntroDB schema and retain decimal seconds',async()=>{
  const {fetcher,calls}=mock();const service=createUploadService({fetcher});service.configure({introdbKey:'private',tmdbToken:'tmdb'});
- service.check(job,draft);const run=await idle(service);assert.equal(run.status,'ready');assert.equal(run.steps.length,5);
+ service.check(job,draft);const run=await idle(service);assert.equal(run.status,'ready');assert.equal(run.steps.length,5);assert.deepEqual(run.introdbSegments,[]);
  await assert.rejects(service.submit(run.id,{reviewed:false}),/personally/);
- await service.submit(run.id,{reviewed:true});assert.equal((await idle(service)).status,'complete');
+ await service.submit(run.id,{reviewed:true,introdbReviewed:true});assert.equal((await idle(service)).status,'complete');
  const post=calls.find(c=>c.url.endsWith('/submit'));assert.equal(post.options.headers['X-API-Key'],'private');assert.deepEqual(JSON.parse(post.options.body),{imdb_id:draft.imdb_id,is_movie:true,...draft.segments[0]});
  assert.ok(!JSON.stringify(service.list()).includes('private'));
  service.check(job,draft);const next=await idle(service);assert.deepEqual(next.duplicates,[true]);
 });
+test('upload requires a separate manual approval of the IntroDB comparison',async()=>{
+ const {fetcher,calls}=mock({existing:{...none,outro:{start_sec:6800,end_sec:7100.5}}});const service=createUploadService({fetcher});service.configure({introdbKey:'key',tmdbToken:'token'});service.check(job,draft);const run=await idle(service);
+ assert.deepEqual(run.introdbSegments,[{segment_type:'outro',start_sec:6800,end_sec:7100.5,credit_part:null}]);
+ await assert.rejects(service.submit(run.id,{reviewed:true}),/Compare the scraper timestamps/);
+ assert.equal(calls.some(c=>c.url.endsWith('/submit')),false);
+});
 test('existing exact ranges skip upload but differing ranges can correct data',async()=>{
  for(const [start,duplicate] of [[6900.125,true],[6800,false]]){
- const {fetcher,calls}=mock({existing:{...none,outro:{start_sec:start,end_sec:7100.5}}});const service=createUploadService({fetcher});service.configure({introdbKey:'key',tmdbToken:'token'});service.check(job,draft);const r=await idle(service);assert.equal(r.duplicates[0],duplicate);await service.submit(r.id,{reviewed:true});await idle(service);assert.equal(calls.some(c=>c.url.endsWith('/submit')),!duplicate);
+ const {fetcher,calls}=mock({existing:{...none,outro:{start_sec:start,end_sec:7100.5}}});const service=createUploadService({fetcher});service.configure({introdbKey:'key',tmdbToken:'token'});service.check(job,draft);const r=await idle(service);assert.equal(r.duplicates[0],duplicate);await service.submit(r.id,{reviewed:true,introdbReviewed:true});await idle(service);assert.equal(calls.some(c=>c.url.endsWith('/submit')),!duplicate);
  }
 });
 
@@ -46,14 +52,14 @@ test('invalid existing timestamps block instead of silently marking a duplicate'
  const service=createUploadService({fetcher:mock({existing:{...none,outro:{start_sec:null,end_sec:7100}}}).fetcher});service.configure({tmdbToken:'token'});service.check(job,draft);const run=await idle(service);assert.equal(run.status,'blocked');assert.ok(run.blockers.some(x=>x.includes('invalid timestamps')));assert.equal(run.duplicates,undefined);
 });
 test('accepted uploads persist across service restart but validation authorization does not',async()=>{
- let saved;const service=createUploadService({fetcher:mock().fetcher,onState:async state=>{saved=structuredClone(state);}});service.configure({introdbKey:'secret',tmdbToken:'token'});service.check(job,draft);const run=await idle(service);await service.submit(run.id,{reviewed:true});await idle(service);
+ let saved;const service=createUploadService({fetcher:mock().fetcher,onState:async state=>{saved=structuredClone(state);}});service.configure({introdbKey:'secret',tmdbToken:'token'});service.check(job,draft);const run=await idle(service);await service.submit(run.id,{reviewed:true,introdbReviewed:true});await idle(service);
  assert.equal(saved.history.at(-1).status,'complete');assert.ok(!JSON.stringify(saved).includes('secret'));
  const next=createUploadService({fetcher:mock().fetcher,initialState:saved});next.configure({tmdbToken:'token'});assert.equal(next.list().length,0);assert.equal(next.history().length,1);next.check(job,draft);assert.deepEqual((await idle(next)).duplicates,[true]);await assert.rejects(next.submit(run.id,{reviewed:true}),/validation again/);
 });
 test('failed duplicate checks block and never silently pass; override requires code and audit',async()=>{
  const audit=[];const {fetcher,calls}=mock({fail:true});const service=createUploadService({fetcher,adminCode:'secret-code',onAudit:async x=>audit.push(x)});service.configure({introdbKey:'key',tmdbToken:'token'});service.check(job,draft);const r=await idle(service);assert.equal(r.status,'blocked');assert.match(r.blockers.join(),/503/);
- await assert.rejects(service.submit(r.id,{reviewed:true,code:'wrong',reason:'Manual review done'}),/Invalid admin/);assert.equal(calls.some(c=>c.url.endsWith('/submit')),false);
- await service.submit(r.id,{reviewed:true,code:'secret-code',reason:'Manual review done'});await idle(service);assert.equal(audit.length,1);assert.ok(!JSON.stringify(audit).includes('secret-code'));
+ await assert.rejects(service.submit(r.id,{reviewed:true,introdbReviewed:true,code:'wrong',reason:'Manual review done'}),/Invalid admin/);assert.equal(calls.some(c=>c.url.endsWith('/submit')),false);
+ await service.submit(r.id,{reviewed:true,introdbReviewed:true,code:'secret-code',reason:'Manual review done'});await idle(service);assert.equal(audit.length,1);assert.ok(!JSON.stringify(audit).includes('secret-code'));
 });
 test('known extra scenes require explicit desktop scene ranges; missing TMDB remains blocked',async()=>{
  for(const params of [{keywords:['duringcreditsstinger']},{existing:{...none,post_credits:{start_sec:7100,end_sec:7200}}},{}]){
@@ -103,7 +109,7 @@ test('desktop accepts a reviewed mid-credits scene even when TMDB confirms its p
  const {fetcher,calls}=mock({keywords:['duringcreditsstinger']});const service=createUploadService({fetcher});service.configure({introdbKey:'key',tmdbToken:'token'});
  const movie={...job,report:{...job.report,analysis:{status:'needs-review',scenes:[{start_sec:7000,end_sec:7050,kind:'mid-credits'}]}}};
  const data={...draft,sceneReview:['scene'],segments:[{segment_type:'outro',start_sec:6900,end_sec:7000},{segment_type:'post-credits',start_sec:7000,end_sec:7050}]};
- service.check(movie,data);const r=await idle(service);assert.equal(r.status,'ready');await service.submit(r.id,{reviewed:true});await idle(service);
+ service.check(movie,data);const r=await idle(service);assert.equal(r.status,'ready');await service.submit(r.id,{reviewed:true,introdbReviewed:true});await idle(service);
  const bodies=calls.filter(c=>c.url.endsWith('/submit')).map(c=>JSON.parse(c.options.body));assert.equal(bodies.length,2);assert.equal(bodies[0].end_sec,7000);assert.equal(bodies[1].segment_type,'post-credits');assert.ok(bodies.every(b=>!('mid-credits'in b)&&!('credit_part'in b)));
 });
 test('multiple confirmed scenes and overlapping movie ranges cannot be force-uploaded',()=>{
@@ -115,5 +121,5 @@ test('desktop movie checks require completed analysis and explicit ending review
  for(const [report,reviewed]of [[{...job.report,analysis:null},true],[job.report,false]]){const service=createUploadService({fetcher:mock().fetcher});service.configure({tmdbToken:'token'});service.check({...job,report},{...draft,endingReviewed:reviewed});const r=await idle(service);assert.equal(r.status,'blocked');assert.match(r.blockers.join(),/ending|overview/);}
 });
 test('failed audit prevents a force upload and concurrent submissions are rejected',async()=>{
- const {fetcher,calls}=mock({fail:true});const service=createUploadService({fetcher,adminCode:'secret',onAudit:async()=>{throw new Error('disk');}});service.configure({introdbKey:'key',tmdbToken:'token'});service.check(job,draft);const r=await idle(service);await service.submit(r.id,{reviewed:true,code:'secret',reason:'Verified manually'});await idle(service);assert.equal(calls.some(c=>c.url.endsWith('/submit')),false);assert.equal(service.list()[0].status,'partial');await assert.rejects(service.submit(r.id,{reviewed:true}),/validation again/);
+ const {fetcher,calls}=mock({fail:true});const service=createUploadService({fetcher,adminCode:'secret',onAudit:async()=>{throw new Error('disk');}});service.configure({introdbKey:'key',tmdbToken:'token'});service.check(job,draft);const r=await idle(service);await service.submit(r.id,{reviewed:true,introdbReviewed:true,code:'secret',reason:'Verified manually'});await idle(service);assert.equal(calls.some(c=>c.url.endsWith('/submit')),false);assert.equal(service.list()[0].status,'partial');await assert.rejects(service.submit(r.id,{reviewed:true,introdbReviewed:true}),/validation again/);
 });

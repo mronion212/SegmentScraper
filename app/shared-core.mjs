@@ -110,9 +110,94 @@ function introdbPayload(item) {
   return {imdb_id:item.imdb_id,segment_type:item.segment_type,start_sec:item.start_sec,end_sec:item.end_sec,...(movie?{is_movie:true}:{season:item.season,episode:item.episode})};
 }
 
-return { isMovieSegment, movieCaptureAllowedForProvider, providerCaptureAllowed, capturedSegmentKey, outputSegmentAllowed, introdbPayload };
+/**
+ * Normalize the segment names used by the public IntroDB response.
+ * IntroDB documents post-credits with a hyphen in the wire format, while
+ * older responses and clients may expose the underscore variant.
+ */
+function normalizeIntrodbSegmentType(segmentType) {
+  const normalized = String(segmentType || '').trim().toLowerCase();
+  if (normalized === 'credits') return 'outro';
+  if (normalized === 'post_credits') return 'post-credits';
+  return normalized;
+}
+
+function introdbSeconds(value) {
+  if (typeof value === 'string' && !value.trim()) return null;
+  const number = Number(value);
+  if (Number.isFinite(number)) return number;
+  const parts = String(value || '').trim().split(':').map(Number);
+  if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
+  if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return null;
+}
+
+function introdbRangeValue(source, secondsKeys, millisecondsKey) {
+  for (const key of secondsKeys) {
+    if (source?.[key] != null) return introdbSeconds(source[key]);
+  }
+  if (source?.[millisecondsKey] != null) return Number(source[millisecondsKey]) / 1000;
+  return null;
+}
+
+/**
+ * Parse the documented /segments response into displayable ranges.
+ * Invalid ranges are retained separately so callers can block an upload
+ * instead of silently treating malformed IntroDB data as an empty result.
+ */
+function parseIntrodbSegments(response) {
+  if (response == null) return { types: new Set(), ranges: [], invalid: [] };
+  if (typeof response !== 'object' || response.error || response.errors) {
+    throw new Error('IntroDB returned an invalid response. Please try again.');
+  }
+  const documentedKeys = ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits'];
+  const hasDocumentedShape = Array.isArray(response)
+    || Array.isArray(response.segments)
+    || documentedKeys.some(key => Object.prototype.hasOwnProperty.call(response, key));
+  if (!hasDocumentedShape) {
+    throw new Error('IntroDB returned an invalid response. Please try again.');
+  }
+
+  const types = new Set();
+  const ranges = [];
+  const invalid = [];
+  const add = (segmentType, value) => {
+    const normalizedType = normalizeIntrodbSegmentType(segmentType);
+    if (!['intro', 'recap', 'outro', 'post-credits'].includes(normalizedType) || value == null) return;
+    types.add(normalizedType);
+    const entries = Array.isArray(value) ? value : [value];
+    for (const entry of entries) {
+      const source = entry?.segment && typeof entry.segment === 'object' ? entry.segment : entry;
+      const start = introdbRangeValue(source, ['start_sec', 'startSec', 'start'], 'start_ms');
+      const end = introdbRangeValue(source, ['end_sec', 'endSec', 'end'], 'end_ms');
+      const range = {
+        segment_type: normalizedType,
+        start_sec: start,
+        end_sec: end,
+        credit_part: source?.credit_part ?? source?.creditPart ?? null,
+      };
+      if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start) ranges.push(range);
+      else invalid.push(range);
+    }
+  };
+
+  if (Array.isArray(response)) {
+    response.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+  } else if (Array.isArray(response.segments)) {
+    response.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+  }
+  for (const type of ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits']) add(type, response[type]);
+  return { types, ranges, invalid };
+}
+
+/** Return valid current IntroDB ranges in a UI/API-neutral shape. */
+function introdbRangeEntries(response) {
+  return parseIntrodbSegments(response).ranges;
+}
+
+return { isMovieSegment, movieCaptureAllowedForProvider, providerCaptureAllowed, capturedSegmentKey, outputSegmentAllowed, introdbPayload, normalizeIntrodbSegmentType, parseIntrodbSegments, introdbRangeEntries };
 })();
-const { outputSegmentAllowed, introdbPayload } = output_policy;
+const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries } = output_policy;
 const network = (() => {
 /**
  * Shared network utilities for SegmentScraper
@@ -304,48 +389,20 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
     if (!json || typeof json !== 'object' || json.error || json.errors) {
       throw new Error('IntroDB returned an invalid response. Please try again.');
     }
-    const set = new Set();
-    const rangesByType = new Map();
-    const coerceExistingSeconds = value => {
-      const number = Number(value);
-      if (Number.isFinite(number)) return number;
-      const parts = String(value || '').trim().split(':').map(Number);
-      if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
-      if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-      return null;
-    };
-    const readRangeValue = (source, secondsKeys, millisecondsKey) => {
-      for (const key of secondsKeys) {
-        if (source?.[key] != null) return coerceExistingSeconds(source[key]);
-      }
-      if (source?.[millisecondsKey] != null) return Number(source[millisecondsKey]) / 1000;
-      return null;
-    };
-    const add = (segmentType, value) => {
-      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType === 'post_credits' ? 'post-credits' : segmentType;
-      if (!['intro', 'recap', 'outro', 'post-credits'].includes(normalizedType) || value == null) return;
-      set.add(normalizedType);
-      const entries = Array.isArray(value) ? value : [value];
-      const ranges = entries.map(entry => {
-        const source = entry?.segment && typeof entry.segment === 'object' ? entry.segment : entry;
-        const start = readRangeValue(source, ['start_sec', 'startSec', 'start'], 'start_ms');
-        const end = readRangeValue(source, ['end_sec', 'endSec', 'end'], 'end_ms');
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
-        return {
-          startSec: start,
-          endSec: end,
-          creditPart: source?.credit_part ?? source?.creditPart ?? null,
-        };
-      }).filter(Boolean);
-      if (ranges.length) rangesByType.set(normalizedType, [...(rangesByType.get(normalizedType) || []), ...ranges]);
-    };
-
-    if (Array.isArray(json)) {
-      json.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
-    } else if (Array.isArray(json?.segments)) {
-      json.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+    const parsed = parseIntrodbSegments(json);
+    if (parsed.invalid.length) {
+      throw new Error('IntroDB returned invalid timestamps. Please try again.');
     }
-    for (const type of ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits']) add(type, json?.[type]);
+    const set = new Set(parsed.types);
+    const rangesByType = new Map();
+    for (const range of parsed.ranges) {
+      const normalizedRange = {
+        startSec: range.start_sec,
+        endSec: range.end_sec,
+        creditPart: range.credit_part,
+      };
+      rangesByType.set(range.segment_type, [...(rangesByType.get(range.segment_type) || []), normalizedRange]);
+    }
     Object.defineProperty(set, 'rangesByType', { value: rangesByType, enumerable: false });
     return set;
   };

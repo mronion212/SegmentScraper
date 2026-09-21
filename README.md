@@ -10,9 +10,9 @@ Desktop 1.10.0 adds an English review/upload workflow, IMDb identity lookup, sha
 
 Desktop 1.11.0 adds automatic movie-ending analysis using FFmpeg, credit-text heuristics, a 12× overview and short boundary previews. It can submit a reviewed scene-safe outro and one mid-/post-credits scene. The online userscript captures Netflix movie outros, while movie credit capture for the other streaming providers is temporarily disabled until their markers are verified against playback. Multiple real scenes are preserved in local reports because IntroDB does not currently model them separately. Applicable future changes must be carried to both clients; shared code and CI checks enforce generated-code parity (see `AGENTS.md`).
 
-Userscript 1.12.4 contains the provider fixes, Netflix movie boundary correction, movie scene checks, completed-export cleanup, and temporary non-Netflix movie-capture gate described below. The generated userscript uses `@version 1.12.4`.
+Userscript 1.12.5 contains the provider fixes, Netflix movie boundary correction, movie scene checks, completed-export cleanup, temporary non-Netflix movie-capture gate, and the manual IntroDB timestamp comparison required before upload. The generated userscript uses `@version 1.12.5`.
 
-Desktop Alpha 0.1 is an experimental test release based on the published 1.12.3 desktop build. Its review workflow, movie-ending analysis, uploads and local workspace are still under development; always review suggested boundaries before uploading.
+Desktop Alpha 0.1 is an experimental test release based on the published 1.12.5 desktop build. Its review workflow, movie-ending analysis, uploads and local workspace are still under development; always review suggested boundaries before uploading.
 
 Desktop 1.12.1 reduces image processing before scaling, creates boundary clips on demand, and offers an optional last-15-minute scan with explicit coverage warnings. The default remains the last quarter. Provider 4K streams still require downloading and decoding the selected source window; scan speed and approximate time remaining are displayed.
 
@@ -45,7 +45,8 @@ Every active provider logs each captured episode with readable timestamps and th
 - Exports captured timestamps as JSON
 - Previews JSON before download
 - Submits timestamps to IntroDB
-- Removes segments already present in IntroDB from exports and submissions
+- Shows current IntroDB ranges next to the Scraper ranges before export or submission; exact duplicates are removed from the output
+- Requires an explicit manual comparison approval before any IntroDB upload, so provider offsets such as Netflix timing differences cannot be accepted silently
 - Maps regular provider episodes to canonical TheTVDB season/episode numbers before JSON export or submission; movies bypass TheTVDB
 - Excludes provider specials and TheTVDB Season 0 from count checks and normal submission mapping
 - Uses one shared provider panel based on the Netflix layout
@@ -157,7 +158,7 @@ Use `minor` or `major` instead of `patch` when appropriate. Commit and push both
 4. Open the SegmentScraper panel from the injected player button.
 5. Set the IMDb ID if automatic lookup did not resolve it.
 6. Enter your own TheTVDB v4 API key and, when required, your optional subscriber PIN. These credentials and the reusable bearer token are stored locally by the userscript manager.
-7. Download the JSON export, or save an IntroDB API key locally and submit directly. After a confirmed export or fully successful submission, captured timestamps are cleared; failed submissions remain available for retry. The stored key is not rendered back into the panel or written to logs.
+7. Download the JSON export, or save an IntroDB API key locally and submit directly. Before uploading, compare the clearly labelled **Scraper** and **IntroDB** ranges in the review dialog and tick the manual approval checkbox. After a confirmed export or fully successful submission, captured timestamps are cleared; failed submissions remain available for retry. The stored key is not rendered back into the panel or written to logs.
 
 At startup, SegmentScraper compares its installed semantic version with the `@version` in the userscript on the `main` branch. If GitHub confirms that a newer version exists, a non-dismissible update screen replaces the normal panel. The update link opens the raw userscript so Tampermonkey or Violentmonkey can install it. After installation, reload the streaming page. If GitHub is temporarily unreachable, the check fails open and the installed version remains usable.
 

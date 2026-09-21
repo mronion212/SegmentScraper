@@ -18,6 +18,7 @@ import { loadTvdbSettings, saveTvdbSettings, mapSeriesItemsToTvdb } from '../cor
 
 let activeProviderConfig = getProviderConfig('netflix');
 let activeProviderName = 'netflix';
+const introdbChecksInFlight = new Map();
 
 
 function getItemShowId(item) {
@@ -36,6 +37,56 @@ function isMovieItem(item) {
 
 function getItemCacheKey(item) {
   return createMediaCacheKey(item.imdb_id, getItemMediaType(item), item.season, item.episode);
+}
+
+function existingSegmentsForDisplay(existing) {
+  const rangesByType = existing?.rangesByType;
+  if (!rangesByType?.entries) return [];
+  const segments = [];
+  for (const [segmentType, ranges] of rangesByType.entries()) {
+    for (const range of ranges || []) {
+      segments.push({
+        segment_type: segmentType,
+        start_sec: Number(range.startSec),
+        end_sec: Number(range.endSec),
+        credit_part: range.creditPart ?? null,
+      });
+    }
+  }
+  return segments;
+}
+
+function ensureIntrodbSegments(items) {
+  const keys = [...new Set((items || [])
+    .filter(item => item?.imdb_id && item.imdb_id !== 'IMDB_PENDING')
+    .map(getItemCacheKey))];
+  for (const key of keys) {
+    if (state.dedupCacheV2[key] || introdbChecksInFlight.has(key)) continue;
+    const promise = loadExistingSegmentsForEpisode(key)
+      .then(existing => {
+        const count = existing?.rangesByType ? existingSegmentsForDisplay(existing).length : 0;
+        if (count) setIntrodbStatus(`IntroDB timestamps loaded for the current item (${count}). Compare them with the Scraper result in Show timestamps.`);
+        return existing;
+      })
+      .catch(error => {
+        console.warn('[NFE-DEDUP] Could not load current IntroDB timestamps:', error);
+        setIntrodbStatus(error.message);
+        return null;
+      })
+      .finally(() => introdbChecksInFlight.delete(key));
+    introdbChecksInFlight.set(key, promise);
+  }
+}
+
+function loadCurrentIntrodbSegments(imdbId) {
+  return loadExistingSegments(imdbId).then(segments => {
+    const currentItems = state.allItems.filter(item => item.imdb_id === imdbId);
+    if (currentItems.length && segments.length) {
+      setIntrodbStatus(`IntroDB timestamps loaded for ${currentItems.length} captured item${currentItems.length === 1 ? '' : 's'}. Compare them with the Scraper result in Show timestamps.`);
+    }
+    ensureIntrodbSegments(currentItems);
+    return segments;
+  });
 }
 
 function hasTvItems(items) {
@@ -195,7 +246,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     updateImdbInput();
     setDbStatus(`Manual override applied · ID: ${imdbOverride}`);
     updateCounters();
-    loadExistingSegments(imdbOverride).catch(error => setIntrodbStatus(error.message));
+    loadCurrentIntrodbSegments(imdbOverride).catch(error => setIntrodbStatus(error.message));
     return;
   }
 
@@ -212,7 +263,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
       updateImdbInput();
       setDbStatus(`Found: ${result.imdbId}`);
       updateCounters();
-      loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
+      loadCurrentIntrodbSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
     } else {
       if (!isCurrentShow()) return;
       setDbStatus(`IMDb lookup failed: ${result.error}`);
@@ -260,6 +311,7 @@ export function recordExtractedSegments(items, providerName = activeProviderName
   scheduleCaptureSave();
   state.interceptedCount++;
   updateCounters();
+  ensureIntrodbSegments(items);
   toast(`+${items.length} timestamps captured · total: ${state.allItems.length}`);
 }
 
@@ -363,6 +415,12 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
 
 function filterShortOutputSegments(items) {
   return items.filter(outputSegmentAllowed);
+}
+
+function annotateExistingComparison(row, item, existing) {
+  if (!row || !existing || existing.error) return;
+  row.existingSegments = existingSegmentsForDisplay(existing);
+  row.existingRanges = existing.rangesByType?.get(item.segment_type) || [];
 }
 
 function normalizeMovieExportItem(item) {
@@ -499,7 +557,7 @@ async function prepareJSONExport() {
       if (row) {
         row.status = failed ? 'Unavailable' : duplicate ? 'In IntroDB' : 'NEW';
         row.reason = failed ? existing.error : '';
-        row.existingRanges = failed ? [] : existing.rangesByType?.get(item.segment_type) || [];
+        annotateExistingComparison(row, item, existing);
       }
       if (failed) toast(existing.error);
       return !failed && !duplicate;
@@ -663,10 +721,18 @@ async function prepareIntroDBSubmission() {
   const canonicalExisting = await loadCanonicalExisting(mediaKeys);
 
   const safeMapped = await filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
-  if (!safeMapped.length) {
-    setIntrodbStatus('Nothing submitted: extra scene detected or TMDB check unavailable');
-    stopSubmission();
-    return;
+  const safeSet = new Set(safeMapped);
+  const rows = allMapped.map(item => ({ item, status: 'NEW', reason: '' }));
+  for (const row of rows) {
+    const existing = canonicalExisting.get(getItemCacheKey(row.item));
+    annotateExistingComparison(row, row.item, existing);
+    if (!safeSet.has(row.item)) {
+      row.status = 'Unavailable';
+      row.reason = 'Movie excluded by extra-scene checks';
+    } else if (hasExistingSegment(existing, row.item)) {
+      row.status = 'In IntroDB';
+      row.reason = 'Exact range already exists in IntroDB';
+    }
   }
   const items = safeMapped.filter(item => {
     const key = getItemCacheKey(item);
@@ -674,21 +740,24 @@ async function prepareIntroDBSubmission() {
   });
   const skipped = capturedItems.length - items.length;
   if (!items.length) {
-    toast('All timestamps already exist in IntroDB.');
-    setIntrodbStatus('Nothing new to submit (all duplicates)');
+    const allDuplicates = safeMapped.length > 0;
+    toast(allDuplicates ? 'All timestamps already exist in IntroDB.' : 'No timestamps remain eligible for upload after the extra-scene checks.');
+    setIntrodbStatus(allDuplicates ? 'Nothing new to submit (all duplicates)' : 'Nothing submitted: extra scene detected or TMDB check unavailable');
+    showExportPreview({
+      mode: 'submit',
+      items: [],
+      fileCount: 0,
+      duplicateCount: rows.filter(row => row.status === 'In IntroDB').length,
+      checking: false,
+      rows,
+      message: allDuplicates
+        ? 'Nothing new to upload. The current IntroDB timestamps are shown for comparison.'
+        : 'No timestamp can be uploaded from this item. The current IntroDB timestamps remain visible for comparison.',
+    });
     stopSubmission();
     return;
   }
 
-  const skipMessage = skipped > 0 ? ` (${skipped} skipped or already existed)` : '';
-  const ids = [...new Set(items.map(item => item.imdb_id))].join(', ');
-  if (!confirm(`Submit ${items.length} timestamp${items.length !== 1 ? 's' : ''} to IntroDB?${skipMessage}\nID(s): ${ids}`)) {
-    stopSubmission();
-    return;
-  }
-
-  state.submitResults = { ok: 0, fail: 0 };
-  updateSubmitBtn(`Submitting 0/${items.length}...`);
   let sent = 0;
 
   function sendNext(index) {
@@ -725,7 +794,23 @@ async function prepareIntroDBSubmission() {
     });
   }
 
-  sendNext(0);
+  showExportPreview({
+    mode: 'submit',
+    items,
+    fileCount: items.length,
+    duplicateCount: rows.filter(row => row.status === 'In IntroDB').length,
+    checking: false,
+    rows,
+    message: 'Compare the Scraper and IntroDB lines, then explicitly approve this upload. Differences can be caused by provider offsets.',
+    requiresApproval: true,
+    approvalLabel: 'I manually compared every Scraper timestamp with the current IntroDB timestamp(s) for this exact video and approve this upload.',
+    onCancel: stopSubmission,
+    onConfirm: () => {
+      state.submitResults = { ok: 0, fail: 0 };
+      updateSubmitBtn(`Submitting 0/${items.length}...`);
+      sendNext(0);
+    },
+  });
 }
 
 function resetCapturedData(message = 'Data cleared') {
@@ -779,7 +864,7 @@ function configurePanelCallbacks() {
       state.dedupCacheV2 = {};
       setDbStatus(`ID saved: ${value}`);
       updateCounters();
-      loadExistingSegments(value).catch(error => setIntrodbStatus(error.message));
+      loadCurrentIntrodbSegments(value).catch(error => setIntrodbStatus(error.message));
       lookupImdbTitle(value).then(result => {
         if (!result.success) return;
         state.showTitle = result.title;
@@ -802,7 +887,7 @@ function configurePanelCallbacks() {
           updateImdbInput();
           setDbStatus(`Found: ${result.imdbId}`);
           updateCounters();
-          loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
+          loadCurrentIntrodbSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
         } else {
           setDbStatus(`IMDb lookup failed: ${result.error}`);
         }

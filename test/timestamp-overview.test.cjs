@@ -51,3 +51,46 @@ test('timestamp dialog shows readable values, keeps failed rows and gates downlo
   download.listeners.click();
   assert.equal(downloads, 1);
 });
+
+test('timestamp upload review labels Scraper and IntroDB ranges and gates approval', () => {
+  let document;
+  class Element {
+    constructor() { this.style = {}; this.children = []; this.listeners = {}; }
+    setAttribute() {}
+    append(...children) { this.children.push(...children); }
+    replaceChildren(...children) { this.children = children; }
+    addEventListener(name, listener) { this.listeners[name] = listener; }
+    focus() { document.activeElement = this; }
+    remove() {}
+  }
+  document = {
+    body: new Element(),
+    getElementById: () => null,
+    createElement: () => new Element(),
+    createTextNode: text => Object.assign(new Element(), { textContent: text }),
+  };
+  const source = fs.readFileSync(path.join(__dirname, '../src/ui/panel.js'), 'utf8')
+    .replace(/^import .*$/gm, '').replace(/^export /gm, '') + '\nglobalThis.showPreview = showExportPreview;';
+  const context = vm.createContext({ document, PANEL_COLORS: { border: '#333', text: '#fff' },
+    getProviderConfig: () => ({ name: 'Netflix', colors: { primary: '#09f' } }),
+  });
+  vm.runInContext(source, context);
+  const item = { imdb_id: 'tt1234567', season: 1, episode: 2, segment_type: 'intro', start_sec: 15, end_sec: 90 };
+  let uploads = 0;
+  context.showPreview({
+    mode: 'submit', items: [item], fileCount: 1, duplicateCount: 0, checking: false,
+    requiresApproval: true,
+    rows: [{ item, status: 'NEW', existingSegments: [{ segment_type: 'intro', start_sec: 21, end_sec: 96 }] }],
+    onConfirm: () => uploads++,
+  });
+  const dialog = document.body.children[0].children[0], preview = dialog.children[2], submit = dialog.children[3].children[1];
+  assert.match(preview.children[0].children[1].textContent, /Scraper: intro/);
+  assert.match(preview.children[0].children[1].textContent, /IntroDB: intro/);
+  assert.equal(submit.disabled, true);
+  const approval = preview.children[1].children[0];
+  approval.checked = true;
+  approval.listeners.change();
+  assert.equal(submit.disabled, false);
+  submit.listeners.click();
+  assert.equal(uploads, 1);
+});

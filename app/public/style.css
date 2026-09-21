@@ -162,6 +162,11 @@ dialog::backdrop { background: #03070be8; }
 .review-checks p, .review-checks label { font-size: 12px; }
 .review-checks .review-warning { padding: 10px; }
 .review-checks summary { font-size: 12px; }
+.timestamp-comparison { width: 100%; margin: 12px 0; border-collapse: collapse; font-size: 11px; }
+.timestamp-comparison th, .timestamp-comparison td { padding: 8px; text-align: left; border-bottom: 1px solid #293747; font-variant-numeric: tabular-nums; }
+.timestamp-comparison th { color: #8eabc0; font-weight: 500; }
+.timestamp-comparison .introdb-row td { color: #edc77f; }
+.review-checks #introdb-review-confirm { accent-color: #e4b968; }
 .identity-panel { padding: 14px; background: #101d2a; border: 1px solid #293b4d; border-radius: 10px; }
 .identity-panel summary { font-weight: 600; }
 #draft-status { color: #a8d4c2; font-size: 11px; }

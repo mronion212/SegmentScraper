@@ -6,7 +6,7 @@ This is an experimental alpha release. Features, review flows and desktop storag
 
 ## Install and use
 
-Run `dist/SegmentScraper-Desktop-1.12.3-x64-Setup.exe`, or the Portable EXE. The application is labeled **Desktop Alpha 0.1**. ffprobe and FFmpeg are bundled.
+Run `dist/SegmentScraper-Desktop-1.12.5-x64-Setup.exe`, or the Portable EXE. The application is labeled **Desktop Alpha 0.1**. ffprobe and FFmpeg are bundled.
 
 1. Choose local files/a season folder, or connect the same TorBox account used in Nuvio. Torrents, Usenet and web downloads are supported. Real-Debrid supports existing torrents. No content is added to TorBox.
 2. Inspect directly from your provider, or download and inspect. Remote inspection uses bandwidth and may read substantial data. Completed downloads remain on disk.
@@ -14,7 +14,7 @@ Run `dist/SegmentScraper-Desktop-1.12.3-x64-Setup.exe`, or the Portable EXE. The
 4. Enter your IntroDB key, TMDB read access token for movies, and TheTVDB key/optional subscriber PIN for TV. Upload credentials stay in backend memory for this session; saving replaces all four fields. Provider accounts can separately be remembered using Electron safeStorage encryption.
 5. Search by title or IMDb ID and select the correct movie/series. For TV, enter the actual episode title and positive season/episode numbers. Season 0/specials are excluded.
 6. For movies, choose **Analyze ending**. It automatically scans the last quarter (optionally half/full video), finds credit-like imagery/black transitions, and generates candidate scene boundaries, a 12× ending overview, and short boundary clips. Review these rather than watching the whole movie. Mark each candidate as a real scene or false positive. **Use detected timestamps** drops rejected candidates. Correct the times as needed and confirm the ending review.
-7. Run the checks. Review canonical numbering, exact payload, progress and blocking reasons. Watch and verify every boundary yourself, tick the required acknowledgment, and upload.
+7. Run the checks. Review canonical numbering, exact payload, progress and blocking reasons. The review panel shows the current IntroDB ranges beside the **Scraper** ranges for the exact item; differences are never auto-copied. Watch and verify every boundary yourself, tick both the video-review acknowledgment and the IntroDB-comparison approval, and upload.
 
 ## Checks and script parity
 
@@ -34,13 +34,13 @@ FFmpeg decodes only the chosen window. Full-rate black detection is combined wit
 
 Preview clips are generated locally with FFmpeg and exposed only by opaque IDs on the loopback server. Source paths and provider URLs are not preview endpoints. Clips are retained with the saved workspace and deleted when you clear tasks or reanalyze. A forced crash during creation may leave an unreferenced preview folder. Provider analysis obtains a fresh private link and uses provider bandwidth for scanning and previews; download locally if the provider cannot seek reliably. Cancellation stops FFmpeg. Reports include candidate evidence and warnings, not source links or keys.
 
-A local selection is an incomplete catalogue: the desktop requires exact, unique episode-title matching rather than inferring order from equal counts. The shared TVDB loader follows pagination. Movies bypass TVDB. Duplicates are checked against fresh IntroDB data: exact ranges are skipped, differing ranges may be submitted as corrections. Network errors block instead of implying an empty database. Successful session submissions are tracked to avoid repeats. Failed/uncertain uploads stop the batch and require fresh checks before retrying. Requests time out after 15 seconds; checks expire after 15 minutes. Editing requires new checks.
+A local selection is an incomplete catalogue: the desktop requires exact, unique episode-title matching rather than inferring order from equal counts. The shared TVDB loader follows pagination. Movies bypass TVDB. Duplicates are checked against fresh IntroDB data and rendered as a Scraper-versus-IntroDB comparison: exact ranges are skipped, differing ranges may be submitted as corrections only after the separate manual comparison approval. Network errors or malformed current ranges block instead of implying an empty database. Successful session submissions are tracked to avoid repeats. Failed/uncertain uploads stop the batch and require fresh checks before retrying. Requests time out after 15 seconds; checks expire after 15 minutes. Editing requires new checks.
 
 Queue, drafts, reports, preview files and upload receipts are saved locally in Electron's user-data `workspace` folder (web mode: `app-data/workspace`, overridable with `WORKSPACE_DIR`). Atomic snapshots use a flushed temporary file followed by rename. Credentials and provider URLs are excluded. Keep a backup of this folder if your review history matters; clearing tasks removes their reports and previews. Upload history remains available.
 
 Interrupted work is shown as resumable; it never silently uploads or downloads on startup. Reconnect the original provider before resuming remote work. Resume restarts inspection/download; it does not resume a partial video download byte-for-byte. Restored remote reports require reinspection. Local files are checked using size, modification time and SHA-256 samples at the beginning, middle and end before analysis, validation and upload. This is a practical change detector, not a full-file cryptographic identity. Changed files need reinspection. Reusing an unchanged local analysis also requires matching analysis version, scan window and existing preview files.
 
-Review confirmations and validation runs are not restored as upload authorization. All uploads require fresh checks and explicit personal review. Accepted submissions and an interrupted upload's last saved state remain in history; uncertain submissions require a fresh IntroDB check.
+Review confirmations, IntroDB comparison approvals and validation runs are not restored as upload authorization. All uploads require fresh checks, explicit personal video review and a separate approval that the current IntroDB ranges were compared with the exact video. Accepted submissions and an interrupted upload's last saved state remain in history; uncertain submissions require a fresh IntroDB check.
 
 ## Review workspace and performance
 
@@ -58,7 +58,7 @@ This local operator override bypasses review-policy failures, including unavaila
 
 Electron checks stable GitHub releases on startup and every 30 minutes. Only releases with a Windows Setup asset count. A confirmed newer version opens a non-dismissible dialog and blocks backend mutations until installation and restart. Reports remain exportable. The button opens the fixed repository releases page; the user installs the update. Known mandatory versions persist offline. A failed first check is not mistaken for an available update.
 
-Publish a higher version with `SegmentScraper-Desktop-VERSION-x64-Setup.exe` on a stable GitHub release. The `v1.12.3` release contains the clearly labeled **Desktop Alpha 0.1** build alongside the userscript release. A userscript-only update cannot lock the desktop. Version 1.9.5 needs a one-time manual upgrade because it has no checker. Builds are currently not code-signed.
+Publish a higher version with `SegmentScraper-Desktop-VERSION-x64-Setup.exe` on a stable GitHub release. The `v1.12.5` release contains the clearly labeled **Desktop Alpha 0.1** build alongside the userscript release. A userscript-only update cannot lock the desktop. Version 1.9.5 needs a one-time manual upgrade because it has no checker. Builds are currently not code-signed.
 
 ## Development
 

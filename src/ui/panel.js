@@ -481,7 +481,7 @@ export function showExportPreview(view) {
   `;
 
   const heading = document.createElement('h2');
-  heading.textContent = `${providerName} timestamps`;
+  heading.textContent = view.mode === 'submit' ? 'Review IntroDB upload' : `${providerName} timestamps`;
   heading.style.cssText = `margin:0 0 6px; color:${providerColors.primary}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
   summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
@@ -497,7 +497,7 @@ export function showExportPreview(view) {
   cancel.textContent = 'Close';
   cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
   const confirm = document.createElement('button');
-  confirm.textContent = 'Download JSON';
+  confirm.textContent = view.mode === 'submit' ? 'Upload to IntroDB' : 'Download JSON';
   confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
 
   const clock = value => {
@@ -506,11 +506,20 @@ export function showExportPreview(view) {
     const seconds = Math.floor(ms / 1000);
     return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
   };
+  let approvalChecked = false;
+  let approvalInput = null;
+  const mediaKey = item => {
+    const movie = item?.is_movie === true || String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie';
+    return movie
+      ? `${item?.imdb_id || ''}|movie`
+      : `${item?.imdb_id || ''}|${item?.season}|${item?.episode}`;
+  };
   const update = next => {
     view = next;
     const rows = view.rows || [];
     summary.textContent = `${rows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${view.duplicateCount} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
     preview.replaceChildren();
+    const shownExistingFor = new Set();
     for (const row of rows) {
       const item = row.item;
       const entry = document.createElement('div');
@@ -519,19 +528,51 @@ export function showExportPreview(view) {
       label.textContent = row.status;
       label.style.color = row.status === 'NEW' ? '#69d89b' : colors.textSecondary;
       const details = document.createElement('div');
-      details.textContent = `${item.imdb_id || 'IMDb pending'} · Provider S${item.season}E${item.episode} ${item._episodeTitle || ''}\n${item.segment_type} · ${clock(item.start_sec)} → ${clock(item.end_sec)} (${item.start_sec}–${item.end_sec} sec)`;
+      const movie = item?.is_movie === true || String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie';
+      const itemLabel = movie ? 'Movie' : `S${item.season}E${item.episode}`;
+      details.textContent = `${item.imdb_id || 'IMDb pending'} · ${itemLabel} ${item._episodeTitle || ''}\nScraper: ${item.segment_type} · ${clock(item.start_sec)} → ${clock(item.end_sec)} (${item.start_sec}–${item.end_sec} sec)`;
       if (row.canonical) details.textContent += `\nTVDB S${row.canonical.season}E${row.canonical.episode}`;
       if (row.reason) details.textContent += `\n${row.reason}`;
-      for (const range of row.existingRanges || []) {
-        details.textContent += `\nIntroDB: ${clock(range.startSec)} → ${clock(range.endSec)}`;
+      const existingSegments = row.existingSegments || [];
+      const sameType = existingSegments.filter(range => range.segment_type === item.segment_type);
+      if (row.existingSegments) {
+        if (sameType.length) {
+          for (const range of sameType) details.textContent += `\nIntroDB: ${range.segment_type} · ${clock(range.start_sec)} → ${clock(range.end_sec)} (${range.start_sec}–${range.end_sec} sec)`;
+        } else {
+          details.textContent += `\nIntroDB: no ${item.segment_type} timestamp returned for this item.`;
+        }
+        const key = mediaKey(item);
+        if (!shownExistingFor.has(key)) {
+          const otherTypes = existingSegments.filter(range => range.segment_type !== item.segment_type);
+          for (const range of otherTypes) details.textContent += `\nIntroDB current ${range.segment_type}: ${clock(range.start_sec)} → ${clock(range.end_sec)} (${range.start_sec}–${range.end_sec} sec)`;
+          if (!existingSegments.length) details.textContent += '\nIntroDB: no current timestamps returned for this item.';
+          shownExistingFor.add(key);
+        }
+      } else {
+        for (const range of row.existingRanges || []) {
+          details.textContent += `\nIntroDB: ${clock(range.startSec)} → ${clock(range.endSec)}`;
+        }
       }
       entry.append(label, details);
       preview.append(entry);
     }
-    confirm.disabled = view.checking || !view.items.length || !view.onConfirm;
+    if (view.requiresApproval) {
+      const approval = document.createElement('label');
+      approval.style.cssText = `display:flex;gap:8px;align-items:flex-start;margin-top:12px;padding:10px;border:1px solid ${colors.border};border-radius:8px;color:${colors.textSecondary};font:12px/1.5 -apple-system,Arial,sans-serif;`;
+      approvalInput = document.createElement('input');
+      approvalInput.type = 'checkbox';
+      approvalInput.checked = approvalChecked;
+      approvalInput.style.cssText = 'margin:2px 0 0;flex:0 0 auto;';
+      approvalInput.addEventListener('change', () => { approvalChecked = approvalInput.checked; update(view); });
+      approval.append(approvalInput, document.createTextNode(view.approvalLabel || 'I compared every Scraper timestamp with the current IntroDB timestamp(s), checked the exact video, and approve this upload.'));
+      preview.append(approval);
+    }
+    confirm.disabled = Boolean(view.checking || !view.items.length || !view.onConfirm || (view.requiresApproval && !approvalChecked));
     confirm.style.opacity = confirm.disabled ? '.45' : '1';
     confirm.style.cursor = confirm.disabled ? 'not-allowed' : 'pointer';
-    confirm.textContent = view.checking ? 'Checking…' : `Download JSON (${view.fileCount})`;
+    confirm.textContent = view.checking
+      ? 'Checking…'
+      : view.mode === 'submit' ? `Upload to IntroDB (${view.items.length})` : `Download JSON (${view.fileCount})`;
   };
   update(view);
 
@@ -539,7 +580,12 @@ export function showExportPreview(view) {
   dialog.setAttribute('role', 'dialog');
   dialog.setAttribute('aria-modal', 'true');
   dialog.setAttribute('aria-label', 'Show timestamps');
-  const close = () => { overlay.remove(); if (previousFocus?.isConnected) previousFocus.focus(); };
+  const close = (cancelled = true) => {
+    if (!overlay.isConnected) return;
+    overlay.remove();
+    if (cancelled && view.onCancel) view.onCancel();
+    if (previousFocus?.isConnected) previousFocus.focus();
+  };
   overlay.addEventListener('keydown', event => {
     event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); close(); }
@@ -550,7 +596,7 @@ export function showExportPreview(view) {
   });
   cancel.addEventListener('click', close);
   overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  confirm.addEventListener('click', () => { if (!confirm.disabled) view.onConfirm(); });
+  confirm.addEventListener('click', () => { if (!confirm.disabled) { const onConfirm = view.onConfirm; close(false); onConfirm(); } });
   actions.append(cancel, confirm);
   dialog.append(heading, summary, preview, actions);
   overlay.append(dialog);

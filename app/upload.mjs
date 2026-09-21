@@ -3,7 +3,7 @@ import { createCore } from './shared-core.mjs';
 
 const BASE = 'https://api.introdb.app';
 const types = ['intro', 'recap', 'outro', 'post-credits'];
-const { outputSegmentAllowed, introdbPayload } = createCore({request:()=>{}});
+const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries } = createCore({request:()=>{}});
 export async function jsonRequest(url, options = {}, fetcher = fetch) {
   let response;
   try { response = await fetcher(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) }); }
@@ -48,10 +48,17 @@ export function validateDraft(draft, report) {
   return sorted.map(s => introdbPayload({ ...s, imdb_id:draft.imdb_id,media_type:draft.media_type,season:draft.season,episode:draft.episode }));
 }
 export function existingRanges(data, type) {
-  const entries = Array.isArray(data) ? data : data?.segments;
-  const raw = entries ? entries.filter(s => (s.segment_type || s.segmentType) === type) : data?.[type === 'post-credits' ? 'post_credits' : type];
-  if (raw == null) return [];
-  return (Array.isArray(raw) ? raw : [raw]).map(s => ({ start: s.start_sec ?? s.startSec ?? (s.start_ms == null ? NaN : s.start_ms / 1000), end: s.end_sec ?? s.endSec ?? (s.end_ms == null ? NaN : s.end_ms / 1000) }));
+  return introdbRangeEntries(data)
+    .filter(entry => entry.segment_type === type)
+    .map(entry => ({ start: entry.start_sec, end: entry.end_sec, credit_part: entry.credit_part }));
+}
+export function existingSegments(data) {
+  return introdbRangeEntries(data).map(entry => ({
+    segment_type: entry.segment_type,
+    start_sec: entry.start_sec,
+    end_sec: entry.end_sec,
+    credit_part: entry.credit_part,
+  }));
 }
 export function createUploadService({ fetcher = fetch, adminCode = process.env.SEGMENTSCRAPER_ADMIN_CODE || '', onAudit = async () => {}, initialState={}, onState=async()=>{} } = {}) {
   const runs = new Map(), accepted = new Set(initialState.accepted||[]), history=initialState.history||[];
@@ -105,10 +112,13 @@ export function createUploadService({ fetcher = fetch, adminCode = process.env.S
       await step('IntroDB existing segments', async () => {
         const p=run.payloads[0]; const query=new URLSearchParams({imdb_id:p.imdb_id,...(p.is_movie?{is_movie:'true'}:{season:String(p.season),episode:String(p.episode)})});
         existing=await jsonRequest(`${BASE}/segments?${query}`,{allowMissing:true},fetcher);
-        if(existing!==null && (typeof existing!=='object' || (!Array.isArray(existing) && !('intro' in existing || 'segments' in existing || 'outro' in existing)))) throw new Error('Unexpected IntroDB response; duplicate check is inconclusive.');
-        if(run.payloads.some(p=>existingRanges(existing,p.segment_type).some(r=>!Number.isFinite(r.start)||!Number.isFinite(r.end)||r.start<0||r.end<=r.start)))throw new Error('IntroDB returned invalid timestamps; duplicate check is inconclusive.');
+        const hasSegmentShape = existing !== null && typeof existing === 'object' && (Array.isArray(existing) || 'segments' in existing || ['intro','recap','outro','credits','post_credits','post-credits'].some(key => key in existing));
+        if(existing!==null && !hasSegmentShape) throw new Error('Unexpected IntroDB response; duplicate check is inconclusive.');
+        const parsed = existing === null ? { invalid: [] } : parseIntrodbSegments(existing);
+        if(parsed.invalid.length || run.payloads.some(p=>existingRanges(existing,p.segment_type).some(r=>!Number.isFinite(r.start)||!Number.isFinite(r.end)||r.start<0||r.end<=r.start)))throw new Error('IntroDB returned invalid timestamps; duplicate check is inconclusive.');
+        run.introdbSegments=existingSegments(existing);
         run.duplicates=run.payloads.map(p=>accepted.has(JSON.stringify(p))||existingRanges(existing,p.segment_type).some(r=>Math.abs(r.start-p.start_sec)<0.01&&Math.abs(r.end-p.end_sec)<0.01));
-        return `${run.duplicates.filter(Boolean).length} duplicate segments will be skipped`;
+        return `${run.introdbSegments.length} current IntroDB timestamp${run.introdbSegments.length===1?'':'s'} found; ${run.duplicates.filter(Boolean).length} exact duplicate segment${run.duplicates.filter(Boolean).length===1?'':'s'} will be skipped`;
       });
       await step('Movie extra-scene protection', async () => {
         if(draft.media_type!=='movie') return 'TV episode: movie check not applicable';
@@ -135,11 +145,12 @@ export function createUploadService({ fetcher = fetch, adminCode = process.env.S
     attempts.push(now);
     if(!adminCode || typeof code!=='string' || !timingSafeEqual(createHash('sha256').update(code).digest(),createHash('sha256').update(adminCode).digest())) throw new Error('Invalid admin code or admin override is not configured.');
   }
-  async function submit(id, { reviewed, code, reason } = {}) {
+  async function submit(id, { reviewed, introdbReviewed, code, reason } = {}) {
     const run=runs.get(id);
     if(busy || !run || !['ready','blocked'].includes(run.status)) throw new Error('Run validation again before retrying, or wait for the active operation.');
     if(Date.now()-(run.finishedAt||run.startedAt)>15*60000) throw new Error('Checks expired. Run validation again.');
     if(reviewed!==true) throw new Error('Confirm that you personally reviewed all output against the video.');
+    if(introdbReviewed!==true) throw new Error('Compare the scraper timestamps with the current IntroDB timestamps and approve that comparison first.');
     if(!settings.introdbKey) throw new Error('Save your IntroDB API key first.');
     if(run.blockers.length) {
       authorize(code);

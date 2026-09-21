@@ -35,7 +35,7 @@ test('failed duplicate checks reject without caching an empty result and can be 
 });
 
 test('duplicate check timeouts and malformed responses are not treated as missing segments', async () => {
-  for (const callback of [request => request.ontimeout(), request => request.onerror(), request => request.onload({ status: 200, responseText: 'null' })]) {
+  for (const callback of [request => request.ontimeout(), request => request.onerror(), request => request.onload({ status: 200, responseText: 'null' }), request => request.onload({ status: 200, responseText: '{}' })]) {
     const network = loadNetwork(callback);
     await assert.rejects(network.loadExistingSegmentsForEpisode('tt123|1|1'));
     assert.equal(network.state.dedupCacheV2['tt123|1|1'], undefined);

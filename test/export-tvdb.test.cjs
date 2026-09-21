@@ -347,10 +347,12 @@ test('IntroDB submission removes segments shorter than five seconds', async () =
   });
 
   await bootstrap.submitToIntroDB();
+  assert.equal(bootstrap.calls.previews.at(-1).requiresApproval, true);
+  bootstrap.calls.previews.at(-1).onConfirm();
   await new Promise(resolve => setTimeout(resolve, 10));
 
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.submissions)), [eligibleItem]);
-  assert.match(bootstrap.calls.confirmations[0], /Submit 1 timestamp/);
+  assert.equal(bootstrap.calls.confirmations.length, 0);
   assert.ok(bootstrap.calls.toasts.some(message => message.includes('invalid or unsupported segment(s) skipped')));
 });
 
@@ -367,6 +369,7 @@ test('fully successful IntroDB submission clears captured data and preserves API
   });
 
   await bootstrap.submitToIntroDB();
+  bootstrap.calls.previews.at(-1).onConfirm();
   await new Promise(resolve => setTimeout(resolve, 220));
 
   assert.deepEqual(bootstrap.state.allItems, []);
@@ -389,6 +392,7 @@ test('partially failed IntroDB submission retains captured data for retry', asyn
   });
 
   await bootstrap.submitToIntroDB();
+  bootstrap.calls.previews.at(-1).onConfirm();
   await new Promise(resolve => setTimeout(resolve, 220));
 
   assert.deepEqual(bootstrap.state.allItems, [movieItem]);
@@ -451,6 +455,7 @@ test('movie IntroDB submission bypasses TVDB mapping', async () => {
   });
 
   await bootstrap.submitToIntroDB();
+  bootstrap.calls.previews.at(-1).onConfirm();
   await new Promise(resolve => setTimeout(resolve, 200));
 
   assert.equal(bootstrap.calls.map.length, 0);
@@ -494,9 +499,9 @@ test('a captured extra scene excludes the entire movie from export and submissio
   await bootstrap.exportJSON();
 
   await bootstrap.submitToIntroDB();
-  assert.equal(bootstrap.calls.previews.length, 1);
-  assert.equal(bootstrap.calls.previews[0].items.length, 0);
-  assert.equal(bootstrap.calls.previews[0].onConfirm, undefined);
+  assert.equal(bootstrap.calls.previews.length, 2);
+  assert.equal(bootstrap.calls.previews[1].items.length, 0);
+  assert.equal(bootstrap.calls.previews[1].onConfirm, undefined);
   assert.equal(bootstrap.calls.submissions.length, 0);
   assert.ok(bootstrap.calls.toasts.some(message => message.includes('entire movie temporarily excluded')));
 });
@@ -520,9 +525,9 @@ test('an existing scene blocks even a full movie outro', async () => {
   ] }, existingSegmentsByKey: new Map([['tt1234567|movie', existing]]) });
   await bootstrap.exportJSON();
   await bootstrap.submitToIntroDB();
-  assert.equal(bootstrap.calls.previews.length, 1);
-  assert.equal(bootstrap.calls.previews[0].items.length, 0);
-  assert.equal(bootstrap.calls.previews[0].onConfirm, undefined);
+  assert.equal(bootstrap.calls.previews.length, 2);
+  assert.equal(bootstrap.calls.previews[1].items.length, 0);
+  assert.equal(bootstrap.calls.previews[1].onConfirm, undefined);
   assert.equal(bootstrap.calls.submissions.length, 0);
   assert.equal(bootstrap.calls.confirmations.length, 0);
 });
@@ -544,9 +549,9 @@ test('a scene removed by duration validation still excludes its movie', async ()
   ] } });
   await bootstrap.exportJSON();
   await bootstrap.submitToIntroDB();
-  assert.equal(bootstrap.calls.previews.length, 1);
-  assert.equal(bootstrap.calls.previews[0].items.length, 0);
-  assert.equal(bootstrap.calls.previews[0].onConfirm, undefined);
+  assert.equal(bootstrap.calls.previews.length, 2);
+  assert.equal(bootstrap.calls.previews[1].items.length, 0);
+  assert.equal(bootstrap.calls.previews[1].onConfirm, undefined);
   assert.equal(bootstrap.calls.submissions.length, 0);
 });
 
@@ -557,9 +562,9 @@ for (const status of ['present', 'unavailable']) {
     ] } });
     await bootstrap.exportJSON();
     await bootstrap.submitToIntroDB();
-    assert.equal(bootstrap.calls.previews.length, 1);
-  assert.equal(bootstrap.calls.previews[0].items.length, 0);
-  assert.equal(bootstrap.calls.previews[0].onConfirm, undefined);
+    assert.equal(bootstrap.calls.previews.length, 2);
+  assert.equal(bootstrap.calls.previews[1].items.length, 0);
+  assert.equal(bootstrap.calls.previews[1].onConfirm, undefined);
     assert.equal(bootstrap.calls.submissions.length, 0);
     assert.equal(bootstrap.calls.confirmations.length, 0);
   });

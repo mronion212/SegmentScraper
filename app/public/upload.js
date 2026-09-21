@@ -23,8 +23,9 @@ uploadPanel.innerHTML=`<div class="eyebrow">04 / REVIEW & CONTRIBUTE</div><h2>Up
 <p>Times are seconds from the start of this exact video, including decimals. You can correct chapter suggestions or add manually verified timestamps.</p>
 <div id="segment-editor"></div><button id="add-segment" class="secondary">Add segment</button>
 <div class="row"><button id="validate-upload">Run all checks</button><span id="upload-summary" role="status" aria-live="polite">Waiting for a reviewed file</span></div>
-<div id="upload-progress" aria-live="polite"></div><details><summary>Exact upload payload</summary><pre id="upload-payload">Run checks to preview the payload.</pre></details>
+<div id="upload-progress" aria-live="polite"></div><details id="introdb-comparison-panel"><summary>Current IntroDB timestamps vs Scraper</summary><div id="introdb-comparison"><p>Run all checks to load the current public IntroDB timestamps for this item.</p></div></details><details><summary>Exact upload payload</summary><pre id="upload-payload">Run checks to preview the payload.</pre></details>
 <label class="remember"><input type="checkbox" id="review-confirm"> I have personally checked the identity, episode mapping, and all timestamps against the video.</label>
+<label class="remember"><input type="checkbox" id="introdb-review-confirm"> I have manually compared the Scraper timestamps with the current IntroDB timestamps for this exact video and approve this upload.</label>
 <details id="override-fields" hidden><summary>Admin override for blocked checks</summary><p>Override is recorded with the failed checks and your reason. IntroDB can still reject a submission. Invalid boundaries and missing user review cannot be overridden.</p><label>Admin code<input id="admin-code" type="password" autocomplete="off"></label><label>Reason for overriding<textarea id="override-reason" rows="2"></textarea></label></details>
 <button id="submit-upload" disabled>Upload reviewed segments</button>`;
 document.querySelector('footer').before(uploadPanel);
@@ -41,7 +42,7 @@ function saveDraft(){
  draftWrites=draftWrites.catch(()=>{}).then(()=>api('save-draft',{jobId,draft})).then(()=>{if(status)status.textContent='Saved on this computer';}).catch(e=>{if(status)status.textContent='Not saved — '+e.message;throw e;});
  draftWrites.catch(e=>notice(e.message,true));
 }
-function invalidateUpload(){activeRun=null;editorDirty=true;$('review-confirm').checked=false;$('submit-upload').disabled=true;$('upload-summary').textContent='Changes need a new validation run';if(!loadingDraft){clearTimeout(draftTimer);draftTimer=setTimeout(saveDraft,250);if(typeof renderReviewTimeline==='function')renderReviewTimeline();}}
+function invalidateUpload(){activeRun=null;editorDirty=true;$('review-confirm').checked=false;$('introdb-review-confirm').checked=false;$('submit-upload').disabled=true;$('upload-summary').textContent='Changes need a new validation run';if(!loadingDraft){clearTimeout(draftTimer);draftTimer=setTimeout(saveDraft,250);if(typeof renderReviewTimeline==='function')renderReviewTimeline();}}
 function addSegment(value={segment_type:'outro',start_sec:'',end_sec:''}){
   const row=el('div',undefined,'segment-row');const type=el('select');type.setAttribute('aria-label','Segment type');
   for(const name of ['intro','recap','outro','post-credits']){const option=el('option',name);option.value=name;type.append(option);}type.value=value.segment_type;
@@ -71,10 +72,10 @@ bind('imdb-lookup',async()=>{const {results}=await api('imdb-search',{query:$('i
 bind('validate-upload',async()=>{
  const segments=[...$('segment-editor').children].map(row=>{const [type,start,end]=row.querySelectorAll('select,input');return {segment_type:type.value,start_sec:start.value===''?null:Number(start.value),end_sec:end.value===''?null:Number(end.value)};});
  const run=await api('validate-upload',{jobId:$('upload-job').value,draft:{imdb_id:$('upload-imdb').value.trim(),media_type:$('upload-type').value,season:Number($('upload-season').value),episode:Number($('upload-episode').value),episodeTitle:$('upload-episode-title').value,segments,endingReviewed:$('ending-reviewed').checked,sceneReview:[...document.querySelectorAll('.scene-decision')].map(n=>n.value)}});
- activeRun=run.id;editorDirty=false;$('review-confirm').checked=false;uploadSnapshot='';await poll();
-});
-bind('submit-upload',async()=>{if(editorDirty||!activeRun)throw new Error('Run the checks again after editing.');await api('submit-upload',{runId:activeRun,reviewed:$('review-confirm').checked,code:$('admin-code').value,reason:$('override-reason').value});$('admin-code').value='';await poll();});
-$('review-confirm').onchange=()=>{uploadSnapshot='';poll().catch(e=>notice(e.message,true));};
+ activeRun=run.id;editorDirty=false;$('review-confirm').checked=false;$('introdb-review-confirm').checked=false;uploadSnapshot='';await poll();
+ });
+bind('submit-upload',async()=>{if(editorDirty||!activeRun)throw new Error('Run the checks again after editing.');await api('submit-upload',{runId:activeRun,reviewed:$('review-confirm').checked,introdbReviewed:$('introdb-review-confirm').checked,code:$('admin-code').value,reason:$('override-reason').value});$('admin-code').value='';await poll();});
+$('review-confirm').onchange=$('introdb-review-confirm').onchange=()=>{uploadSnapshot='';poll().catch(e=>notice(e.message,true));};
 bind('open-update',async()=>{if(window.desktop)await window.desktop.openUpdate();else notice('Install the latest desktop release from https://github.com/mronion212/SegmentScraper/releases');});
 bind('update-export',()=>$('export').click());
 function renderUploadState(state){
@@ -84,15 +85,16 @@ function renderUploadState(state){
  const run=state.uploads?.find(r=>r.id===activeRun);
  if(typeof renderReviewList==='function')renderReviewList(state);
  renderEndingAnalysis(state.jobs.find(j=>j.id===$('upload-job').value));
+ renderIntrodbComparison(run);
  if(run){
-  const snap=JSON.stringify(run)+$('review-confirm').checked;if(snap!==uploadSnapshot){uploadSnapshot=snap;
+  const snap=JSON.stringify(run)+$('review-confirm').checked+$('introdb-review-confirm').checked;if(snap!==uploadSnapshot){uploadSnapshot=snap;
    $('upload-summary').textContent=`${run.status.toUpperCase()} · ${run.steps.filter(s=>s.status!=='running').length}/5 checks finished${run.title?' · '+run.title:''}${run.status==='partial'?' · Run all checks again before retrying':''}`;
    const progress=el('progress');progress.max=5;progress.value=run.steps.filter(s=>s.status!=='running').length;progress.setAttribute('aria-label','Validation checks completed');$('upload-progress').replaceChildren(progress);
    for(const step of run.steps){const line=el('div',undefined,`check-step ${step.status}`);line.append(el('strong',`${step.status==='running'?'…':step.status==='passed'?'✓':'!'} ${step.name}`),el('span',step.detail||'Waiting for service response (15-second request timeout)…'));if(step.status==='running'){const elapsed=el('small');elapsed.dataset.started=step.startedAt;line.append(elapsed);}$('upload-progress').append(line);}
    for(const [index,result] of run.results.entries())if(result)$('upload-progress').append(el('p',`Segment ${index+1}: ${result.status} — ${result.detail}`));
    $('upload-payload').textContent=JSON.stringify(run.payloads,null,2);$('override-fields').hidden=!run.blockers.length;
    $('submit-upload').textContent=run.blockers.length?'Force upload with admin code':'Upload reviewed segments';
-   $('submit-upload').disabled=editorDirty||!['ready','blocked'].includes(run.status)||!$('review-confirm').checked;
+   $('submit-upload').disabled=editorDirty||!['ready','blocked'].includes(run.status)||!$('review-confirm').checked||!$('introdb-review-confirm').checked;
   }
  }
  for(const node of document.querySelectorAll('[data-started]'))node.textContent=`${Math.floor((Date.now()-Number(node.dataset.started))/1000)} seconds elapsed`;
@@ -128,8 +130,8 @@ function renderEndingAnalysis(job){
   if(job.remote&&job.status!=='analyzing'){
    const fallback=button('Download & inspect locally',async()=>{await api('download-and-inspect',{id:job.id});analysisSnapshot='';await poll();notice('The provider file is downloading locally. Run Analyze ending when inspection finishes.');});
    fallback.className='secondary analysis-fallback';$('analysis-progress').append(fallback);
-  }
  }
+}
  const analysis=job?.report?.analysis;const snapshot=JSON.stringify([job?.id,analysis,job?.previews]);if(snapshot===analysisSnapshot)return;
  const nextEvidenceKey=JSON.stringify([job?.id,analysis]);const preserved=nextEvidenceKey===evidenceKey?[...document.querySelectorAll('.scene-decision')].map(n=>n.value):[];analysisSnapshot=snapshot;evidenceKey=nextEvidenceKey;
  $('analysis-findings').replaceChildren();$('analysis-previews').replaceChildren();$('use-analysis').disabled=!analysis;
@@ -142,4 +144,19 @@ function renderEndingAnalysis(job){
  });
  if(typeof mountReview==='function')mountReview(job);
  if(requestedAnalysisJob===job.id){requestedAnalysisJob=null;useAnalysis();}
+ }
+function renderIntrodbComparison(run){
+ const host=$('introdb-comparison');if(!host)return;host.replaceChildren();
+ if(!run){host.append(el('p','Run all checks to load the current public IntroDB timestamps for this item.'));return;}
+ const introStep=run.steps.find(step=>step.name==='IntroDB existing segments');
+ if(!Array.isArray(run.introdbSegments)){
+  host.append(el('p',introStep?.status==='blocked'?(introStep.detail||'IntroDB comparison is unavailable; upload remains blocked.').replace(/^IntroDB /,'IntroDB '):'Waiting for the IntroDB check to finish.','review-warning'));return;
+ }
+ host.append(el('p','Scraper rows are the timestamps detected in this exact video. IntroDB rows are the current public timestamps; differences are shown, never auto-copied.'));
+ const table=el('table',undefined,'timestamp-comparison'),head=el('tr');for(const title of ['Source','Type','Start','End'])head.append(el('th',title));const thead=el('thead');thead.append(head);table.append(thead);
+ const body=el('tbody');
+ for(const payload of run.payloads||[]){const row=el('tr');for(const value of ['Scraper',payload.segment_type,time(payload.start_sec),time(payload.end_sec)])row.append(el('td',value));body.append(row);}
+ for(const segment of run.introdbSegments){const row=el('tr','',`introdb-row ${segment.segment_type}`);for(const value of ['IntroDB',segment.segment_type,time(segment.start_sec),time(segment.end_sec)])row.append(el('td',value));body.append(row);}
+ table.append(body);host.append(table);
+ if(!run.introdbSegments.length)host.append(el('p','No current IntroDB timestamp was returned for this item.'));
 }

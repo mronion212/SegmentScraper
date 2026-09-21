@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
-// @version      1.12.4
+// @version      1.12.5
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -35,7 +35,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const SEGMENTSCRAPER_VERSION = "1.12.4";
+  const SEGMENTSCRAPER_VERSION = "1.12.5";
   const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
@@ -139,6 +139,91 @@ function outputSegmentAllowed(item) {
 function introdbPayload(item) {
   const movie = isMovieSegment(item);
   return {imdb_id:item.imdb_id,segment_type:item.segment_type,start_sec:item.start_sec,end_sec:item.end_sec,...(movie?{is_movie:true}:{season:item.season,episode:item.episode})};
+}
+
+/**
+ * Normalize the segment names used by the public IntroDB response.
+ * IntroDB documents post-credits with a hyphen in the wire format, while
+ * older responses and clients may expose the underscore variant.
+ */
+function normalizeIntrodbSegmentType(segmentType) {
+  const normalized = String(segmentType || '').trim().toLowerCase();
+  if (normalized === 'credits') return 'outro';
+  if (normalized === 'post_credits') return 'post-credits';
+  return normalized;
+}
+
+function introdbSeconds(value) {
+  if (typeof value === 'string' && !value.trim()) return null;
+  const number = Number(value);
+  if (Number.isFinite(number)) return number;
+  const parts = String(value || '').trim().split(':').map(Number);
+  if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
+  if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return null;
+}
+
+function introdbRangeValue(source, secondsKeys, millisecondsKey) {
+  for (const key of secondsKeys) {
+    if (source?.[key] != null) return introdbSeconds(source[key]);
+  }
+  if (source?.[millisecondsKey] != null) return Number(source[millisecondsKey]) / 1000;
+  return null;
+}
+
+/**
+ * Parse the documented /segments response into displayable ranges.
+ * Invalid ranges are retained separately so callers can block an upload
+ * instead of silently treating malformed IntroDB data as an empty result.
+ */
+function parseIntrodbSegments(response) {
+  if (response == null) return { types: new Set(), ranges: [], invalid: [] };
+  if (typeof response !== 'object' || response.error || response.errors) {
+    throw new Error('IntroDB returned an invalid response. Please try again.');
+  }
+  const documentedKeys = ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits'];
+  const hasDocumentedShape = Array.isArray(response)
+    || Array.isArray(response.segments)
+    || documentedKeys.some(key => Object.prototype.hasOwnProperty.call(response, key));
+  if (!hasDocumentedShape) {
+    throw new Error('IntroDB returned an invalid response. Please try again.');
+  }
+
+  const types = new Set();
+  const ranges = [];
+  const invalid = [];
+  const add = (segmentType, value) => {
+    const normalizedType = normalizeIntrodbSegmentType(segmentType);
+    if (!['intro', 'recap', 'outro', 'post-credits'].includes(normalizedType) || value == null) return;
+    types.add(normalizedType);
+    const entries = Array.isArray(value) ? value : [value];
+    for (const entry of entries) {
+      const source = entry?.segment && typeof entry.segment === 'object' ? entry.segment : entry;
+      const start = introdbRangeValue(source, ['start_sec', 'startSec', 'start'], 'start_ms');
+      const end = introdbRangeValue(source, ['end_sec', 'endSec', 'end'], 'end_ms');
+      const range = {
+        segment_type: normalizedType,
+        start_sec: start,
+        end_sec: end,
+        credit_part: source?.credit_part ?? source?.creditPart ?? null,
+      };
+      if (Number.isFinite(start) && Number.isFinite(end) && start >= 0 && end > start) ranges.push(range);
+      else invalid.push(range);
+    }
+  };
+
+  if (Array.isArray(response)) {
+    response.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+  } else if (Array.isArray(response.segments)) {
+    response.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+  }
+  for (const type of ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits']) add(type, response[type]);
+  return { types, ranges, invalid };
+}
+
+/** Return valid current IntroDB ranges in a UI/API-neutral shape. */
+function introdbRangeEntries(response) {
+  return parseIntrodbSegments(response).ranges;
 }
 
 /** Tab-scoped recovery across reloads. Credentials and network caches are excluded. */
@@ -496,48 +581,20 @@ async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = true, wr
     if (!json || typeof json !== 'object' || json.error || json.errors) {
       throw new Error('IntroDB returned an invalid response. Please try again.');
     }
-    const set = new Set();
-    const rangesByType = new Map();
-    const coerceExistingSeconds = value => {
-      const number = Number(value);
-      if (Number.isFinite(number)) return number;
-      const parts = String(value || '').trim().split(':').map(Number);
-      if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
-      if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-      return null;
-    };
-    const readRangeValue = (source, secondsKeys, millisecondsKey) => {
-      for (const key of secondsKeys) {
-        if (source?.[key] != null) return coerceExistingSeconds(source[key]);
-      }
-      if (source?.[millisecondsKey] != null) return Number(source[millisecondsKey]) / 1000;
-      return null;
-    };
-    const add = (segmentType, value) => {
-      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType === 'post_credits' ? 'post-credits' : segmentType;
-      if (!['intro', 'recap', 'outro', 'post-credits'].includes(normalizedType) || value == null) return;
-      set.add(normalizedType);
-      const entries = Array.isArray(value) ? value : [value];
-      const ranges = entries.map(entry => {
-        const source = entry?.segment && typeof entry.segment === 'object' ? entry.segment : entry;
-        const start = readRangeValue(source, ['start_sec', 'startSec', 'start'], 'start_ms');
-        const end = readRangeValue(source, ['end_sec', 'endSec', 'end'], 'end_ms');
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
-        return {
-          startSec: start,
-          endSec: end,
-          creditPart: source?.credit_part ?? source?.creditPart ?? null,
-        };
-      }).filter(Boolean);
-      if (ranges.length) rangesByType.set(normalizedType, [...(rangesByType.get(normalizedType) || []), ...ranges]);
-    };
-
-    if (Array.isArray(json)) {
-      json.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
-    } else if (Array.isArray(json?.segments)) {
-      json.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+    const parsed = parseIntrodbSegments(json);
+    if (parsed.invalid.length) {
+      throw new Error('IntroDB returned invalid timestamps. Please try again.');
     }
-    for (const type of ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits']) add(type, json?.[type]);
+    const set = new Set(parsed.types);
+    const rangesByType = new Map();
+    for (const range of parsed.ranges) {
+      const normalizedRange = {
+        startSec: range.start_sec,
+        endSec: range.end_sec,
+        creditPart: range.credit_part,
+      };
+      rangesByType.set(range.segment_type, [...(rangesByType.get(range.segment_type) || []), normalizedRange]);
+    }
     Object.defineProperty(set, 'rangesByType', { value: rangesByType, enumerable: false });
     return set;
   };
@@ -2415,7 +2472,7 @@ function showExportPreview(view) {
   `;
 
   const heading = document.createElement('h2');
-  heading.textContent = `${providerName} timestamps`;
+  heading.textContent = view.mode === 'submit' ? 'Review IntroDB upload' : `${providerName} timestamps`;
   heading.style.cssText = `margin:0 0 6px; color:${providerColors.primary}; font:700 16px/normal -apple-system,Arial,sans-serif;`;
   const summary = document.createElement('p');
   summary.style.cssText = `margin:0 0 12px; color:${colors.textSecondary}; font:13px/normal -apple-system,Arial,sans-serif;`;
@@ -2431,7 +2488,7 @@ function showExportPreview(view) {
   cancel.textContent = 'Close';
   cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
   const confirm = document.createElement('button');
-  confirm.textContent = 'Download JSON';
+  confirm.textContent = view.mode === 'submit' ? 'Upload to IntroDB' : 'Download JSON';
   confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
 
   const clock = value => {
@@ -2440,11 +2497,20 @@ function showExportPreview(view) {
     const seconds = Math.floor(ms / 1000);
     return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
   };
+  let approvalChecked = false;
+  let approvalInput = null;
+  const mediaKey = item => {
+    const movie = item?.is_movie === true || String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie';
+    return movie
+      ? `${item?.imdb_id || ''}|movie`
+      : `${item?.imdb_id || ''}|${item?.season}|${item?.episode}`;
+  };
   const update = next => {
     view = next;
     const rows = view.rows || [];
     summary.textContent = `${rows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${view.duplicateCount} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
     preview.replaceChildren();
+    const shownExistingFor = new Set();
     for (const row of rows) {
       const item = row.item;
       const entry = document.createElement('div');
@@ -2453,19 +2519,51 @@ function showExportPreview(view) {
       label.textContent = row.status;
       label.style.color = row.status === 'NEW' ? '#69d89b' : colors.textSecondary;
       const details = document.createElement('div');
-      details.textContent = `${item.imdb_id || 'IMDb pending'} · Provider S${item.season}E${item.episode} ${item._episodeTitle || ''}\n${item.segment_type} · ${clock(item.start_sec)} → ${clock(item.end_sec)} (${item.start_sec}–${item.end_sec} sec)`;
+      const movie = item?.is_movie === true || String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie';
+      const itemLabel = movie ? 'Movie' : `S${item.season}E${item.episode}`;
+      details.textContent = `${item.imdb_id || 'IMDb pending'} · ${itemLabel} ${item._episodeTitle || ''}\nScraper: ${item.segment_type} · ${clock(item.start_sec)} → ${clock(item.end_sec)} (${item.start_sec}–${item.end_sec} sec)`;
       if (row.canonical) details.textContent += `\nTVDB S${row.canonical.season}E${row.canonical.episode}`;
       if (row.reason) details.textContent += `\n${row.reason}`;
-      for (const range of row.existingRanges || []) {
-        details.textContent += `\nIntroDB: ${clock(range.startSec)} → ${clock(range.endSec)}`;
+      const existingSegments = row.existingSegments || [];
+      const sameType = existingSegments.filter(range => range.segment_type === item.segment_type);
+      if (row.existingSegments) {
+        if (sameType.length) {
+          for (const range of sameType) details.textContent += `\nIntroDB: ${range.segment_type} · ${clock(range.start_sec)} → ${clock(range.end_sec)} (${range.start_sec}–${range.end_sec} sec)`;
+        } else {
+          details.textContent += `\nIntroDB: no ${item.segment_type} timestamp returned for this item.`;
+        }
+        const key = mediaKey(item);
+        if (!shownExistingFor.has(key)) {
+          const otherTypes = existingSegments.filter(range => range.segment_type !== item.segment_type);
+          for (const range of otherTypes) details.textContent += `\nIntroDB current ${range.segment_type}: ${clock(range.start_sec)} → ${clock(range.end_sec)} (${range.start_sec}–${range.end_sec} sec)`;
+          if (!existingSegments.length) details.textContent += '\nIntroDB: no current timestamps returned for this item.';
+          shownExistingFor.add(key);
+        }
+      } else {
+        for (const range of row.existingRanges || []) {
+          details.textContent += `\nIntroDB: ${clock(range.startSec)} → ${clock(range.endSec)}`;
+        }
       }
       entry.append(label, details);
       preview.append(entry);
     }
-    confirm.disabled = view.checking || !view.items.length || !view.onConfirm;
+    if (view.requiresApproval) {
+      const approval = document.createElement('label');
+      approval.style.cssText = `display:flex;gap:8px;align-items:flex-start;margin-top:12px;padding:10px;border:1px solid ${colors.border};border-radius:8px;color:${colors.textSecondary};font:12px/1.5 -apple-system,Arial,sans-serif;`;
+      approvalInput = document.createElement('input');
+      approvalInput.type = 'checkbox';
+      approvalInput.checked = approvalChecked;
+      approvalInput.style.cssText = 'margin:2px 0 0;flex:0 0 auto;';
+      approvalInput.addEventListener('change', () => { approvalChecked = approvalInput.checked; update(view); });
+      approval.append(approvalInput, document.createTextNode(view.approvalLabel || 'I compared every Scraper timestamp with the current IntroDB timestamp(s), checked the exact video, and approve this upload.'));
+      preview.append(approval);
+    }
+    confirm.disabled = Boolean(view.checking || !view.items.length || !view.onConfirm || (view.requiresApproval && !approvalChecked));
     confirm.style.opacity = confirm.disabled ? '.45' : '1';
     confirm.style.cursor = confirm.disabled ? 'not-allowed' : 'pointer';
-    confirm.textContent = view.checking ? 'Checking…' : `Download JSON (${view.fileCount})`;
+    confirm.textContent = view.checking
+      ? 'Checking…'
+      : view.mode === 'submit' ? `Upload to IntroDB (${view.items.length})` : `Download JSON (${view.fileCount})`;
   };
   update(view);
 
@@ -2473,7 +2571,12 @@ function showExportPreview(view) {
   dialog.setAttribute('role', 'dialog');
   dialog.setAttribute('aria-modal', 'true');
   dialog.setAttribute('aria-label', 'Show timestamps');
-  const close = () => { overlay.remove(); if (previousFocus?.isConnected) previousFocus.focus(); };
+  const close = (cancelled = true) => {
+    if (!overlay.isConnected) return;
+    overlay.remove();
+    if (cancelled && view.onCancel) view.onCancel();
+    if (previousFocus?.isConnected) previousFocus.focus();
+  };
   overlay.addEventListener('keydown', event => {
     event.stopPropagation();
     if (event.key === 'Escape') { event.preventDefault(); close(); }
@@ -2484,7 +2587,7 @@ function showExportPreview(view) {
   });
   cancel.addEventListener('click', close);
   overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  confirm.addEventListener('click', () => { if (!confirm.disabled) view.onConfirm(); });
+  confirm.addEventListener('click', () => { if (!confirm.disabled) { const onConfirm = view.onConfirm; close(false); onConfirm(); } });
   actions.append(cancel, confirm);
   dialog.append(heading, summary, preview, actions);
   overlay.append(dialog);
@@ -2660,6 +2763,7 @@ function injectBtn(providerName, getAnchor = getNextEpBtn) {
 
 let activeProviderConfig = getProviderConfig('netflix');
 let activeProviderName = 'netflix';
+const introdbChecksInFlight = new Map();
 
 
 function getItemShowId(item) {
@@ -2678,6 +2782,56 @@ function isMovieItem(item) {
 
 function getItemCacheKey(item) {
   return createMediaCacheKey(item.imdb_id, getItemMediaType(item), item.season, item.episode);
+}
+
+function existingSegmentsForDisplay(existing) {
+  const rangesByType = existing?.rangesByType;
+  if (!rangesByType?.entries) return [];
+  const segments = [];
+  for (const [segmentType, ranges] of rangesByType.entries()) {
+    for (const range of ranges || []) {
+      segments.push({
+        segment_type: segmentType,
+        start_sec: Number(range.startSec),
+        end_sec: Number(range.endSec),
+        credit_part: range.creditPart ?? null,
+      });
+    }
+  }
+  return segments;
+}
+
+function ensureIntrodbSegments(items) {
+  const keys = [...new Set((items || [])
+    .filter(item => item?.imdb_id && item.imdb_id !== 'IMDB_PENDING')
+    .map(getItemCacheKey))];
+  for (const key of keys) {
+    if (state.dedupCacheV2[key] || introdbChecksInFlight.has(key)) continue;
+    const promise = loadExistingSegmentsForEpisode(key)
+      .then(existing => {
+        const count = existing?.rangesByType ? existingSegmentsForDisplay(existing).length : 0;
+        if (count) setIntrodbStatus(`IntroDB timestamps loaded for the current item (${count}). Compare them with the Scraper result in Show timestamps.`);
+        return existing;
+      })
+      .catch(error => {
+        console.warn('[NFE-DEDUP] Could not load current IntroDB timestamps:', error);
+        setIntrodbStatus(error.message);
+        return null;
+      })
+      .finally(() => introdbChecksInFlight.delete(key));
+    introdbChecksInFlight.set(key, promise);
+  }
+}
+
+function loadCurrentIntrodbSegments(imdbId) {
+  return loadExistingSegments(imdbId).then(segments => {
+    const currentItems = state.allItems.filter(item => item.imdb_id === imdbId);
+    if (currentItems.length && segments.length) {
+      setIntrodbStatus(`IntroDB timestamps loaded for ${currentItems.length} captured item${currentItems.length === 1 ? '' : 's'}. Compare them with the Scraper result in Show timestamps.`);
+    }
+    ensureIntrodbSegments(currentItems);
+    return segments;
+  });
 }
 
 function hasTvItems(items) {
@@ -2837,7 +2991,7 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
     updateImdbInput();
     setDbStatus(`Manual override applied · ID: ${imdbOverride}`);
     updateCounters();
-    loadExistingSegments(imdbOverride).catch(error => setIntrodbStatus(error.message));
+    loadCurrentIntrodbSegments(imdbOverride).catch(error => setIntrodbStatus(error.message));
     return;
   }
 
@@ -2854,7 +3008,7 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
       updateImdbInput();
       setDbStatus(`Found: ${result.imdbId}`);
       updateCounters();
-      loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
+      loadCurrentIntrodbSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
     } else {
       if (!isCurrentShow()) return;
       setDbStatus(`IMDb lookup failed: ${result.error}`);
@@ -2902,6 +3056,7 @@ function recordExtractedSegments(items, providerName = activeProviderName) {
   scheduleCaptureSave();
   state.interceptedCount++;
   updateCounters();
+  ensureIntrodbSegments(items);
   toast(`+${items.length} timestamps captured · total: ${state.allItems.length}`);
 }
 
@@ -3005,6 +3160,12 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
 
 function filterShortOutputSegments(items) {
   return items.filter(outputSegmentAllowed);
+}
+
+function annotateExistingComparison(row, item, existing) {
+  if (!row || !existing || existing.error) return;
+  row.existingSegments = existingSegmentsForDisplay(existing);
+  row.existingRanges = existing.rangesByType?.get(item.segment_type) || [];
 }
 
 function normalizeMovieExportItem(item) {
@@ -3141,7 +3302,7 @@ async function prepareJSONExport() {
       if (row) {
         row.status = failed ? 'Unavailable' : duplicate ? 'In IntroDB' : 'NEW';
         row.reason = failed ? existing.error : '';
-        row.existingRanges = failed ? [] : existing.rangesByType?.get(item.segment_type) || [];
+        annotateExistingComparison(row, item, existing);
       }
       if (failed) toast(existing.error);
       return !failed && !duplicate;
@@ -3305,10 +3466,18 @@ async function prepareIntroDBSubmission() {
   const canonicalExisting = await loadCanonicalExisting(mediaKeys);
 
   const safeMapped = await filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
-  if (!safeMapped.length) {
-    setIntrodbStatus('Nothing submitted: extra scene detected or TMDB check unavailable');
-    stopSubmission();
-    return;
+  const safeSet = new Set(safeMapped);
+  const rows = allMapped.map(item => ({ item, status: 'NEW', reason: '' }));
+  for (const row of rows) {
+    const existing = canonicalExisting.get(getItemCacheKey(row.item));
+    annotateExistingComparison(row, row.item, existing);
+    if (!safeSet.has(row.item)) {
+      row.status = 'Unavailable';
+      row.reason = 'Movie excluded by extra-scene checks';
+    } else if (hasExistingSegment(existing, row.item)) {
+      row.status = 'In IntroDB';
+      row.reason = 'Exact range already exists in IntroDB';
+    }
   }
   const items = safeMapped.filter(item => {
     const key = getItemCacheKey(item);
@@ -3316,21 +3485,24 @@ async function prepareIntroDBSubmission() {
   });
   const skipped = capturedItems.length - items.length;
   if (!items.length) {
-    toast('All timestamps already exist in IntroDB.');
-    setIntrodbStatus('Nothing new to submit (all duplicates)');
+    const allDuplicates = safeMapped.length > 0;
+    toast(allDuplicates ? 'All timestamps already exist in IntroDB.' : 'No timestamps remain eligible for upload after the extra-scene checks.');
+    setIntrodbStatus(allDuplicates ? 'Nothing new to submit (all duplicates)' : 'Nothing submitted: extra scene detected or TMDB check unavailable');
+    showExportPreview({
+      mode: 'submit',
+      items: [],
+      fileCount: 0,
+      duplicateCount: rows.filter(row => row.status === 'In IntroDB').length,
+      checking: false,
+      rows,
+      message: allDuplicates
+        ? 'Nothing new to upload. The current IntroDB timestamps are shown for comparison.'
+        : 'No timestamp can be uploaded from this item. The current IntroDB timestamps remain visible for comparison.',
+    });
     stopSubmission();
     return;
   }
 
-  const skipMessage = skipped > 0 ? ` (${skipped} skipped or already existed)` : '';
-  const ids = [...new Set(items.map(item => item.imdb_id))].join(', ');
-  if (!confirm(`Submit ${items.length} timestamp${items.length !== 1 ? 's' : ''} to IntroDB?${skipMessage}\nID(s): ${ids}`)) {
-    stopSubmission();
-    return;
-  }
-
-  state.submitResults = { ok: 0, fail: 0 };
-  updateSubmitBtn(`Submitting 0/${items.length}...`);
   let sent = 0;
 
   function sendNext(index) {
@@ -3367,7 +3539,23 @@ async function prepareIntroDBSubmission() {
     });
   }
 
-  sendNext(0);
+  showExportPreview({
+    mode: 'submit',
+    items,
+    fileCount: items.length,
+    duplicateCount: rows.filter(row => row.status === 'In IntroDB').length,
+    checking: false,
+    rows,
+    message: 'Compare the Scraper and IntroDB lines, then explicitly approve this upload. Differences can be caused by provider offsets.',
+    requiresApproval: true,
+    approvalLabel: 'I manually compared every Scraper timestamp with the current IntroDB timestamp(s) for this exact video and approve this upload.',
+    onCancel: stopSubmission,
+    onConfirm: () => {
+      state.submitResults = { ok: 0, fail: 0 };
+      updateSubmitBtn(`Submitting 0/${items.length}...`);
+      sendNext(0);
+    },
+  });
 }
 
 function resetCapturedData(message = 'Data cleared') {
@@ -3421,7 +3609,7 @@ function configurePanelCallbacks() {
       state.dedupCacheV2 = {};
       setDbStatus(`ID saved: ${value}`);
       updateCounters();
-      loadExistingSegments(value).catch(error => setIntrodbStatus(error.message));
+      loadCurrentIntrodbSegments(value).catch(error => setIntrodbStatus(error.message));
       lookupImdbTitle(value).then(result => {
         if (!result.success) return;
         state.showTitle = result.title;
@@ -3444,7 +3632,7 @@ function configurePanelCallbacks() {
           updateImdbInput();
           setDbStatus(`Found: ${result.imdbId}`);
           updateCounters();
-          loadExistingSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
+          loadCurrentIntrodbSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
         } else {
           setDbStatus(`IMDb lookup failed: ${result.error}`);
         }

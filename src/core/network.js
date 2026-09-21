@@ -4,7 +4,7 @@
  */
 
 import { state, createMediaCacheKey } from './state.js';
-import { introdbPayload } from './output-policy.js';
+import { introdbPayload, parseIntrodbSegments } from './output-policy.js';
 
 const INTRODB_BASE = 'https://api.introdb.app';
 
@@ -190,48 +190,20 @@ export async function loadExistingSegmentsForEpisode(key, apiKey, { useCache = t
     if (!json || typeof json !== 'object' || json.error || json.errors) {
       throw new Error('IntroDB returned an invalid response. Please try again.');
     }
-    const set = new Set();
-    const rangesByType = new Map();
-    const coerceExistingSeconds = value => {
-      const number = Number(value);
-      if (Number.isFinite(number)) return number;
-      const parts = String(value || '').trim().split(':').map(Number);
-      if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
-      if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-      return null;
-    };
-    const readRangeValue = (source, secondsKeys, millisecondsKey) => {
-      for (const key of secondsKeys) {
-        if (source?.[key] != null) return coerceExistingSeconds(source[key]);
-      }
-      if (source?.[millisecondsKey] != null) return Number(source[millisecondsKey]) / 1000;
-      return null;
-    };
-    const add = (segmentType, value) => {
-      const normalizedType = segmentType === 'credits' ? 'outro' : segmentType === 'post_credits' ? 'post-credits' : segmentType;
-      if (!['intro', 'recap', 'outro', 'post-credits'].includes(normalizedType) || value == null) return;
-      set.add(normalizedType);
-      const entries = Array.isArray(value) ? value : [value];
-      const ranges = entries.map(entry => {
-        const source = entry?.segment && typeof entry.segment === 'object' ? entry.segment : entry;
-        const start = readRangeValue(source, ['start_sec', 'startSec', 'start'], 'start_ms');
-        const end = readRangeValue(source, ['end_sec', 'endSec', 'end'], 'end_ms');
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
-        return {
-          startSec: start,
-          endSec: end,
-          creditPart: source?.credit_part ?? source?.creditPart ?? null,
-        };
-      }).filter(Boolean);
-      if (ranges.length) rangesByType.set(normalizedType, [...(rangesByType.get(normalizedType) || []), ...ranges]);
-    };
-
-    if (Array.isArray(json)) {
-      json.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
-    } else if (Array.isArray(json?.segments)) {
-      json.segments.forEach(entry => add(entry?.segment_type || entry?.segmentType, entry));
+    const parsed = parseIntrodbSegments(json);
+    if (parsed.invalid.length) {
+      throw new Error('IntroDB returned invalid timestamps. Please try again.');
     }
-    for (const type of ['intro', 'recap', 'outro', 'credits', 'post_credits', 'post-credits']) add(type, json?.[type]);
+    const set = new Set(parsed.types);
+    const rangesByType = new Map();
+    for (const range of parsed.ranges) {
+      const normalizedRange = {
+        startSec: range.start_sec,
+        endSec: range.end_sec,
+        creditPart: range.credit_part,
+      };
+      rangesByType.set(range.segment_type, [...(rangesByType.get(range.segment_type) || []), normalizedRange]);
+    }
     Object.defineProperty(set, 'rangesByType', { value: rangesByType, enumerable: false });
     return set;
   };
