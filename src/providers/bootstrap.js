@@ -4,7 +4,7 @@
  */
 
 import { state, createState, createMediaCacheKey } from '../core/state.js';
-import { outputSegmentAllowed, capturedSegmentKey, movieCaptureAllowedForProvider, providerCaptureAllowed } from '../core/output-policy.js';
+import { outputSegmentAllowed, capturedSegmentKey, movieCaptureAllowedForProvider, providerCaptureAllowed, sameIntrodbRange, uploadSegmentKey } from '../core/output-policy.js';
 import { restoreCaptureSession, scheduleCaptureSave, saveCaptureSession, clearCaptureSession } from '../core/capture-session.js';
 import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
@@ -19,6 +19,7 @@ import { loadTvdbSettings, saveTvdbSettings, mapSeriesItemsToTvdb } from '../cor
 let activeProviderConfig = getProviderConfig('netflix');
 let activeProviderName = 'netflix';
 const introdbChecksInFlight = new Map();
+const acceptedUploadKeys = new Set();
 
 
 function getItemShowId(item) {
@@ -91,23 +92,6 @@ function loadCurrentIntrodbSegments(imdbId) {
 
 function hasTvItems(items) {
   return items.some(item => !isMovieItem(item));
-}
-
-function hasExistingSegment(existing, item) {
-  if (!existing) return false;
-  const ranges = existing.rangesByType?.get(item.segment_type);
-  if (ranges?.length) {
-    const start = Number(item.start_sec);
-    const end = Number(item.end_sec);
-    return ranges.some(range => {
-      const sameRange = Number.isFinite(start) && Number.isFinite(end) &&
-        Math.abs(Number(range.startSec) - start) < 0.01 &&
-        Math.abs(Number(range.endSec) - end) < 0.01;
-      if (!sameRange) return false;
-      return !item.credit_part || !range.creditPart || item.credit_part === range.creditPart;
-    });
-  }
-  return existing.has?.(item.segment_type) ?? false;
 }
 
 // Temporary policy: exclude the entire movie when an extra scene is known.
@@ -321,18 +305,11 @@ export function isAlreadyInIntroDB(item) {
 }
 
 function hasExistingSegment(existing, item) {
+  if (acceptedUploadKeys.has(uploadSegmentKey(item))) return true;
   if (!existing) return false;
   const ranges = existing.rangesByType?.get(item.segment_type);
   if (ranges?.length) {
-    const start = Number(item.start_sec);
-    const end = Number(item.end_sec);
-    return ranges.some(range => {
-      const sameRange = Number.isFinite(start) && Number.isFinite(end) &&
-        Math.abs(Number(range.startSec) - start) < 0.01 &&
-        Math.abs(Number(range.endSec) - end) < 0.01;
-      if (!sameRange) return false;
-      return true;
-    });
+    return ranges.some(range => sameIntrodbRange(item, { segment_type: item.segment_type, start_sec: range.startSec, end_sec: range.endSec }));
   }
   return existing.has?.(item.segment_type) ?? false;
 }
@@ -548,7 +525,7 @@ async function prepareJSONExport() {
       }
     }
     items = items.filter(item => !isMovieItem(item) || canonicalExisting.get(getItemCacheKey(item))?.error || eligibleSet.has(item));
-    const uploadCandidates = items.filter(item => !canonicalExisting.get(getItemCacheKey(item))?.error);
+    const uploadCandidates = items.filter(item => !canonicalExisting.get(getItemCacheKey(item))?.error && !hasExistingSegment(canonicalExisting.get(getItemCacheKey(item)), item));
     items = items.filter(item => {
       const key = getItemCacheKey(item);
       const existing = canonicalExisting.get(key);
@@ -622,14 +599,15 @@ async function prepareJSONExport() {
       uploadItems,
       onConfirm: exportItems.length ? () => downloadNext(0) : undefined,
       requiresApproval: uploadItems.length > 0,
-      onUpload: uploadItems.length ? () => {
+      onUpload: uploadItems.length ? (selected = []) => {
         if (!state.introdbApiKey) {
           revealApiSettings();
           toast('Please enter your IntroDB API key in API settings before uploading.');
           setIntrodbStatus('No API key configured');
           return;
         }
-        startIntrodbUpload(uploadItems, { skipped: capturedItems.length - uploadItems.length });
+        const approved = uploadItems.filter(item => selected.includes(item));
+        startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length });
       } : undefined,
     });
   } catch (error) {
@@ -645,9 +623,7 @@ async function prepareJSONExport() {
     }
     view.message = view.items.length
       ? 'Only verified NEW timestamps are included in the JSON download. Use Upload to IntroDB to submit the reviewed scraper ranges directly.'
-      : view.uploadItems?.length
-        ? 'No new JSON rows remain, but the reviewed scraper ranges can still be uploaded directly to IntroDB.'
-        : 'JSON download unavailable. ' + (view.message.includes('Checking') ? 'No verified new timestamps.' : view.message);
+      : 'No eligible new timestamps. Exact duplicates cannot be uploaded again. ' + (view.message.includes('Checking') ? '' : view.message);
     refresh?.(view);
   }
 }
@@ -670,7 +646,7 @@ function startIntrodbUpload(items, { skipped = 0 } = {}) {
       const { ok, fail } = state.submitResults;
       updateSubmitBtn('Submit to IntroDB');
       const summary = `IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`;
-      if (fail === 0 && ok > 0) {
+      if (fail === 0 && ok > 0 && skipped === 0) {
         resetCapturedData(`${summary}; captured data cleared.`);
       } else {
         toast(summary);
@@ -680,9 +656,18 @@ function startIntrodbUpload(items, { skipped = 0 } = {}) {
     }
 
     const item = items[index];
-    submitSegment(item, state.introdbApiKey).then(result => {
+    Promise.resolve().then(async () => {
+      const key = uploadSegmentKey(item);
+      const existing = await loadExistingSegmentsForEpisode(getItemCacheKey(item), undefined, { useCache: false, writeCache: false });
+      if (acceptedUploadKeys.has(key) || hasExistingSegment(existing, item)) return { duplicate: true };
+      const result = await submitSegment(item, state.introdbApiKey);
+      if (result.success) acceptedUploadKeys.add(key);
+      return result;
+    }).then(result => {
       sent++;
-      if (result.success) {
+      if (result.duplicate) {
+        skipped++;
+      } else if (result.success) {
         state.submitResults.ok++;
       } else {
         state.submitResults.fail++;
@@ -796,10 +781,9 @@ async function prepareIntroDBSubmission() {
     const key = getItemCacheKey(item);
     return !hasExistingSegment(canonicalExisting.get(key), item);
   });
-  const skipped = capturedItems.length - items.length;
   if (!items.length) {
     const allDuplicates = safeMapped.length > 0;
-    const uploadItems = safeMapped.map(normalizeExportItem);
+    const uploadItems = [];
     toast(allDuplicates ? 'All timestamps already exist in IntroDB.' : 'No timestamps remain eligible for upload after the extra-scene checks.');
     setIntrodbStatus(allDuplicates ? 'Nothing new to submit (all duplicates)' : 'Nothing submitted: extra scene detected or TMDB check unavailable');
     showExportPreview({
@@ -810,11 +794,10 @@ async function prepareIntroDBSubmission() {
       duplicateCount: rows.filter(row => row.status === 'In IntroDB').length,
       checking: false,
       rows,
-      requiresApproval: uploadItems.length > 0,
+      requiresApproval: false,
       message: allDuplicates
-        ? 'These scraper ranges already exist in IntroDB. Review the comparison, then use the direct upload button if you still want to submit them.'
+        ? 'These exact ranges already exist in IntroDB and cannot be uploaded again.'
         : 'No timestamp can be uploaded from this item. The current IntroDB timestamps remain visible for comparison.',
-      onUpload: uploadItems.length ? () => startIntrodbUpload(uploadItems, { skipped: capturedItems.length - uploadItems.length }) : undefined,
     });
     stopSubmission();
     return;
@@ -831,7 +814,10 @@ async function prepareIntroDBSubmission() {
     requiresApproval: true,
     approvalLabel: 'I manually compared every Scraper timestamp with the current IntroDB timestamp(s) for this exact video and approve this upload.',
     onCancel: stopSubmission,
-    onConfirm: () => startIntrodbUpload(items, { skipped }),
+    onConfirm: (selected = []) => {
+      const approved = items.filter(item => selected.includes(item));
+      startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length });
+    },
   });
 }
 

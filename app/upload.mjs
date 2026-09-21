@@ -3,7 +3,7 @@ import { createCore } from './shared-core.mjs';
 
 const BASE = 'https://api.introdb.app';
 const types = ['intro', 'recap', 'outro', 'post-credits'];
-const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries } = createCore({request:()=>{}});
+const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries, sameIntrodbRange } = createCore({request:()=>{}});
 export async function jsonRequest(url, options = {}, fetcher = fetch) {
   let response;
   try { response = await fetcher(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) }); }
@@ -117,7 +117,7 @@ export function createUploadService({ fetcher = fetch, adminCode = process.env.S
         const parsed = existing === null ? { invalid: [] } : parseIntrodbSegments(existing);
         if(parsed.invalid.length || run.payloads.some(p=>existingRanges(existing,p.segment_type).some(r=>!Number.isFinite(r.start)||!Number.isFinite(r.end)||r.start<0||r.end<=r.start)))throw new Error('IntroDB returned invalid timestamps; duplicate check is inconclusive.');
         run.introdbSegments=existingSegments(existing);
-        run.duplicates=run.payloads.map(p=>accepted.has(JSON.stringify(p))||existingRanges(existing,p.segment_type).some(r=>Math.abs(r.start-p.start_sec)<0.01&&Math.abs(r.end-p.end_sec)<0.01));
+        run.duplicates=run.payloads.map(p=>accepted.has(JSON.stringify(p))||run.introdbSegments.some(r=>sameIntrodbRange(p,r)));
         return `${run.introdbSegments.length} current IntroDB timestamp${run.introdbSegments.length===1?'':'s'} found; ${run.duplicates.filter(Boolean).length} exact duplicate segment${run.duplicates.filter(Boolean).length===1?'':'s'} will be skipped`;
       });
       await step('Movie extra-scene protection', async () => {
@@ -145,12 +145,15 @@ export function createUploadService({ fetcher = fetch, adminCode = process.env.S
     attempts.push(now);
     if(!adminCode || typeof code!=='string' || !timingSafeEqual(createHash('sha256').update(code).digest(),createHash('sha256').update(adminCode).digest())) throw new Error('Invalid admin code or admin override is not configured.');
   }
-  async function submit(id, { reviewed, introdbReviewed, code, reason } = {}) {
+  async function submit(id, { reviewed, introdbReviewed, selectedIndices, code, reason } = {}) {
     const run=runs.get(id);
     if(busy || !run || !['ready','blocked'].includes(run.status)) throw new Error('Run validation again before retrying, or wait for the active operation.');
     if(Date.now()-(run.finishedAt||run.startedAt)>15*60000) throw new Error('Checks expired. Run validation again.');
     if(reviewed!==true) throw new Error('Confirm that you personally reviewed all output against the video.');
     if(introdbReviewed!==true) throw new Error('Compare the scraper timestamps with the current IntroDB timestamps and approve that comparison first.');
+    const selected = selectedIndices === undefined ? run.payloads.map((_,i)=>i) : selectedIndices;
+    if(!Array.isArray(selected) || !selected.length || selected.some(i=>!Number.isInteger(i)||i<0||i>=run.payloads.length)) throw new Error('Approve at least one valid timestamp.');
+    const selectedSet = new Set(selected);
     if(!settings.introdbKey) throw new Error('Save your IntroDB API key first.');
     if(run.blockers.length) {
       authorize(code);
@@ -162,11 +165,20 @@ export function createUploadService({ fetcher = fetch, adminCode = process.env.S
       await record(run);
       if(run.override) await onAudit({runId:run.id,jobId:run.jobId,...run.override});
       for(let i=0;i<run.payloads.length;i++) {
+        if(!selectedSet.has(i)) {run.results[i]={status:'unselected',detail:'Not approved; retained for later review'};continue;}
         if(['uploaded','duplicate'].includes(run.results[i]?.status)) continue;
         if(run.duplicates?.[i] || accepted.has(JSON.stringify(run.payloads[i]))) {run.results[i]={status:'duplicate',detail:'Already in IntroDB or submitted in this session'};continue;}
         run.results[i]={status:'uploading',detail:`Submitting segment ${i+1} of ${run.payloads.length}`};
         await record(run);
         try {
+          const p=run.payloads[i];
+          const query=new URLSearchParams({imdb_id:p.imdb_id,...(p.is_movie?{is_movie:'true'}:{season:String(p.season),episode:String(p.episode)})});
+          const latest=parseIntrodbSegments(await jsonRequest(`${BASE}/segments?${query}`,{allowMissing:true},fetcher));
+          if(latest.invalid.length) throw new Error('IntroDB returned invalid timestamps. Run fresh checks.');
+          if(latest.ranges.some(range=>sameIntrodbRange(p,range))) {
+            run.results[i]={status:'duplicate',detail:'Exact range already in IntroDB; skipped'};
+            await record(run);continue;
+          }
           const response=await jsonRequest(`${BASE}/submit`,{method:'POST',headers:{'Content-Type':'application/json','X-API-Key':settings.introdbKey},body:JSON.stringify(run.payloads[i])},fetcher);
           if(response?.ok!==true) throw new Error('IntroDB did not confirm acceptance. Recheck before retrying.');
           accepted.add(JSON.stringify(run.payloads[i]));

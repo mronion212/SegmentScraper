@@ -48,6 +48,35 @@ test('existing exact ranges skip upload but differing ranges can correct data',a
  }
 });
 
+test('desktop selection uploads only the approved scene and retains the unselected outro',async()=>{
+ const {fetcher,calls}=mock();const service=createUploadService({fetcher});service.configure({introdbKey:'key',tmdbToken:'token'});
+ const scene={segment_type:'post-credits',start_sec:7120,end_sec:7140};
+ service.check(job,{...draft,segments:[...draft.segments,scene]});const run=await idle(service);
+ await assert.rejects(service.submit(run.id,{reviewed:true,introdbReviewed:true,selectedIndices:[]}),/Approve/);
+ await assert.rejects(service.submit(run.id,{reviewed:true,introdbReviewed:true,selectedIndices:[2]}),/Approve/);
+ await service.submit(run.id,{reviewed:true,introdbReviewed:true,selectedIndices:[1]});const done=await idle(service);
+ const posts=calls.filter(c=>c.url.endsWith('/submit'));
+ assert.equal(posts.length,1);assert.equal(JSON.parse(posts[0].options.body).segment_type,'post-credits');
+ assert.equal(done.results[0].status,'unselected');assert.equal(done.payloads.length,2);
+});
+
+test('desktop skips an exact range created after validation',async()=>{
+ const fixture=mock();let fresh=false;
+ const fetcher=(url,options)=>fresh&&url.includes('/segments?')?Promise.resolve(Response.json({...none,outro:draft.segments[0]})):fixture.fetcher(url,options);
+ const service=createUploadService({fetcher});service.configure({introdbKey:'key',tmdbToken:'token'});
+ service.check(job,draft);const run=await idle(service);assert.equal(run.duplicates[0],false);fresh=true;
+ await service.submit(run.id,{reviewed:true,introdbReviewed:true,selectedIndices:[0]});const done=await idle(service);
+ assert.equal(done.results[0].status,'duplicate');assert.equal(fixture.calls.some(c=>c.url.endsWith('/submit')),false);
+});
+
+test('shared exact duplicate comparison uses milliseconds and segment type',()=>{
+ const {sameIntrodbRange}=createCore({request(){}}),p=draft.segments[0];
+ assert.equal(sameIntrodbRange(p,{...p,start_sec:6900.1250000001}),true);
+ assert.equal(sameIntrodbRange(p,{...p,start_sec:6900.126}),false);
+ assert.equal(sameIntrodbRange(p,{...p,segment_type:'post-credits'}),false);
+ assert.equal(sameIntrodbRange(p,{...p,start_sec:null}),false);
+});
+
 test('invalid existing timestamps block instead of silently marking a duplicate',async()=>{
  const service=createUploadService({fetcher:mock({existing:{...none,outro:{start_sec:null,end_sec:7100}}}).fetcher});service.configure({tmdbToken:'token'});service.check(job,draft);const run=await idle(service);assert.equal(run.status,'blocked');assert.ok(run.blockers.some(x=>x.includes('invalid timestamps')));assert.equal(run.duplicates,undefined);
 });

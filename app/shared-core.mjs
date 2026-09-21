@@ -110,6 +110,19 @@ function introdbPayload(item) {
   return {imdb_id:item.imdb_id,segment_type:item.segment_type,start_sec:item.start_sec,end_sec:item.end_sec,...(movie?{is_movie:true}:{season:item.season,episode:item.episode})};
 }
 
+/** IntroDB stores boundaries in milliseconds. */
+function sameIntrodbRange(a, b) {
+  return normalizeIntrodbSegmentType(a.segment_type) === normalizeIntrodbSegmentType(b.segment_type)
+    && ['start_sec', 'end_sec'].every(key => a[key] != null && b[key] != null
+      && Number.isFinite(Number(a[key])) && Number.isFinite(Number(b[key]))
+      && Math.round(Number(a[key]) * 1000) === Math.round(Number(b[key]) * 1000));
+}
+
+function uploadSegmentKey(item) {
+  return JSON.stringify([item.imdb_id, isMovieSegment(item) ? 'movie' : [item.season, item.episode],
+    normalizeIntrodbSegmentType(item.segment_type), Math.round(Number(item.start_sec)*1000), Math.round(Number(item.end_sec)*1000)]);
+}
+
 /**
  * Normalize the segment names used by the public IntroDB response.
  * IntroDB documents post-credits with a hyphen in the wire format, while
@@ -195,7 +208,7 @@ function introdbRangeEntries(response) {
   return parseIntrodbSegments(response).ranges;
 }
 
-return { isMovieSegment, movieCaptureAllowedForProvider, providerCaptureAllowed, capturedSegmentKey, outputSegmentAllowed, introdbPayload, normalizeIntrodbSegmentType, parseIntrodbSegments, introdbRangeEntries };
+return { isMovieSegment, movieCaptureAllowedForProvider, providerCaptureAllowed, capturedSegmentKey, outputSegmentAllowed, introdbPayload, sameIntrodbRange, uploadSegmentKey, normalizeIntrodbSegmentType, parseIntrodbSegments, introdbRangeEntries };
 })();
 const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries } = output_policy;
 const network = (() => {

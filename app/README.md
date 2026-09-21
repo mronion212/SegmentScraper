@@ -14,7 +14,7 @@ Run `dist/SegmentScraper-Desktop-1.12.6-x64-Setup.exe`, or the Portable EXE. The
 4. Enter your IntroDB key, TMDB read access token for movies, and TheTVDB key/optional subscriber PIN for TV. Upload credentials stay in backend memory for this session; saving replaces all four fields. Provider accounts can separately be remembered using Electron safeStorage encryption.
 5. Search by title or IMDb ID and select the correct movie/series. For TV, enter the actual episode title and positive season/episode numbers. Season 0/specials are excluded.
 6. For movies, choose **Analyze ending**. It automatically scans the last quarter (optionally half/full video), finds credit-like imagery/black transitions, and generates candidate scene boundaries, a 12× ending overview, and short boundary clips. Review these rather than watching the whole movie. Mark each candidate as a real scene or false positive. **Use detected timestamps** drops rejected candidates. Correct the times as needed and confirm the ending review.
-7. Run the checks. Review canonical numbering, exact payload, progress and blocking reasons. The review panel shows the current IntroDB ranges beside the **Scraper** ranges for the exact item; differences are never auto-copied. Watch and verify every boundary yourself, tick both the video-review acknowledgment and the IntroDB-comparison approval, and upload.
+7. Run the checks. Review canonical numbering, exact payload, progress and blocking reasons. The review panel shows current IntroDB ranges beside the **Scraper** ranges. Approve individual timestamps after checking the video and comparison, or approve all eligible timestamps for this file. Only approved timestamps are uploaded. Exact duplicates cannot be selected and are checked again immediately before submission; unselected timestamps remain available for later review.
 
 ## Checks and script parity
 
@@ -40,7 +40,7 @@ Queue, drafts, reports, preview files and upload receipts are saved locally in E
 
 Interrupted work is shown as resumable; it never silently uploads or downloads on startup. Reconnect the original provider before resuming remote work. Resume restarts inspection/download; it does not resume a partial video download byte-for-byte. Restored remote reports require reinspection. Local files are checked using size, modification time and SHA-256 samples at the beginning, middle and end before analysis, validation and upload. This is a practical change detector, not a full-file cryptographic identity. Changed files need reinspection. Reusing an unchanged local analysis also requires matching analysis version, scan window and existing preview files.
 
-Review confirmations, IntroDB comparison approvals and validation runs are not restored as upload authorization. All uploads require fresh checks, explicit personal video review and a separate approval that the current IntroDB ranges were compared with the exact video. Accepted submissions and an interrupted upload's last saved state remain in history; uncertain submissions require a fresh IntroDB check.
+Timestamp approvals and validation runs are not restored as upload authorization. Each timestamp approval confirms personal video review and comparison with the current IntroDB ranges. Accepted submissions and an interrupted upload's last saved state remain in history; uncertain submissions require a fresh IntroDB check.
 
 ## Review workspace and performance
 

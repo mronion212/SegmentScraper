@@ -194,6 +194,40 @@ test('overview is available without a TVDB API key', async () => {
   assert.match(view.message, /key missing/);
 });
 
+test('partial approval submits only selected timestamps, retains captures and prevents session repeats', async () => {
+  const allItems = [1,2].map(n=>({imdb_id:`tt123456${n}`,media_type:'movie',segment_type:'outro',start_sec:5400,end_sec:5700}));
+  const bootstrap=loadBootstrap({stateOverrides:{allItems,tvdbApiKey:''}});
+  await bootstrap.exportJSON();
+  let view=bootstrap.calls.previews.at(-1);
+  view.onUpload([view.uploadItems[1]]);
+  await new Promise(resolve=>setTimeout(resolve,220));
+  assert.equal(bootstrap.calls.submissions.length,1);
+  assert.equal(bootstrap.calls.submissions[0].imdb_id,allItems[1].imdb_id);
+  assert.equal(bootstrap.state.allItems.length,2);
+  assert.equal(bootstrap.calls.clearCaptureSessions,0);
+  await bootstrap.exportJSON();
+  view=bootstrap.calls.previews.at(-1);
+  assert.equal(view.uploadItems.length,1);
+  assert.equal(view.rows[1].status,'In IntroDB');
+  view.onUpload([bootstrap.calls.submissions[0]]);
+  await new Promise(resolve=>setTimeout(resolve,220));
+  assert.equal(bootstrap.calls.submissions.length,1);
+});
+
+test('a range added to IntroDB while the dialog is open is skipped on submit', async () => {
+  const item={imdb_id:'tt1234567',media_type:'movie',segment_type:'outro',start_sec:5400,end_sec:5700};
+  let existing=new Set();
+  const bootstrap=loadBootstrap({stateOverrides:{allItems:[item],tvdbApiKey:''},existingSegmentsByKey:{get:()=>existing}});
+  await bootstrap.submitToIntroDB();
+  const view=bootstrap.calls.previews.at(-1);
+  existing=new Set(['outro']);
+  existing.rangesByType=new Map([['outro',[{startSec:5400,endSec:5700}]]]);
+  view.onConfirm(view.items);
+  await new Promise(resolve=>setTimeout(resolve,220));
+  assert.equal(bootstrap.calls.submissions.length,0);
+  assert.equal(bootstrap.state.submitInProgress,false);
+});
+
 test('all existing timestamps remain visible without a download', async () => {
   const bootstrap = loadBootstrap({
     stateOverrides: { allItems: [{ imdb_id: 'tt14507354', season: 1, episode: 1, segment_type: 'outro', start_sec: 100, end_sec: 120 }] },
@@ -204,10 +238,9 @@ test('all existing timestamps remain visible without a download', async () => {
   assert.equal(view.rows[0].status, 'In IntroDB');
   assert.equal(view.items.length, 0);
   assert.equal(view.onConfirm, undefined);
-  assert.equal(typeof view.onUpload, 'function');
-  view.onUpload();
+  assert.equal(view.onUpload, undefined);
   await new Promise(resolve => setTimeout(resolve, 220));
-  assert.equal(bootstrap.calls.submissions.length, 1);
+  assert.equal(bootstrap.calls.submissions.length, 0);
 });
 
 test('JSON export uses TVDB mapping and canonical episode numbers before deduplication', async () => {
@@ -352,7 +385,7 @@ test('IntroDB submission removes segments shorter than five seconds', async () =
 
   await bootstrap.submitToIntroDB();
   assert.equal(bootstrap.calls.previews.at(-1).requiresApproval, true);
-  bootstrap.calls.previews.at(-1).onConfirm();
+  bootstrap.calls.previews.at(-1).onConfirm(bootstrap.calls.previews.at(-1).items);
   await new Promise(resolve => setTimeout(resolve, 10));
 
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.submissions)), [eligibleItem]);
@@ -373,7 +406,7 @@ test('fully successful IntroDB submission clears captured data and preserves API
   });
 
   await bootstrap.submitToIntroDB();
-  bootstrap.calls.previews.at(-1).onConfirm();
+  bootstrap.calls.previews.at(-1).onConfirm(bootstrap.calls.previews.at(-1).items);
   await new Promise(resolve => setTimeout(resolve, 220));
 
   assert.deepEqual(bootstrap.state.allItems, []);
@@ -396,7 +429,7 @@ test('partially failed IntroDB submission retains captured data for retry', asyn
   });
 
   await bootstrap.submitToIntroDB();
-  bootstrap.calls.previews.at(-1).onConfirm();
+  bootstrap.calls.previews.at(-1).onConfirm(bootstrap.calls.previews.at(-1).items);
   await new Promise(resolve => setTimeout(resolve, 220));
 
   assert.deepEqual(bootstrap.state.allItems, [movieItem]);
@@ -459,7 +492,7 @@ test('movie IntroDB submission bypasses TVDB mapping', async () => {
   });
 
   await bootstrap.submitToIntroDB();
-  bootstrap.calls.previews.at(-1).onConfirm();
+  bootstrap.calls.previews.at(-1).onConfirm(bootstrap.calls.previews.at(-1).items);
   await new Promise(resolve => setTimeout(resolve, 200));
 
   assert.equal(bootstrap.calls.map.length, 0);
