@@ -548,6 +548,7 @@ async function prepareJSONExport() {
       }
     }
     items = items.filter(item => !isMovieItem(item) || canonicalExisting.get(getItemCacheKey(item))?.error || eligibleSet.has(item));
+    const uploadCandidates = items.filter(item => !canonicalExisting.get(getItemCacheKey(item))?.error);
     items = items.filter(item => {
       const key = getItemCacheKey(item);
       const existing = canonicalExisting.get(key);
@@ -567,10 +568,10 @@ async function prepareJSONExport() {
     if (duplicateCount > 0) toast(`${duplicateCount} duplicate(s) already in IntroDB removed from export.`);
     if (!items.length) {
       toast('Nothing left to export after removing duplicates.');
-      return;
     }
 
     const exportItems = items.map(normalizeExportItem);
+    const uploadItems = uploadCandidates.map(normalizeExportItem);
     const groups = new Map();
     for (const item of exportItems) {
       const key = item.imdb_id || 'no_id';
@@ -618,7 +619,18 @@ async function prepareJSONExport() {
       items: exportItems,
       fileCount: files.length,
       duplicateCount,
-      onConfirm: () => downloadNext(0),
+      uploadItems,
+      onConfirm: exportItems.length ? () => downloadNext(0) : undefined,
+      requiresApproval: uploadItems.length > 0,
+      onUpload: uploadItems.length ? () => {
+        if (!state.introdbApiKey) {
+          revealApiSettings();
+          toast('Please enter your IntroDB API key in API settings before uploading.');
+          setIntrodbStatus('No API key configured');
+          return;
+        }
+        startIntrodbUpload(uploadItems, { skipped: capturedItems.length - uploadItems.length });
+      } : undefined,
     });
   } catch (error) {
     view.message = error.message || 'Validation failed. JSON download is disabled.';
@@ -632,8 +644,10 @@ async function prepareJSONExport() {
       }
     }
     view.message = view.items.length
-      ? 'Only verified NEW timestamps are included in the JSON download.'
-      : 'JSON download unavailable. ' + (view.message.includes('Checking') ? 'No verified new timestamps.' : view.message);
+      ? 'Only verified NEW timestamps are included in the JSON download. Use Upload to IntroDB to submit the reviewed scraper ranges directly.'
+      : view.uploadItems?.length
+        ? 'No new JSON rows remain, but the reviewed scraper ranges can still be uploaded directly to IntroDB.'
+        : 'JSON download unavailable. ' + (view.message.includes('Checking') ? 'No verified new timestamps.' : view.message);
     refresh?.(view);
   }
 }
@@ -641,6 +655,50 @@ async function prepareJSONExport() {
 function updateSubmitBtn(label) {
   const button = document.getElementById('nfe-submit');
   if (button) button.textContent = label;
+}
+
+function startIntrodbUpload(items, { skipped = 0 } = {}) {
+  if (!items?.length) return;
+  state.submitInProgress = true;
+  state.submitResults = { ok: 0, fail: 0 };
+  updateSubmitBtn(`Submitting 0/${items.length}...`);
+  let sent = 0;
+
+  function sendNext(index) {
+    if (index >= items.length) {
+      state.submitInProgress = false;
+      const { ok, fail } = state.submitResults;
+      updateSubmitBtn('Submit to IntroDB');
+      const summary = `IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`;
+      if (fail === 0 && ok > 0) {
+        resetCapturedData(`${summary}; captured data cleared.`);
+      } else {
+        toast(summary);
+        setIntrodbStatus(summary);
+      }
+      return;
+    }
+
+    const item = items[index];
+    submitSegment(item, state.introdbApiKey).then(result => {
+      sent++;
+      if (result.success) {
+        state.submitResults.ok++;
+      } else {
+        state.submitResults.fail++;
+        console.warn('[NFE] IntroDB rejected:', result.status, item);
+      }
+      updateSubmitBtn(`Submitting ${sent}/${items.length}...`);
+      setTimeout(() => sendNext(index + 1), 150);
+    }).catch(() => {
+      sent++;
+      state.submitResults.fail++;
+      updateSubmitBtn(`Submitting ${sent}/${items.length}...`);
+      setTimeout(() => sendNext(index + 1), 150);
+    });
+  }
+
+  sendNext(0);
 }
 
 export async function submitToIntroDB() {
@@ -741,57 +799,25 @@ async function prepareIntroDBSubmission() {
   const skipped = capturedItems.length - items.length;
   if (!items.length) {
     const allDuplicates = safeMapped.length > 0;
+    const uploadItems = safeMapped.map(normalizeExportItem);
     toast(allDuplicates ? 'All timestamps already exist in IntroDB.' : 'No timestamps remain eligible for upload after the extra-scene checks.');
     setIntrodbStatus(allDuplicates ? 'Nothing new to submit (all duplicates)' : 'Nothing submitted: extra scene detected or TMDB check unavailable');
     showExportPreview({
       mode: 'submit',
       items: [],
+      uploadItems,
       fileCount: 0,
       duplicateCount: rows.filter(row => row.status === 'In IntroDB').length,
       checking: false,
       rows,
+      requiresApproval: uploadItems.length > 0,
       message: allDuplicates
-        ? 'Nothing new to upload. The current IntroDB timestamps are shown for comparison.'
+        ? 'These scraper ranges already exist in IntroDB. Review the comparison, then use the direct upload button if you still want to submit them.'
         : 'No timestamp can be uploaded from this item. The current IntroDB timestamps remain visible for comparison.',
+      onUpload: uploadItems.length ? () => startIntrodbUpload(uploadItems, { skipped: capturedItems.length - uploadItems.length }) : undefined,
     });
     stopSubmission();
     return;
-  }
-
-  let sent = 0;
-
-  function sendNext(index) {
-    if (index >= items.length) {
-      state.submitInProgress = false;
-      const { ok, fail } = state.submitResults;
-      updateSubmitBtn('Submit to IntroDB');
-      const summary = `IntroDB: ${ok} submitted · ${fail} failed${skipped > 0 ? ` · ${skipped} skipped` : ''}`;
-      if (fail === 0 && ok > 0) {
-        resetCapturedData(`${summary}; captured data cleared.`);
-      } else {
-        toast(summary);
-        setIntrodbStatus(summary);
-      }
-      return;
-    }
-
-    const item = items[index];
-    submitSegment(item, state.introdbApiKey).then(result => {
-      sent++;
-      if (result.success) {
-        state.submitResults.ok++;
-      } else {
-        state.submitResults.fail++;
-        console.warn('[NFE] IntroDB rejected:', result.status, item);
-      }
-      updateSubmitBtn(`Submitting ${sent}/${items.length}...`);
-      setTimeout(() => sendNext(index + 1), 150);
-    }).catch(() => {
-      sent++;
-      state.submitResults.fail++;
-      updateSubmitBtn(`Submitting ${sent}/${items.length}...`);
-      setTimeout(() => sendNext(index + 1), 150);
-    });
   }
 
   showExportPreview({
@@ -805,11 +831,7 @@ async function prepareIntroDBSubmission() {
     requiresApproval: true,
     approvalLabel: 'I manually compared every Scraper timestamp with the current IntroDB timestamp(s) for this exact video and approve this upload.',
     onCancel: stopSubmission,
-    onConfirm: () => {
-      state.submitResults = { ok: 0, fail: 0 };
-      updateSubmitBtn(`Submitting 0/${items.length}...`);
-      sendNext(0);
-    },
+    onConfirm: () => startIntrodbUpload(items, { skipped }),
   });
 }
 

@@ -15,7 +15,7 @@ test('timestamp dialog shows readable values, keeps failed rows and gates downlo
     focus() { document.activeElement = this; }
     remove() {}
   }
-  document = { body: new Element(), getElementById: () => null, createElement: () => new Element() };
+  document = { body: new Element(), getElementById: () => null, createElement: () => new Element(), createTextNode: text => Object.assign(new Element(), { textContent: text }) };
   const source = fs.readFileSync(path.join(__dirname, '../src/ui/panel.js'), 'utf8')
     .replace(/^import .*$/gm, '').replace(/^export /gm, '') + '\nglobalThis.showPreview = showExportPreview;';
   const context = vm.createContext({ document, PANEL_COLORS: { border: '#333', text: '#fff' },
@@ -32,9 +32,10 @@ test('timestamp dialog shows readable values, keeps failed rows and gates downlo
   const [close, download] = dialog.children[3].children;
   assert.equal(download.disabled, true);
   assert.equal(document.activeElement, close);
-  assert.match(preview.children[0].children[1].textContent, /00:12.500 → 01:28.000/);
   assert.match(preview.children[0].children[1].textContent, /<script>unsafe<\/script>/);
   assert.equal(preview.children[0].children[1].children.length, 0);
+  assert.match(preview.children[0].children[2].children[0].children[2].textContent, /^00:00:12.500 → 00:01:28.000\n/);
+  assert.match(preview.children[0].children[2].children[0].children[2].textContent, /0h 00m 12.500s → 0h 01m 28.000s$/);
   view.checking = false;
   view.rows[0].status = 'Unavailable';
   view.rows[0].reason = 'HTTP 400';
@@ -52,7 +53,7 @@ test('timestamp dialog shows readable values, keeps failed rows and gates downlo
   assert.equal(downloads, 1);
 });
 
-test('timestamp upload review labels Scraper and IntroDB ranges and gates approval', () => {
+test('timestamp comparison puts Scraper left, IntroDB right, and gates direct upload approval', () => {
   let document;
   class Element {
     constructor() { this.style = {}; this.children = []; this.listeners = {}; }
@@ -75,22 +76,32 @@ test('timestamp upload review labels Scraper and IntroDB ranges and gates approv
     getProviderConfig: () => ({ name: 'Netflix', colors: { primary: '#09f' } }),
   });
   vm.runInContext(source, context);
-  const item = { imdb_id: 'tt1234567', season: 1, episode: 2, segment_type: 'intro', start_sec: 15, end_sec: 90 };
-  let uploads = 0;
+  const item = { imdb_id: 'tt1234567', media_type: 'movie', season: null, episode: null, segment_type: 'outro', start_sec: 5756, end_sec: 6250 };
+  let downloads = 0, uploads = 0;
   context.showPreview({
-    mode: 'submit', items: [item], fileCount: 1, duplicateCount: 0, checking: false,
+    mode: 'export', items: [item], uploadItems: [item], fileCount: 1, duplicateCount: 1, checking: false,
     requiresApproval: true,
-    rows: [{ item, status: 'NEW', existingSegments: [{ segment_type: 'intro', start_sec: 21, end_sec: 96 }] }],
-    onConfirm: () => uploads++,
+    rows: [{ item, status: 'In IntroDB', existingSegments: [{ segment_type: 'outro', start_sec: 5762, end_sec: 6250 }] }],
+    onConfirm: () => downloads++,
+    onUpload: () => uploads++,
   });
-  const dialog = document.body.children[0].children[0], preview = dialog.children[2], submit = dialog.children[3].children[1];
-  assert.match(preview.children[0].children[1].textContent, /Scraper: intro/);
-  assert.match(preview.children[0].children[1].textContent, /IntroDB: intro/);
-  assert.equal(submit.disabled, true);
+  const dialog = document.body.children[0].children[0], preview = dialog.children[2], actions = dialog.children[3];
+  const row = preview.children[0], comparison = row.children[2], scraper = comparison.children[0], introdb = comparison.children[1];
+  assert.equal(row.children[0].textContent, 'In IntroDB');
+  assert.match(row.children[1].textContent, /Movie/);
+  assert.doesNotMatch(row.children[1].textContent, /TVDB/);
+  assert.equal(scraper.children[0].textContent, 'Scraper');
+  assert.equal(introdb.children[0].textContent, 'IntroDB');
+  assert.match(scraper.children[2].textContent, /^01:35:56.000 → 01:44:10.000\n/);
+  assert.match(scraper.children[2].textContent, /1h 35m 56.000s → 1h 44m 10.000s$/);
+  assert.match(introdb.children[2].textContent, /^01:36:02.000 → 01:44:10.000\n/);
+  const upload = actions.children[2];
+  assert.equal(upload.disabled, true);
   const approval = preview.children[1].children[0];
   approval.checked = true;
   approval.listeners.change();
-  assert.equal(submit.disabled, false);
-  submit.listeners.click();
+  assert.equal(upload.disabled, false);
+  upload.listeners.click();
   assert.equal(uploads, 1);
+  assert.equal(downloads, 0);
 });

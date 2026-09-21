@@ -6,7 +6,7 @@ This is an experimental alpha release. Features, review flows and desktop storag
 
 ## Install and use
 
-Run `dist/SegmentScraper-Desktop-1.12.5-x64-Setup.exe`, or the Portable EXE. The application is labeled **Desktop Alpha 0.1**. ffprobe and FFmpeg are bundled.
+Run `dist/SegmentScraper-Desktop-1.12.6-x64-Setup.exe`, or the Portable EXE. The application is labeled **Desktop Alpha 0.1**. ffprobe and FFmpeg are bundled.
 
 1. Choose local files/a season folder, or connect the same TorBox account used in Nuvio. Torrents, Usenet and web downloads are supported. Real-Debrid supports existing torrents. No content is added to TorBox.
 2. Inspect directly from your provider, or download and inspect. Remote inspection uses bandwidth and may read substantial data. Completed downloads remain on disk.
@@ -58,7 +58,7 @@ This local operator override bypasses review-policy failures, including unavaila
 
 Electron checks stable GitHub releases on startup and every 30 minutes. Only releases with a Windows Setup asset count. A confirmed newer version opens a non-dismissible dialog and blocks backend mutations until installation and restart. Reports remain exportable. The button opens the fixed repository releases page; the user installs the update. Known mandatory versions persist offline. A failed first check is not mistaken for an available update.
 
-Publish a higher version with `SegmentScraper-Desktop-VERSION-x64-Setup.exe` on a stable GitHub release. The `v1.12.5` release contains the clearly labeled **Desktop Alpha 0.1** build alongside the userscript release. A userscript-only update cannot lock the desktop. Version 1.9.5 needs a one-time manual upgrade because it has no checker. Builds are currently not code-signed.
+Publish a higher version with `SegmentScraper-Desktop-VERSION-x64-Setup.exe` on a stable GitHub release. The `v1.12.6` release contains the clearly labeled **Desktop Alpha 0.1** build alongside the userscript release. A userscript-only update cannot lock the desktop. Version 1.9.5 needs a one-time manual upgrade because it has no checker. Builds are currently not code-signed.
 
 ## Development
 

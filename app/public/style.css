@@ -166,6 +166,16 @@ dialog::backdrop { background: #03070be8; }
 .timestamp-comparison th, .timestamp-comparison td { padding: 8px; text-align: left; border-bottom: 1px solid #293747; font-variant-numeric: tabular-nums; }
 .timestamp-comparison th { color: #8eabc0; font-weight: 500; }
 .timestamp-comparison .introdb-row td { color: #edc77f; }
+.timestamp-comparison-grid { display: grid; gap: 10px; margin: 12px 0; }
+.timestamp-comparison-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.timestamp-column { display: grid; gap: 4px; min-width: 0; padding: 10px; border: 1px solid #293747; border-radius: 8px; background: #101d2a; font-size: 11px; font-variant-numeric: tabular-nums; }
+.timestamp-column strong { color: #f1f5f9; font-size: 12px; }
+.timestamp-column small { color: #8eabc0; }
+.timestamp-column.introdb-column { border-color: #735d2b; }
+.timestamp-column.introdb-column strong, .timestamp-column.introdb-column .timestamp-type { color: #edc77f; }
+.timestamp-type { color: #a8d4c2; font-weight: 600; }
+.timestamp-clock { color: #f1f5f9; }
+.timestamp-empty { color: #8eabc0; }
 .review-checks #introdb-review-confirm { accent-color: #e4b968; }
 .identity-panel { padding: 14px; background: #101d2a; border: 1px solid #293b4d; border-radius: 10px; }
 .identity-panel summary { font-weight: 600; }
@@ -213,4 +223,5 @@ dialog::backdrop { background: #03070be8; }
   .chapter-table td, .chapter-table th { padding: 6px; }
   .analysis-card .row { align-items: stretch; flex-direction: column; }
   .analysis-card .row > *, .analysis-card .row select { width: 100%; }
+  .timestamp-comparison-row { grid-template-columns: 1fr; }
 }

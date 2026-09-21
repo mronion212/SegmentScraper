@@ -204,6 +204,10 @@ test('all existing timestamps remain visible without a download', async () => {
   assert.equal(view.rows[0].status, 'In IntroDB');
   assert.equal(view.items.length, 0);
   assert.equal(view.onConfirm, undefined);
+  assert.equal(typeof view.onUpload, 'function');
+  view.onUpload();
+  await new Promise(resolve => setTimeout(resolve, 220));
+  assert.equal(bootstrap.calls.submissions.length, 1);
 });
 
 test('JSON export uses TVDB mapping and canonical episode numbers before deduplication', async () => {

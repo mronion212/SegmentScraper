@@ -152,11 +152,22 @@ function renderIntrodbComparison(run){
  if(!Array.isArray(run.introdbSegments)){
   host.append(el('p',introStep?.status==='blocked'?(introStep.detail||'IntroDB comparison is unavailable; upload remains blocked.').replace(/^IntroDB /,'IntroDB '):'Waiting for the IntroDB check to finish.','review-warning'));return;
  }
- host.append(el('p','Scraper rows are the timestamps detected in this exact video. IntroDB rows are the current public timestamps; differences are shown, never auto-copied.'));
- const table=el('table',undefined,'timestamp-comparison'),head=el('tr');for(const title of ['Source','Type','Start','End'])head.append(el('th',title));const thead=el('thead');thead.append(head);table.append(thead);
- const body=el('tbody');
- for(const payload of run.payloads||[]){const row=el('tr');for(const value of ['Scraper',payload.segment_type,time(payload.start_sec),time(payload.end_sec)])row.append(el('td',value));body.append(row);}
- for(const segment of run.introdbSegments){const row=el('tr','',`introdb-row ${segment.segment_type}`);for(const value of ['IntroDB',segment.segment_type,time(segment.start_sec),time(segment.end_sec)])row.append(el('td',value));body.append(row);}
- table.append(body);host.append(table);
+ const humanTime=n=>{if(n==null||!Number.isFinite(Number(n)))return'—';const ms=Math.round(Number(n)*1000),seconds=Math.floor(ms/1000);return`${Math.floor(seconds/3600)}h ${String(Math.floor(seconds/60)%60).padStart(2,'0')}m ${String(seconds%60).padStart(2,'0')}.${String(ms%1000).padStart(3,'0')}s`;};
+ host.append(el('p','Left: timestamps detected by the Scraper. Right: current public IntroDB timestamps. Differences are shown, never auto-copied.'));
+ const grid=el('div',undefined,'timestamp-comparison-grid'),remaining=[...(run.introdbSegments||[])];
+ for(const payload of run.payloads||[]){
+  const row=el('div',undefined,'timestamp-comparison-row'),existing=remaining.filter(segment=>segment.segment_type===payload.segment_type);
+  for(const segment of existing)remaining.splice(remaining.indexOf(segment),1);
+  const scraper=el('div',undefined,'timestamp-column scraper-column');scraper.append(el('strong','Scraper'),el('span',payload.segment_type,'timestamp-type'),el('span',`${time(payload.start_sec)} → ${time(payload.end_sec)}`,'timestamp-clock'),el('small',`${humanTime(payload.start_sec)} → ${humanTime(payload.end_sec)}`));
+  const introdb=el('div',undefined,'timestamp-column introdb-column');introdb.append(el('strong','IntroDB'));
+  if(existing.length)for(const segment of existing)introdb.append(el('span',segment.segment_type,'timestamp-type'),el('span',`${time(segment.start_sec)} → ${time(segment.end_sec)}`,'timestamp-clock'),el('small',`${humanTime(segment.start_sec)} → ${humanTime(segment.end_sec)}`));
+  else introdb.append(el('span','No current timestamp returned.','timestamp-empty'));
+  row.append(scraper,introdb);grid.append(row);
+ }
+ for(const segment of remaining){
+  const row=el('div',undefined,'timestamp-comparison-row'),scraper=el('div',undefined,'timestamp-column scraper-column');scraper.append(el('strong','Scraper'),el('span','No matching scraper timestamp.','timestamp-empty'));
+  const introdb=el('div',undefined,'timestamp-column introdb-column');introdb.append(el('strong','IntroDB'),el('span',segment.segment_type,'timestamp-type'),el('span',`${time(segment.start_sec)} → ${time(segment.end_sec)}`,'timestamp-clock'),el('small',`${humanTime(segment.start_sec)} → ${humanTime(segment.end_sec)}`));row.append(scraper,introdb);grid.append(row);
+ }
+ host.append(grid);
  if(!run.introdbSegments.length)host.append(el('p','No current IntroDB timestamp was returned for this item.'));
 }

@@ -498,28 +498,60 @@ export function showExportPreview(view) {
   cancel.style.cssText = 'box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:13px/normal -apple-system,Arial,sans-serif; cursor:pointer;';
   const confirm = document.createElement('button');
   confirm.textContent = view.mode === 'submit' ? 'Upload to IntroDB' : 'Download JSON';
-  confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
+  confirm.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
+  const upload = document.createElement('button');
+  upload.textContent = 'Upload to IntroDB';
+  upload.style.cssText = `box-sizing:border-box; appearance:none; margin:0; padding:8px 12px; border:0; border-radius:6px; background:${providerColors.primary}; color:#fff; font:700 13px/normal -apple-system,Arial,sans-serif; cursor:pointer;`;
 
   const clock = value => {
     if (value == null || !Number.isFinite(Number(value))) return '—';
     const ms = Math.round(Number(value) * 1000);
     const seconds = Math.floor(ms / 1000);
-    return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
+    return `${String(Math.floor(seconds / 3600)).padStart(2, '0')}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}`;
+  };
+  const humanClock = value => {
+    if (value == null || !Number.isFinite(Number(value))) return '—';
+    const ms = Math.round(Number(value) * 1000);
+    const seconds = Math.floor(ms / 1000);
+    return `${Math.floor(seconds / 3600)}h ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}m ${String(seconds % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}s`;
+  };
+  const rangeText = range => {
+    const start = range?.start_sec ?? range?.startSec;
+    const end = range?.end_sec ?? range?.endSec;
+    return `${clock(start)} → ${clock(end)}\n${humanClock(start)} → ${humanClock(end)}`;
+  };
+  const mediaIsMovie = item => item?.is_movie === true || String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie';
+  const makeColumn = (title, ranges, emptyText, accent) => {
+    const column = document.createElement('div');
+    column.style.cssText = `min-width:0; padding:10px; border:1px solid ${colors.border}; border-radius:8px; background:${colors.background};`;
+    const heading = document.createElement('strong');
+    heading.textContent = title;
+    heading.style.cssText = `display:block; margin-bottom:7px; color:${accent}; font:700 12px/normal -apple-system,Arial,sans-serif;`;
+    column.append(heading);
+    if (!ranges.length) {
+      const empty = document.createElement('div');
+      empty.textContent = emptyText;
+      empty.style.cssText = `color:${colors.textMuted}; font:11px/1.45 -apple-system,Arial,sans-serif;`;
+      column.append(empty);
+      return column;
+    }
+    for (const range of ranges) {
+      const type = document.createElement('div');
+      type.textContent = range.segment_type || 'timestamp';
+      type.style.cssText = 'margin-bottom:3px; color:#fff; font-weight:700;';
+      const times = document.createElement('div');
+      times.textContent = rangeText(range);
+      times.style.cssText = 'white-space:pre-line; color:#ddd; line-height:1.55;';
+      column.append(type, times);
+    }
+    return column;
   };
   let approvalChecked = false;
-  let approvalInput = null;
-  const mediaKey = item => {
-    const movie = item?.is_movie === true || String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie';
-    return movie
-      ? `${item?.imdb_id || ''}|movie`
-      : `${item?.imdb_id || ''}|${item?.season}|${item?.episode}`;
-  };
   const update = next => {
     view = next;
     const rows = view.rows || [];
     summary.textContent = `${rows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${view.duplicateCount} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
     preview.replaceChildren();
-    const shownExistingFor = new Set();
     for (const row of rows) {
       const item = row.item;
       const entry = document.createElement('div');
@@ -527,39 +559,32 @@ export function showExportPreview(view) {
       const label = document.createElement('strong');
       label.textContent = row.status;
       label.style.color = row.status === 'NEW' ? '#69d89b' : colors.textSecondary;
-      const details = document.createElement('div');
-      const movie = item?.is_movie === true || String(item?.media_type || item?.mediaType || item?._mediaType || '').toLowerCase() === 'movie';
-      const itemLabel = movie ? 'Movie' : `S${item.season}E${item.episode}`;
-      details.textContent = `${item.imdb_id || 'IMDb pending'} · ${itemLabel} ${item._episodeTitle || ''}\nScraper: ${item.segment_type} · ${clock(item.start_sec)} → ${clock(item.end_sec)} (${item.start_sec}–${item.end_sec} sec)`;
-      if (row.canonical) details.textContent += `\nTVDB S${row.canonical.season}E${row.canonical.episode}`;
-      if (row.reason) details.textContent += `\n${row.reason}`;
-      const existingSegments = row.existingSegments || [];
-      const sameType = existingSegments.filter(range => range.segment_type === item.segment_type);
-      if (row.existingSegments) {
-        if (sameType.length) {
-          for (const range of sameType) details.textContent += `\nIntroDB: ${range.segment_type} · ${clock(range.start_sec)} → ${clock(range.end_sec)} (${range.start_sec}–${range.end_sec} sec)`;
-        } else {
-          details.textContent += `\nIntroDB: no ${item.segment_type} timestamp returned for this item.`;
-        }
-        const key = mediaKey(item);
-        if (!shownExistingFor.has(key)) {
-          const otherTypes = existingSegments.filter(range => range.segment_type !== item.segment_type);
-          for (const range of otherTypes) details.textContent += `\nIntroDB current ${range.segment_type}: ${clock(range.start_sec)} → ${clock(range.end_sec)} (${range.start_sec}–${range.end_sec} sec)`;
-          if (!existingSegments.length) details.textContent += '\nIntroDB: no current timestamps returned for this item.';
-          shownExistingFor.add(key);
-        }
-      } else {
-        for (const range of row.existingRanges || []) {
-          details.textContent += `\nIntroDB: ${clock(range.startSec)} → ${clock(range.endSec)}`;
-        }
-      }
-      entry.append(label, details);
+      const meta = document.createElement('div');
+      const movie = mediaIsMovie(item);
+      const itemLabel = movie ? 'Movie' : item.season != null && item.episode != null ? `S${item.season}E${item.episode}` : 'TV episode';
+      meta.textContent = `${item.imdb_id || 'IMDb pending'} · ${itemLabel}${item._episodeTitle ? ` · ${item._episodeTitle}` : ''}`;
+      const canonicalSeason = row.canonical?.season;
+      const canonicalEpisode = row.canonical?.episode;
+      if (!movie && canonicalSeason != null && canonicalEpisode != null) meta.textContent += ` · TVDB S${canonicalSeason}E${canonicalEpisode}`;
+      if (row.reason) meta.textContent += `\n${row.reason}`;
+      meta.style.cssText = 'margin-top:4px; white-space:pre-line; color:#ddd; font:11px/1.5 ui-monospace,Consolas,monospace;';
+      const currentRanges = row.existingSegments
+        ? row.existingSegments
+        : (row.existingRanges || []).map(range => ({ segment_type: item.segment_type, start_sec: range.startSec, end_sec: range.endSec }));
+      const comparison = document.createElement('div');
+      comparison.style.cssText = 'display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:9px;';
+      comparison.append(
+        makeColumn('Scraper', [{ segment_type: item.segment_type, start_sec: item.start_sec, end_sec: item.end_sec }], 'No scraper timestamp', providerColors.primary),
+        makeColumn('IntroDB', currentRanges, row.existingSegments ? 'No current timestamp returned' : 'IntroDB check unavailable', '#e4b968'),
+      );
+      entry.append(label, meta, comparison);
       preview.append(entry);
     }
-    if (view.requiresApproval) {
+    const needsUploadApproval = Boolean(view.requiresApproval || view.onUpload);
+    if (needsUploadApproval) {
       const approval = document.createElement('label');
       approval.style.cssText = `display:flex;gap:8px;align-items:flex-start;margin-top:12px;padding:10px;border:1px solid ${colors.border};border-radius:8px;color:${colors.textSecondary};font:12px/1.5 -apple-system,Arial,sans-serif;`;
-      approvalInput = document.createElement('input');
+      const approvalInput = document.createElement('input');
       approvalInput.type = 'checkbox';
       approvalInput.checked = approvalChecked;
       approvalInput.style.cssText = 'margin:2px 0 0;flex:0 0 auto;';
@@ -567,12 +592,18 @@ export function showExportPreview(view) {
       approval.append(approvalInput, document.createTextNode(view.approvalLabel || 'I compared every Scraper timestamp with the current IntroDB timestamp(s), checked the exact video, and approve this upload.'));
       preview.append(approval);
     }
-    confirm.disabled = Boolean(view.checking || !view.items.length || !view.onConfirm || (view.requiresApproval && !approvalChecked));
+    confirm.hidden = typeof view.onConfirm !== 'function';
+    confirm.disabled = Boolean(view.checking || !(view.items || []).length || typeof view.onConfirm !== 'function' || (view.mode === 'submit' && view.requiresApproval && !approvalChecked));
     confirm.style.opacity = confirm.disabled ? '.45' : '1';
     confirm.style.cursor = confirm.disabled ? 'not-allowed' : 'pointer';
     confirm.textContent = view.checking
       ? 'Checking…'
       : view.mode === 'submit' ? `Upload to IntroDB (${view.items.length})` : `Download JSON (${view.fileCount})`;
+    upload.hidden = typeof view.onUpload !== 'function';
+    upload.disabled = Boolean(view.checking || !(view.uploadItems || []).length || !view.onUpload || !approvalChecked);
+    upload.style.opacity = upload.disabled ? '.45' : '1';
+    upload.style.cursor = upload.disabled ? 'not-allowed' : 'pointer';
+    upload.textContent = `Upload to IntroDB (${(view.uploadItems || []).length})`;
   };
   update(view);
 
@@ -591,13 +622,16 @@ export function showExportPreview(view) {
     if (event.key === 'Escape') { event.preventDefault(); close(); }
     if (event.key === 'Tab') {
       event.preventDefault();
-      (confirm.disabled || document.activeElement === confirm ? cancel : confirm).focus();
+      const focusables = [cancel, confirm, upload].filter(button => !button.hidden && !button.disabled);
+      const currentIndex = focusables.indexOf(document.activeElement);
+      focusables[(currentIndex + 1) % focusables.length]?.focus();
     }
   });
   cancel.addEventListener('click', close);
   overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
   confirm.addEventListener('click', () => { if (!confirm.disabled) { const onConfirm = view.onConfirm; close(false); onConfirm(); } });
-  actions.append(cancel, confirm);
+  upload.addEventListener('click', () => { if (!upload.disabled) { const onUpload = view.onUpload; close(false); onUpload(); } });
+  actions.append(cancel, confirm, upload);
   dialog.append(heading, summary, preview, actions);
   overlay.append(dialog);
   overlay.addEventListener('click', event => event.stopPropagation());
