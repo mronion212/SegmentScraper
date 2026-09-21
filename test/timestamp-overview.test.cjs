@@ -69,7 +69,7 @@ test('timestamp dialog shows readable values, keeps failed rows and gates downlo
   assert.match(preview.children[0].children[1].textContent, /<script>unsafe<\/script>/);
   assert.equal(preview.children[0].children[1].children.length, 0);
   assert.match(preview.children[0].children[2].children[0].children[2].textContent, /^00:00:12.500 → 00:01:28.000\n/);
-  assert.match(preview.children[0].children[2].children[0].children[2].textContent, /0h 00m 12.500s → 0h 01m 28.000s$/);
+  assert.match(preview.children[0].children[2].children[0].children[2].textContent, /12\.500 s → 88\.000 s$/);
   view.checking = false;
   view.rows[0].status = 'Unavailable';
   view.rows[0].reason = 'HTTP 400';
@@ -128,7 +128,7 @@ test('timestamp comparison puts Scraper left, IntroDB right, and gates direct up
   assert.equal(scraper.children[0].textContent, 'Scraper');
   assert.equal(introdb.children[0].textContent, 'IntroDB');
   assert.match(scraper.children[2].textContent, /^01:35:56.000 → 01:44:10.000\n/);
-  assert.match(scraper.children[2].textContent, /1h 35m 56.000s → 1h 44m 10.000s$/);
+  assert.match(scraper.children[2].textContent, /5756\.000 s → 6250\.000 s$/);
   assert.match(introdb.children[2].textContent, /^01:36:02.000 → 01:44:10.000\n/);
   const upload = actions.children[2];
   assert.equal(upload.disabled, true);

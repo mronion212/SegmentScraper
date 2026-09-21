@@ -512,9 +512,7 @@ export function showExportPreview(view) {
   };
   const humanClock = value => {
     if (value == null || !Number.isFinite(Number(value))) return '—';
-    const ms = Math.round(Number(value) * 1000);
-    const seconds = Math.floor(ms / 1000);
-    return `${Math.floor(seconds / 3600)}h ${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}m ${String(seconds % 60).padStart(2, '0')}.${String(ms % 1000).padStart(3, '0')}s`;
+    return `${Number(value).toFixed(3)} s`;
   };
   const rangeText = range => {
     const start = range?.start_sec ?? range?.startSec;

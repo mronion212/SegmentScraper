@@ -153,7 +153,7 @@ function renderIntrodbComparison(run){
  if(!Array.isArray(run.introdbSegments)){
   host.append(el('p',introStep?.status==='blocked'?(introStep.detail||'IntroDB comparison is unavailable; upload remains blocked.').replace(/^IntroDB /,'IntroDB '):'Waiting for the IntroDB check to finish.','review-warning'));return;
  }
- const humanTime=n=>{if(n==null||!Number.isFinite(Number(n)))return'—';const ms=Math.round(Number(n)*1000),seconds=Math.floor(ms/1000);return`${Math.floor(seconds/3600)}h ${String(Math.floor(seconds/60)%60).padStart(2,'0')}m ${String(seconds%60).padStart(2,'0')}.${String(ms%1000).padStart(3,'0')}s`;};
+ const humanTime=n=>{if(n==null||!Number.isFinite(Number(n)))return'—';return`${Number(n).toFixed(3)} s`;};
  host.append(el('p','Left: timestamps detected by the Scraper. Right: current public IntroDB timestamps. Differences are shown, never auto-copied.'));
  const eligible=(run.payloads||[]).map((_,i)=>i).filter(i=>!run.duplicates?.[i]);
  for(const i of approvedSegments)if(!eligible.includes(i))approvedSegments.delete(i);
