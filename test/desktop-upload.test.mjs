@@ -8,6 +8,29 @@ import { createCore } from '../app/shared-core.mjs';
 const job={id:'file-1',report:{duration:7200,chapters:[],analysis:{status:'needs-review',scenes:[]}}};
 const draft={imdb_id:'tt1234567',media_type:'movie',endingReviewed:true,sceneReview:[],segments:[{segment_type:'outro',start_sec:6900.125,end_sec:7100.5}]};
 const none={intro:null,recap:null,outro:null,post_credits:null};
+
+test('desktop rejects competing TV ranges and boundaries after the video stream', () => {
+ const tv = { imdb_id:'tt1234567', media_type:'tv', season:1, episode:1, segments:[
+  {segment_type:'intro',start_sec:0,end_sec:30}, {segment_type:'intro',start_sec:40,end_sec:60},
+ ] };
+ assert.throws(()=>validateDraft(tv,job.report),/Conflicting or repeated/);
+ assert.throws(()=>validateDraft({...tv,segments:[{segment_type:'intro',start_sec:null,end_sec:30}]},job.report),/numeric boundaries/);
+ assert.throws(()=>validateDraft(draft,{...job.report,video_duration:7000}),/within the video duration/);
+});
+
+test('desktop records chapter, analysis and manual evidence outside the upload payload', async () => {
+ const {fetcher}=mock(); const service=createUploadService({fetcher}); service.configure({introdbKey:'key',tmdbToken:'token'});
+ const chapter = {...draft.segments[0],suggestion:'outro',issues:[]};
+ service.check({...job,report:{...job.report,chapters:[chapter]}},draft);
+ const run=await idle(service);
+ assert.equal(run.evidence[0].source,'chapter');
+ assert.equal(run.evidence[0].raw_start,draft.segments[0].start_sec);
+ assert.equal('_timing' in run.payloads[0],false);
+ service.check({...job,report:{...job.report,analysis:{...job.report.analysis,suggestions:draft.segments}}},draft);
+ assert.equal((await idle(service)).evidence[0].source,'visual-analysis');
+ service.check(job,draft);
+ assert.equal((await idle(service)).evidence[0].source,'manual');
+});
 test('desktop shared core retains late segments and normalizes capture IDs', () => {
  const core = createCore({request() {}});
  const intro = {_showId:'100',_eid:123,season:1,episode:1,segment_type:'intro',start_sec:1,end_sec:11};

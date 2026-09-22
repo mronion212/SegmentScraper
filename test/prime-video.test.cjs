@@ -147,6 +147,20 @@ function primeDetailDocument() {
   };
 }
 
+test('Prime retains revised series event boundaries across batches', () => {
+  const { document, ids } = primeDetailDocument();
+  const prime = loadPrimeVideoExtractor(document);
+  prime.scanPrimeVideoEpisodeCatalog();
+  const url = `https://example.test/GetVodPlaybackResources?titleId=${encodeURIComponent(ids[0])}`;
+  const data = { transitionTimecodes:{result:{events:[{eventType:'SKIP_INTRO',startTimeMs:12500,endTimeMs:88000}]}} };
+  prime.processPrimeVideoMetadata(data, '', url);
+  data.transitionTimecodes.result.events[0].startTimeMs = 14500;
+  prime.processPrimeVideoMetadata(data, '', url);
+  prime.processPrimeVideoMetadata(data, '', url);
+  assert.equal(prime.state.allItems.length, 2);
+  assert.equal(prime.state.allItems[1]._timing.raw_start, 14500);
+});
+
 test('recognizes current Prime Video GTI identifiers in requests', () => {
   const { document, ids } = primeDetailDocument();
   const prime = loadPrimeVideoExtractor(document);
@@ -700,6 +714,7 @@ test('captures Prime movie credits from END_CREDITS and ignores NEXT_UP', () => 
     _showId: titleId,
     media_type: 'movie',
     imdb_id: 'tt800',
+    _timing: { provider: 'prime-video', source: 'playback-event', unit: 'milliseconds', raw_start: 5400000, raw_end: 5700000 },
     segment_type: 'outro',
     season: null,
     episode: null,
@@ -890,6 +905,7 @@ test('drains a transition response when movie metadata arrives after it', () => 
     _showId: titleId,
     media_type: 'movie',
     imdb_id: 'tt801',
+    _timing: { provider: 'prime-video', source: 'playback-event', unit: 'milliseconds', raw_start: 5400000, raw_end: 5700000 },
     segment_type: 'outro',
     season: null,
     episode: null,

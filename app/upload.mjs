@@ -3,7 +3,7 @@ import { createCore } from './shared-core.mjs';
 
 const BASE = 'https://api.introdb.app';
 const types = ['intro', 'recap', 'outro', 'post-credits'];
-const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries, sameIntrodbRange } = createCore({request:()=>{}});
+const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries, sameIntrodbRange, timestampRangeIssue, assessTimestampCandidates, timestampEvidence } = createCore({request:()=>{}});
 export async function jsonRequest(url, options = {}, fetcher = fetch) {
   let response;
   try { response = await fetcher(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) }); }
@@ -25,6 +25,7 @@ function coreFor(settings, fetcher) {
 }
 export function validateDraft(draft, report) {
   if (!report || !Number.isFinite(report.duration) || report.duration <= 0) throw new Error('Inspect the video first; a valid duration is required.');
+  const duration = Number.isFinite(report.video_duration) && report.video_duration > 0 ? Math.min(report.duration, report.video_duration) : report.duration;
   if (!/^tt\d{7,8}$/.test(draft.imdb_id || '')) throw new Error('Enter a valid IMDb ID (tt followed by 7 or 8 digits).');
   if (!['tv', 'movie'].includes(draft.media_type)) throw new Error('Choose Movie or TV series.');
   if (draft.media_type === 'tv' && (![draft.season, draft.episode].every(n => Number.isInteger(n) && n > 0))) throw new Error('Regular TV episodes require positive season and episode numbers. Specials are excluded.');
@@ -34,17 +35,19 @@ export function validateDraft(draft, report) {
     for(const type of ['outro','post-credits'])if(sorted.filter(s=>s.segment_type===type).length>1)throw new Error('IntroDB currently models one outro and one extra scene per movie. Multiple real scenes must remain in the local report; they cannot be force-uploaded as competing ranges.');
     const scene=sorted.find(s=>s.segment_type==='post-credits'),outro=sorted.find(s=>s.segment_type==='outro');
     if(scene&&outro&&outro.end_sec>scene.start_sec)throw new Error('The outro must end at or before the extra scene starts, including mid-credits scenes.');
-    if(scene&&scene.end_sec>=report.duration)throw new Error('Mark the actual scene end, not the final frame of the movie.');
+    if(scene&&scene.end_sec>=duration)throw new Error('Mark the actual scene end, not the final frame of the movie.');
     const candidates=report.analysis?.scenes||[];
     const decisions=Array.isArray(draft.sceneReview)?draft.sceneReview:[];
     if(candidates.length&&decisions.filter(v=>v==='scene').length>1)throw new Error('Multiple real scenes confirmed. IntroDB does not currently model them; export the local report instead.');
   }
   for (let i = 0; i < sorted.length; i++) {
     const s = sorted[i];
-    if (!types.includes(s.segment_type) || ![s.start_sec, s.end_sec].every(Number.isFinite) || s.start_sec < 0 || s.end_sec <= s.start_sec || s.end_sec > report.duration) throw new Error('Segments must have valid types and ordered numeric boundaries within the video duration.');
+    if (!types.includes(s.segment_type) || ![s.start_sec, s.end_sec].every(Number.isFinite) || timestampRangeIssue(s, duration)) throw new Error('Segments must have valid types and ordered numeric boundaries within the video duration.');
     if (i && sorted[i-1].end_sec > s.start_sec) throw new Error('Segments overlap. Correct their boundaries before continuing.');
     if (draft.media_type === 'movie' && !['outro', 'post-credits'].includes(s.segment_type)) throw new Error('IntroDB accepts outro and post-credits segments for movies.');
   }
+  const candidates = sorted.map(s => ({ ...s, _timingReview: undefined, imdb_id: draft.imdb_id, media_type: draft.media_type, season: draft.season, episode: draft.episode }));
+  if ([...assessTimestampCandidates(candidates).values()].some(result => !result.allowed)) throw new Error('Conflicting or repeated timestamps for the same segment type. Keep one reviewed range per type in the upload; retain alternatives in the local report.');
   return sorted.map(s => introdbPayload({ ...s, imdb_id:draft.imdb_id,media_type:draft.media_type,season:draft.season,episode:draft.episode }));
 }
 export function existingRanges(data, type) {
@@ -82,7 +85,12 @@ export function createUploadService({ fetcher = fetch, adminCode = process.env.S
     if (busy) throw new Error('An upload or check is already running.');
     const payloads = validateDraft(draft, job.report);
     if (runs.size >= 100) runs.delete(runs.keys().next().value);
-    const run = { id:randomUUID(), jobId:job.id, status:'checking', startedAt:Date.now(), steps:[], payloads, results:[], blockers:[], title:'', override:null, endingReview:{reviewed:draft.endingReviewed===true,decisions:Array.isArray(draft.sceneReview)?draft.sceneReview:[]} };
+    const evidence = [...draft.segments].sort((a,b) => a.start_sec-b.start_sec).map(s => {
+      const chapter = job.report.chapters.find(c => c.suggestion === s.segment_type && c.start_sec === s.start_sec && c.end_sec === s.end_sec);
+      const analysis = job.report.analysis?.suggestions?.find(c => sameIntrodbRange(s, c));
+      return timestampEvidence({ provider: 'desktop', source: chapter ? 'chapter' : analysis ? 'visual-analysis' : 'manual', rawStart: s.start_sec, rawEnd: s.end_sec });
+    });
+    const run = { id:randomUUID(), jobId:job.id, status:'checking', startedAt:Date.now(), steps:[], payloads, evidence, results:[], blockers:[], title:'', override:null, endingReview:{reviewed:draft.endingReviewed===true,decisions:Array.isArray(draft.sceneReview)?draft.sceneReview:[]} };
     runs.set(run.id,run); busy = true;
     const step = async (name, action) => {
       const s = { name, status:'running', startedAt:Date.now(), detail:'' }; run.steps.push(s);

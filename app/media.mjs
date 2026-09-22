@@ -2,6 +2,9 @@ import path from 'node:path';
 import { readdir, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createCore } from './shared-core.mjs';
+
+const { timestampNumber, timestampRangeIssue, timestampEvidence } = createCore({ request() {} });
 
 const exec = promisify(execFile);
 export const isVideo = name => /\.(mkv|mp4|m4v|avi|mov|webm|ts|m2ts)$/i.test(name);
@@ -36,20 +39,21 @@ export function chapterReport(data, name, mode) {
   const duration = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : videoDuration;
   let previousEnd = 0;
   const chapters = (data.chapters || []).map((c, index) => {
-    const start = c.start_time == null ? NaN : Number(c.start_time);
-    const end = c.end_time == null ? NaN : Number(c.end_time);
+    const start = timestampNumber(c.start_time);
+    const end = timestampNumber(c.end_time);
     const title = String(c.tags?.title || c.tags?.TITLE || `Chapter ${index + 1}`);
     const issues = [];
-    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) issues.push('Invalid time boundaries');
+    if (timestampRangeIssue({ start_sec: start, end_sec: end })) issues.push('Invalid time boundaries');
     if (Number.isFinite(start) && start < previousEnd - 0.01) issues.push('Overlapping or unordered chapters');
-    if (duration && end > duration + 0.1) issues.push('Chapter exceeds video duration');
+    if ((videoDuration || duration) && end > (videoDuration || duration)) issues.push('Chapter exceeds video duration');
     if (Number.isFinite(end)) previousEnd = Math.max(previousEnd, end);
     // Names are hints only; generic chapter numbers never imply intro/outro.
     const suggestion = /\b(post[- ]?credits?|after[- ]?credits?)\b/i.test(title) ? 'post-credits'
       : /\b(recap|previously)\b/i.test(title) ? 'recap'
       : /\b(intro|opening|op)\b/i.test(title) ? 'intro'
       : /\b(credits|outro|ending|ed)\b/i.test(title) ? 'outro' : null;
-    return { title, start_sec: Number.isFinite(start) ? start : null, end_sec: Number.isFinite(end) ? end : null, suggestion, needs_review: true, issues };
+    return { title, start_sec: start, end_sec: end, suggestion, needs_review: true, issues,
+      _timing: timestampEvidence({ provider: 'desktop', source: 'chapter', rawStart: start, rawEnd: end }) };
   });
   const diagnostics = [];
   if (!chapters.length) diagnostics.push('ffprobe returned no embedded chapters. This does not mean the video has no intro or credits. Provider skip markers are separate metadata.');

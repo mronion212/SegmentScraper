@@ -106,6 +106,7 @@ function bundle() {
     'providers/timestamp-logger.js',
     'ui/panel.js',
     'ui/button.js',
+    'providers/manual-capture.js',
     'providers/bootstrap.js',
   ];
 

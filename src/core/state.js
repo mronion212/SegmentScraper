@@ -38,6 +38,7 @@ export function createSegmentCacheKey(imdbId, season, episode, segmentType) {
 
 export const createState = (providerName) => ({
   allItems: [],
+  knownMovieScenes: [],
   imdbId: '',
   dbSearchDone: false,
   dbStatusMsg: `Waiting for ${providerName} metadata...`,

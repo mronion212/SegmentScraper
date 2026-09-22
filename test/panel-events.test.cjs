@@ -45,6 +45,7 @@ function loadPanel() {
     'nfe-tvdb-set',
     'nfe-tvdb-apikey-input',
     'nfe-tvdb-pin-input',
+    'nfe-manual-start', 'nfe-manual-end', 'nfe-manual-save', 'nfe-manual-reset', 'nfe-tmdb-set', 'nfe-tmdb-input',
   ];
   const controls = Object.fromEntries(ids.map(id => [id, new FakeElement(id)]));
   const elements = new Map();
@@ -103,6 +104,18 @@ function loadPanel() {
   context.panelExports.createPanel();
   return { controls, elements, logs, window };
 }
+
+test('all API credentials are inside settings and marking buttons dispatch actions', () => {
+  const panel=loadPanel(),html=panel.elements.get('nfe-panel').innerHTML;
+  const settings=html.slice(html.indexOf('<details id="nfe-settings"'));
+  assert.ok(settings.indexOf('nfe-tmdb-input')<settings.indexOf('</details>'));
+  assert.ok(settings.indexOf('nfe-tvdb-apikey-input')<settings.indexOf('</details>'));
+  assert.ok(settings.indexOf('nfe-apikey-input')<settings.indexOf('</details>'));
+  const calls=[];
+  panel.window.nfePanelCallbacks={onManualStart:()=>calls.push('start'),onManualEnd:()=>calls.push('end'),onManualSave:()=>calls.push('save'),onTmdbSet:()=>calls.push('tmdb')};
+  for(const id of ['nfe-manual-start','nfe-manual-end','nfe-manual-save','nfe-tmdb-set'])panel.controls[id].click();
+  assert.deepEqual(calls,['start','end','save','tmdb']);
+});
 
 test('panel buttons dispatch their configured callbacks at click time', () => {
   const panel = loadPanel();

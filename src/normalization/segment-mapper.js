@@ -120,6 +120,8 @@ export function createNormalizedSegment({
   episodeTitle = '',
   mediaType = 'tv',
   creditPart = null,
+  timing = null,
+  durationSec = null,
 }) {
   const segmentType = normalizeSegmentType(providerSegmentType, providerName);
   if (!segmentType) return null;
@@ -127,6 +129,8 @@ export function createNormalizedSegment({
   return {
     _eid: episodeId,
     _episodeTitle: episodeTitle,
+    ...(timing ? { _timing: timing } : {}),
+    ...(durationSec != null ? { _duration_sec: durationSec } : {}),
     ...(showId ? { _showId: String(showId) } : {}),
     ...(String(mediaType).toLowerCase() === 'movie' ? { media_type: 'movie' } : {}),
     ...(creditPart ? { credit_part: creditPart } : {}),

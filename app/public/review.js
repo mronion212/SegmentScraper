@@ -62,7 +62,12 @@ function renderReviewTimeline(){
 }
 function markBoundary(which){
  const row=$('segment-editor').children[Number($('selected-segment').value)];
- const position=sourcePosition();if(!row||activeClip?.speed!==1||position<activeClip.sourceStart||position>activeClip.sourceEnd)throw new Error('Open a 1× clip at the selected time first.');
+ if(!row||activeClip?.speed!==1||sourcePosition()<activeClip.sourceStart||sourcePosition()>activeClip.sourceEnd)throw new Error('Open a 1× clip at the selected time first.');
+ if(viewer.seeking||viewer.readyState<2||viewer.error||!Number.isFinite(viewer.duration)||viewer.duration<=0)throw new Error('Wait for the review video to load and finish seeking before marking.');
+ viewer.pause();
+ const position=activeClip.sourceStart+viewer.currentTime;
+ if(!Number.isFinite(position)||viewer.currentTime<0||viewer.currentTime>viewer.duration||position<activeClip.sourceStart||position>activeClip.sourceEnd)throw new Error('The playback position is outside this review clip. Open a new 1× clip.');
+ updatePosition(position);
  const inputs=row.querySelectorAll('input');undoEdits.push({row,start:inputs[0].value,end:inputs[1].value});if(undoEdits.length>50)undoEdits.shift();
  inputs[which].value=position.toFixed(3);$('ending-reviewed').checked=false;invalidateUpload();$('undo-boundary').disabled=false;
 }

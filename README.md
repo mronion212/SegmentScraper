@@ -37,6 +37,9 @@ Every active provider logs each captured episode with readable timestamps and th
 
 - Provider-specific playback-control anchors with automatic insertion when controls appear or rerender
 - Fullscreen-aware panels, keyboard focus restoration, Escape to close, and collapsible API settings
+- TVDB, IntroDB and TMDB credentials grouped inside API settings
+- Manual **Start here** / **End here** player marks with Intro/Recap/Outro selection, short boundary previews and explicit review before saving
+- Segment-type filters for timestamp comparison, JSON export and upload approval, including desktop comparison
 - Tab-scoped capture recovery after reload, including episode mapping metadata; API credentials are excluded
 - Bounded duplicate-check batches and request timeouts; failed duplicate checks stop export/submission and can be retried
 
@@ -120,6 +123,8 @@ New provider panels must retain the shared Netflix layout. Only the documented p
 
 ## Build
 
+Branch testing for timestamp evidence, validation and conflict review: [test guide](docs/timestamp-testing.md).
+
 ```bash
 npm run build
 ```
@@ -158,7 +163,8 @@ Use `minor` or `major` instead of `patch` when appropriate. Commit and push both
 4. Open the SegmentScraper panel from the injected player button.
 5. Set the IMDb ID if automatic lookup did not resolve it.
 6. Enter your own TheTVDB v4 API key and, when required, your optional subscriber PIN. These credentials and the reusable bearer token are stored locally by the userscript manager.
-7. Download the JSON export, or save an IntroDB API key locally and submit directly. Before uploading, compare the clearly labelled **Scraper** and **IntroDB** ranges in the review dialog and tick the manual approval checkbox. After a confirmed export or fully successful submission, captured timestamps are cleared; failed submissions remain available for retry. The stored key is not rendered back into the panel or written to logs.
+7. To capture a range yourself, expand **Mark timestamps from video**, choose Intro/Recap/Outro and confirm the playing title and episode. Use **Start here** and **End here**, preview both boundaries, tick the review checkbox and save the local candidate.
+8. Open **Show timestamps** and select a segment-type filter if needed. Download the visible JSON timestamps, or save an IntroDB API key locally and submit directly. Before uploading, compare the clearly labelled **Scraper** and **IntroDB** ranges and approve the reviewed timestamps. Switching filters clears approvals. After a complete confirmed export or fully successful submission, captured timestamps are cleared; partial exports and failed submissions remain available. The stored key is not rendered back into the panel or written to logs.
 
 At startup, SegmentScraper compares its installed semantic version with the `@version` in the userscript on the `main` branch. If GitHub confirms that a newer version exists, a non-dismissible update screen replaces the normal panel. The update link opens the raw userscript so Tampermonkey or Violentmonkey can install it. After installation, reload the streaming page. If GitHub is temporarily unreachable, the check fails open and the installed version remains usable.
 

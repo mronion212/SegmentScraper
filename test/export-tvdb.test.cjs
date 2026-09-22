@@ -4,6 +4,117 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+test('type-filtered JSON exports only visible ranges and retains other captures', async () => {
+  const base={_showId:'show',imdb_id:'tt1234567',season:1,episode:1,start_sec:0,end_sec:20};
+  const bootstrap=loadBootstrap({stateOverrides:{allItems:[{...base,segment_type:'intro'},{...base,segment_type:'outro',start_sec:90,end_sec:100}]}});
+  await bootstrap.exportJSON();const view=bootstrap.calls.previews.at(-1);
+  view.onConfirm([],view.items.filter(item=>item.segment_type==='intro'));
+  await new Promise(resolve=>setTimeout(resolve,450));
+  assert.equal(bootstrap.calls.downloadBodies.length,1);
+  assert.deepEqual(bootstrap.calls.downloadBodies[0].items.map(item=>item.segment_type),['intro']);
+  assert.equal(bootstrap.state.allItems.length,2);
+});
+
+test('manual episode mapping uses explicit titles separately from the provider catalogue', async () => {
+  const item={_showId:'show',imdb_id:'tt1234567',_episodeTitle:'Pilot',_tvdbRequireTitleMatch:true,_timing:{source:'manual'},season:1,episode:1,segment_type:'intro',start_sec:0,end_sec:20};
+  const bootstrap=loadBootstrap({stateOverrides:{allItems:[item],providerEpisodesByShowId:{show:[{season:1,episode:9,title:'Unrelated'}]}}});
+  await bootstrap.exportJSON();
+  assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.map[0].catalog)),[{season:1,episode:1,title:'Pilot'}]);
+  assert.equal(bootstrap.calls.map[0].items[0]._tvdbRequireTitleMatch,true);
+});
+
+test('incomplete extra-scene evidence withholds a movie even without accepted scene boundaries', async () => {
+  const base = {_showId:'movie',imdb_id:'tt1234567',media_type:'movie',segment_type:'outro',start_sec:5400,end_sec:5700};
+  const bootstrap = loadBootstrap({stateOverrides:{allItems:[base],knownMovieScenes:[{showId:'movie',imdbId:''}]}});
+  await bootstrap.exportJSON();
+  assert.equal(bootstrap.calls.previews.at(-1).items.length,0);
+  await bootstrap.submitToIntroDB();
+  assert.equal(bootstrap.calls.previews.at(-1).items.length,0);
+  assert.equal(bootstrap.calls.submissions.length,0);
+});
+
+test('extra-scene evidence arriving after review invalidates the movie upload', async () => {
+  const base = {_showId:'movie',imdb_id:'tt1234567',media_type:'movie',segment_type:'outro',start_sec:5400,end_sec:5700};
+  const bootstrap = loadBootstrap({stateOverrides:{allItems:[base]}});
+  await bootstrap.submitToIntroDB();
+  const view = bootstrap.calls.previews.at(-1);
+  bootstrap.state.knownMovieScenes=[{showId:'movie',imdbId:''}];
+  view.onConfirm(view.items);
+  assert.equal(bootstrap.calls.submissions.length,0);
+  assert.equal(bootstrap.state.submitInProgress,false);
+});
+
+test('conflicting captures require a reviewed choice and a new variant invalidates it', async () => {
+  const base = { _eid: 'episode', _showId: 'show', imdb_id: 'tt1234567', season: 1, episode: 1, segment_type: 'intro', start_sec: 10, end_sec: 30 };
+  const bootstrap = loadBootstrap({ stateOverrides: { allItems: [base, { ...base, start_sec: 12 }] } });
+  await bootstrap.exportJSON();
+  let view = bootstrap.calls.previews.at(-1);
+  assert.equal(view.items.length, 0);
+  assert.equal(view.rows.every(row => /Conflicting/.test(row.reason)), true);
+  view.rows[1].onChoose();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  view = bootstrap.calls.previews.at(-1);
+  assert.equal(view.items.length, 1);
+  assert.equal(view.items[0].start_sec, 12);
+  assert.equal(bootstrap.state.allItems.length, 2);
+  assert.equal(view.items.some(item => Object.keys(item).some(key => key.startsWith('_'))), false);
+  bootstrap.state.allItems.push({ ...base, start_sec: 14 });
+  view.onUpload(view.uploadItems);
+  assert.equal(bootstrap.calls.submissions.length, 0);
+  assert.ok(bootstrap.calls.toasts.some(message => message.includes('changed')));
+  await bootstrap.exportJSON();
+  assert.equal(bootstrap.calls.previews.at(-1).items.length, 0);
+});
+
+test('submission conflict choice reruns validation and uploads only the selected range', async () => {
+  const base = { _eid: 'episode', _showId: 'show', imdb_id: 'tt1234567', season: 1, episode: 1, segment_type: 'intro', start_sec: 10, end_sec: 30 };
+  const bootstrap = loadBootstrap({ stateOverrides: { allItems: [base, { ...base, start_sec: 12 }] } });
+  await bootstrap.submitToIntroDB();
+  let view = bootstrap.calls.previews.at(-1);
+  assert.equal(view.items.length, 0);
+  view.rows[0].onChoose();
+  await new Promise(resolve => setTimeout(resolve, 5));
+  view = bootstrap.calls.previews.at(-1);
+  assert.equal(view.items.length, 1);
+  view.onConfirm(view.items);
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.equal(bootstrap.calls.submissions.length, 1);
+  assert.equal(bootstrap.calls.submissions[0].start_sec, 10);
+  assert.equal(bootstrap.state.allItems.length, 2);
+});
+
+test('conflicting ranges after canonical mapping are blocked, and partial exports preserve them', async () => {
+  const base = { _showId: 'show', imdb_id: 'tt1234567', season: 1, segment_type: 'intro', end_sec: 30 };
+  const bootstrap = loadBootstrap({ stateOverrides: { allItems: [
+    { ...base, episode: 1, start_sec: 10 }, { ...base, episode: 2, start_sec: 12 }, { ...base, episode: 3, start_sec: 15 },
+  ] }, mappingResult: items => ({ success: true, items: items.map(item => ({ ...item, episode: item.episode === 2 ? 1 : item.episode })) }) });
+  await bootstrap.exportJSON();
+  const view = bootstrap.calls.previews.at(-1);
+  assert.equal(view.items.length, 1);
+  assert.equal(view.items[0].episode, 3);
+  assert.equal(view.rows.filter(row => row.onChoose).length, 2);
+  view.onConfirm();
+  await new Promise(resolve => setTimeout(resolve, 450));
+  assert.equal(bootstrap.state.allItems.length, 3);
+  assert.equal(bootstrap.calls.clearCaptureSessions, 0);
+});
+
+test('a capture arriving during the last duplicate check stops upload', async () => {
+  const base = { _eid: 'episode', imdb_id: 'tt1234567', season: 1, episode: 1, segment_type: 'intro', start_sec: 10, end_sec: 30 };
+  let checkingUpload = false;
+  const bootstrap = loadBootstrap({ stateOverrides: { allItems: [base] }, existingSegmentsByKey: { get() {
+    if (checkingUpload) bootstrap.state.allItems.push({ ...base, start_sec: 12 });
+    return new Set();
+  } } });
+  await bootstrap.submitToIntroDB();
+  checkingUpload = true;
+  const view = bootstrap.calls.previews.at(-1);
+  view.onConfirm(view.items);
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.equal(bootstrap.calls.submissions.length, 0);
+  assert.equal(bootstrap.state.submitInProgress, false);
+});
+
 test('large exports limit concurrent duplicate checks to four', async () => {
   let active = 0;
   let peak = 0;
@@ -91,7 +202,7 @@ function loadBootstrap({ mappingResult = items => ({ success: true, method: 'tit
       warn: message => calls.warnLogs.push(message),
       error() {},
     },
-    Blob,
+    Blob: class extends Blob { constructor(parts, options) { super(parts, options); (calls.downloadBodies ||= []).push(JSON.parse(parts[0])); } },
     URL,
     setTimeout,
     clearTimeout,
@@ -106,6 +217,7 @@ function loadBootstrap({ mappingResult = items => ({ success: true, method: 'tit
     },
     createState: () => ({ allItems: [], introdbApiKey: '', panelVisible: false }),
     clearCaptureSession: () => { calls.clearCaptureSessions++; },
+    scheduleCaptureSave() {},
     createEpisodeCacheKey: (imdbId, season, episode) => `${imdbId}|${season}|${episode}`,
     createMediaCacheKey: (imdbId, mediaType, season, episode) => String(mediaType).toLowerCase() === 'movie'
       ? `${imdbId}|movie`

@@ -168,6 +168,19 @@ test('deduplicates repeated catalogue responses per episode and segment type', (
   assert.equal(sky.logs.length, 3);
 });
 
+test('changed series markers retain both observations for review', () => {
+  const sky = loadSkyShowtimeExtractor();
+  const original = cataloguePayload();
+  sky.processSkyShowtimeMetadata(original);
+  const changed = JSON.parse(JSON.stringify(original).replace('12345', '14345'));
+  sky.processSkyShowtimeMetadata(changed);
+  const count = sky.state.allItems.length;
+  assert.ok(count > 4);
+  sky.processSkyShowtimeMetadata(changed);
+  assert.equal(sky.state.allItems.length, count);
+  assert.ok(sky.state.allItems.some(item => item._timing.raw_end === 14345 || item._timing.raw_start === 14345));
+});
+
 test('captures SkyShowtime movie credits only with an explicit end marker', () => {
   const sky = loadSkyShowtimeExtractor();
   const payload = {
@@ -202,6 +215,7 @@ test('captures SkyShowtime movie credits only with an explicit end marker', () =
   assert.deepEqual(plain(sky.state.providerEpisodes), []);
   assert.deepEqual(plain(sky.state.allItems), [{
     _eid: 'movie-123::movie::outro',
+    _timing: { provider: 'skyshowtime', source: 'catalogue-marker', unit: 'milliseconds', raw_start: 5400000, raw_end: 6000000 },
     _episodeTitle: 'Example Movie',
     _showId: 'movie-123',
     media_type: 'movie',
@@ -213,6 +227,7 @@ test('captures SkyShowtime movie credits only with an explicit end marker', () =
     end_sec: 6000,
   }, {
     _eid: 'movie-123::movie::post-credits',
+    _timing: { provider: 'skyshowtime', source: 'catalogue-marker', unit: 'milliseconds', raw_start: 5680000, raw_end: 5800000 },
     _episodeTitle: 'Example Movie',
     _showId: 'movie-123',
     media_type: 'movie',

@@ -266,7 +266,7 @@ export function processVideolandLayout(json) {
     if (!segmentType || startSec == null || endSec == null) continue;
 
     const episodeId = `${clipId}_${segmentType}`;
-    if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+    if ([...state.allItems, ...extractedItems].some(item => item._eid === episodeId && item.start_sec === startSec && item.end_sec === endSec)) continue;
     extractedItems.push({
       _eid: episodeId,
       _episodeTitle: episodeTitle,
@@ -279,6 +279,7 @@ export function processVideolandLayout(json) {
       episode,
       start_sec: startSec,
       end_sec: endSec,
+      _timing: { provider: 'videoland', source: 'chapter', unit: 'seconds', raw_start: startSec, raw_end: endSec },
     });
   }
   logCapturedTimestamps({

@@ -1,0 +1,36 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Manual timestamp fixture</title>
+<style>body{background:#141820;color:#eee;font:16px system-ui;margin:24px}button,input,select{font:inherit;padding:8px;margin:4px}#screen{background:#243647;padding:30px;max-width:600px;margin:15px 0}a{color:#9cf}</style>
+<h1>Manual timestamp fixture</h1><p>Simulated player clock for UI testing. No video decoding, provider requests or uploads.</p>
+<label>Provider <select id="provider"><option>netflix</option><option>prime-video</option><option>videoland</option><option>skyshowtime</option></select></label>
+<div id="screen"><strong>Example Series · S01E01 · Pilot</strong><p>Simulated source: 120 seconds</p><label>Playback position (seconds) <input id="position" type="number" value="10" min="0" max="120" step="0.001"></label><div><button id="seek-start">Seek to 10s</button><button id="seek-end">Seek to 25s</button><button id="next-video">Switch video</button></div><output id="playback">Paused</output></div>
+<button id="open">Open SegmentScraper</button><p id="saved">No manual segments saved</p><a href="/">Player-control checks</a>
+<script type="module">
+import {state} from '/src/core/state.js';
+import {createManualCapture} from '/src/providers/manual-capture.js';
+import {validateManualIdentity} from '/src/core/output-policy.js';
+import {setProviderName,openPanel,closePanel,updateManualCapture,updateCounters,showExportPreview,toast} from '/src/ui/panel.js';
+const $=id=>document.getElementById(id);
+Object.assign(state,{showId:'fixture-show',showTitle:'Example Series',mediaType:'tv',imdbId:'tt1234567'});state.showIds.add('fixture-show');
+let timer=null;
+const video=Object.assign(new EventTarget(),{
+  duration:120,currentSrc:'fixture:episode-one',seeking:false,
+  pause(){clearInterval(timer);timer=null;$('playback').textContent='Paused';},
+  play(){this.pause();$('playback').textContent='Playing preview';timer=setInterval(()=>{this.currentTime=Math.min(120,this.currentTime+.1);this.dispatchEvent(new Event('timeupdate'));if(this.currentTime===120)this.pause();},100);return Promise.resolve();}
+});
+Object.defineProperty(video,'currentTime',{get:()=>Number($('position').value),set:value=>{$('position').value=value.toFixed(3);}});
+const capture=createManualCapture({findVideo:()=>video,getContext:()=>{
+  const value=key=>$(`nfe-manual-${key}`).value;
+  const context={provider:$('provider').value,showId:state.showId,imdbId:state.imdbId,mediaType:value('media'),season:Number(value('season')),episode:Number(value('episode')),episodeTitle:value('title'),segmentType:value('type')};
+  validateManualIdentity(context);return context;
+},record:item=>{state.allItems.push(item);updateCounters();$('saved').textContent=`Saved ${item.segment_type}: ${item.start_sec.toFixed(3)}–${item.end_sec.toFixed(3)} s · ${state.allItems.length} local segments`;},render:updateManualCapture});
+const action=fn=>()=>{try{Promise.resolve(fn()).catch(e=>toast(e.message));}catch(e){toast(e.message);}};
+const preview=()=>showExportPreview({items:state.allItems,uploadItems:state.allItems,checking:false,fileCount:1,duplicateCount:0,message:'Local fixture: buttons do not download or upload.',rows:state.allItems.map(item=>({item,status:'NEW',existingSegments:[]})),onConfirm:()=>{},onUpload:()=>{}});
+window.nfePanelCallbacks={onClose:closePanel,onExport:preview,onSubmit:preview,onManualStart:action(()=>capture.mark('start')),onManualEnd:action(()=>capture.mark('end')),onManualPreviewStart:action(()=>capture.preview('start')),onManualPreviewEnd:action(()=>capture.preview('end')),onManualReset:()=>capture.reset(),onManualSave:action(()=>capture.save($('nfe-manual-reviewed').checked)),onTmdbSet:()=>{$('nfe-tmdb-input').value='';toast('Fixture: credential not saved');}};
+function open(){setProviderName($('provider').value);openPanel();$('nfe-manual-season').value='1';$('nfe-manual-episode').value='1';$('nfe-manual-title').value='Pilot';}
+$('open').onclick=open;
+$('seek-start').onclick=()=>{video.pause();video.currentTime=10;};$('seek-end').onclick=()=>{video.pause();video.currentTime=25;};
+$('next-video').onclick=()=>{video.pause();video.currentSrc+='-next';video.dispatchEvent(new Event('loadstart'));};
+$('provider').onchange=()=>{capture.reset();$('nfe-panel')?.remove();open();};
+open();
+</script></html>

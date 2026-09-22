@@ -145,9 +145,10 @@ function renderEndingAnalysis(job){
  if(requestedAnalysisJob===job.id){requestedAnalysisJob=null;useAnalysis();}
  }
 let comparisonSnapshot='';
+let comparisonTypeFilter='all';
 function renderIntrodbComparison(run){
  const host=$('introdb-comparison');if(!host)return;
- const snapshot=JSON.stringify([run,[...approvedSegments]]);if(snapshot===comparisonSnapshot)return;comparisonSnapshot=snapshot;host.replaceChildren();
+ const snapshot=JSON.stringify([run,[...approvedSegments],comparisonTypeFilter]);if(snapshot===comparisonSnapshot)return;comparisonSnapshot=snapshot;host.replaceChildren();
  if(!run){host.append(el('p','Run all checks to load the current public IntroDB timestamps for this item.'));return;}
  const introStep=run.steps.find(step=>step.name==='IntroDB existing segments');
  if(!Array.isArray(run.introdbSegments)){
@@ -155,7 +156,12 @@ function renderIntrodbComparison(run){
  }
  const humanTime=n=>{if(n==null||!Number.isFinite(Number(n)))return'—';return`${Number(n).toFixed(3)} s`;};
  host.append(el('p','Left: timestamps detected by the Scraper. Right: current public IntroDB timestamps. Differences are shown, never auto-copied.'));
- const eligible=(run.payloads||[]).map((_,i)=>i).filter(i=>!run.duplicates?.[i]);
+ const typeFilter=el('select');typeFilter.setAttribute('aria-label','Filter timestamps by segment type');
+ for(const [value,label] of [['all','All'],['intro','Intro'],['recap','Recap'],['outro','Outro'],['post-credits','Extra scenes']]){const option=el('option',`${label} (${(run.payloads||[]).filter(p=>value==='all'||p.segment_type===value).length})`);option.value=value;typeFilter.append(option);}
+ typeFilter.value=comparisonTypeFilter;typeFilter.onchange=()=>{comparisonTypeFilter=typeFilter.value;approvedSegments.clear();uploadSnapshot='';renderIntrodbComparison(run);poll().catch(e=>notice(e.message,true));};
+ const filterLabel=el('label','Segment filter · approval applies to the visible type');filterLabel.append(typeFilter);host.append(filterLabel);
+ const matches=p=>comparisonTypeFilter==='all'||p.segment_type===comparisonTypeFilter;
+ const eligible=(run.payloads||[]).map((_,i)=>i).filter(i=>matches(run.payloads[i])&&!run.duplicates?.[i]);
  for(const i of approvedSegments)if(!eligible.includes(i))approvedSegments.delete(i);
  const approve=(text,indices)=>{
   const label=el('label',undefined,'remember'),input=el('input');input.type='checkbox';
@@ -164,12 +170,15 @@ function renderIntrodbComparison(run){
   input.onchange=()=>{for(const i of indices)if(input.checked)approvedSegments.add(i);else approvedSegments.delete(i);uploadSnapshot='';poll().catch(e=>notice(e.message,true));};
   label.append(input,document.createTextNode(text));return label;
  };
- host.append(approve('Approve all eligible timestamps for this file after video and IntroDB comparison',eligible));
- const grid=el('div',undefined,'timestamp-comparison-grid'),remaining=[...(run.introdbSegments||[])];
+ host.append(approve('Approve all visible eligible timestamps after video and IntroDB comparison',eligible));
+ const grid=el('div',undefined,'timestamp-comparison-grid'),remaining=(run.introdbSegments||[]).filter(matches);
  for(const [index,payload] of (run.payloads||[]).entries()){
+  if(!matches(payload))continue;
   const row=el('div',undefined,'timestamp-comparison-row'),existing=remaining.filter(segment=>segment.segment_type===payload.segment_type);
   for(const segment of existing)remaining.splice(remaining.indexOf(segment),1);
   const scraper=el('div',undefined,'timestamp-column scraper-column');scraper.append(el('strong','Scraper'),el('span',payload.segment_type,'timestamp-type'),el('span',`${time(payload.start_sec)} → ${time(payload.end_sec)}`,'timestamp-clock'),el('small',`${humanTime(payload.start_sec)} → ${humanTime(payload.end_sec)}`));
+  const evidence=run.evidence?.[index];
+  if(evidence)scraper.append(el('small',evidence.source==='chapter'?'Matches an embedded chapter':evidence.source==='visual-analysis'?'Matches a visual-analysis suggestion':'Manually entered or corrected range'));
   const introdb=el('div',undefined,'timestamp-column introdb-column');introdb.append(el('strong','IntroDB'));
   if(existing.length)for(const segment of existing)introdb.append(el('span',segment.segment_type,'timestamp-type'),el('span',`${time(segment.start_sec)} → ${time(segment.end_sec)}`,'timestamp-clock'),el('small',`${humanTime(segment.start_sec)} → ${humanTime(segment.end_sec)}`));
   else introdb.append(el('span','No current timestamp returned.','timestamp-empty'));

@@ -891,7 +891,7 @@ function flushPrimeVideoSegmentBatch(titleId) {
   const batch = state.primeVideoSegmentBatches.get(titleId);
   if (!batch) return;
   state.primeVideoSegmentBatches.delete(titleId);
-  const items = batch.items.filter(item => !state.allItems.some(existing => existing._eid === item._eid));
+  const items = batch.items.filter(item => !state.allItems.some(existing => existing._eid === item._eid && existing.start_sec === item.start_sec && existing.end_sec === item.end_sec));
   logPrimeVideo('Flushing Prime Video segment batch:', {
     titleId,
     showId: batch.showId,
@@ -912,7 +912,7 @@ function queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle,
     state.primeVideoSegmentBatches.set(titleId, batch);
   }
   for (const item of items) {
-    if (!batch.items.some(existing => existing._eid === item._eid)) batch.items.push(item);
+    if (!batch.items.some(existing => existing._eid === item._eid && existing.start_sec === item.start_sec && existing.end_sec === item.end_sec)) batch.items.push(item);
   }
   if (waitForOutro) batch.waitingForOutro = true;
   if (outroResolved) batch.waitingForOutro = false;
@@ -930,14 +930,14 @@ function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episod
   const isMovie = String(mediaType).toLowerCase() === 'movie';
   const partSuffix = creditPart ? `_${creditPart}` : '';
   const episodeId = isMovie ? `${titleId}_movie_${segmentType}${partSuffix}` : `${titleId}_${segmentType}${partSuffix}`;
-  const alreadyCaptured = item => item._eid === episodeId || (
+  const alreadyCaptured = item => item.start_sec === startTimeMs / 1000 && item.end_sec === endTimeMs / 1000 && (item._eid === episodeId || (
     item._showId === showId &&
     String(item.media_type || 'tv').toLowerCase() === String(mediaType).toLowerCase() &&
     item.season === season &&
     item.episode === episode &&
     item.segment_type === segmentType &&
     (item.credit_part || null) === (creditPart || null)
-  );
+  ));
   if ((!isMovie && state.allItems.some(alreadyCaptured)) || extractedItems.some(alreadyCaptured)) return false;
   extractedItems.push({
     _eid: episodeId,
@@ -951,6 +951,7 @@ function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episod
     episode,
     start_sec: startTimeMs / 1000,
     end_sec: endTimeMs / 1000,
+    _timing: { provider: 'prime-video', source: 'playback-event', unit: 'milliseconds', raw_start: startTimeMs, raw_end: endTimeMs },
   });
   return true;
 }

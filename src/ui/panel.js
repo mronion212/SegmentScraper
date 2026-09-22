@@ -66,6 +66,31 @@ function setupPanelEventListeners() {
   bindPanelCallback(document.getElementById('nfe-tmdb-set'), 'onTmdbSet');
   bindButtonClickOnEnter(document.getElementById('nfe-tmdb-input'), () => document.getElementById('nfe-tmdb-set'));
   tvdbInputs.filter(Boolean).forEach(input => bindButtonClickOnEnter(input, () => tvdbSetBtn));
+  for (const [id, callback] of [['start','onManualStart'],['end','onManualEnd'],['preview-start','onManualPreviewStart'],['preview-end','onManualPreviewEnd'],['save','onManualSave'],['reset','onManualReset']]) {
+    bindPanelCallback(document.getElementById(`nfe-manual-${id}`), callback);
+  }
+  for (const id of ['media','type','season','episode','title']) {
+    document.getElementById(`nfe-manual-${id}`)?.addEventListener('change', () => {
+      const fields = document.getElementById('nfe-manual-episode-fields');
+      if (fields) fields.hidden = document.getElementById('nfe-manual-media').value === 'movie';
+      window.nfePanelCallbacks?.onManualReset?.();
+    });
+  }
+}
+
+export function updateManualCapture({ start, end, message }) {
+  for (const [key, value] of [['start', start], ['end', end]]) {
+    const label = document.getElementById(`nfe-manual-${key}-value`);
+    if (label) label.textContent = Number.isFinite(value) ? `${value.toFixed(3)} s` : 'Not marked';
+    const preview = document.getElementById(`nfe-manual-preview-${key}`);
+    if (preview) preview.disabled = !Number.isFinite(value);
+  }
+  const save = document.getElementById('nfe-manual-save');
+  if (save) save.disabled = !Number.isFinite(start) || !Number.isFinite(end);
+  const review = document.getElementById('nfe-manual-reviewed');
+  if (review) review.checked = false;
+  const status = document.getElementById('nfe-manual-status');
+  if (status) status.textContent = message || '';
 }
 
 /**
@@ -142,6 +167,13 @@ export function createPanel() {
       #nfe-panel button, #nfe-panel input { min-height:0; }
       #nfe-panel :focus-visible { outline:2px solid white; outline-offset:2px; }
       #nfe-panel summary { cursor:pointer; padding:8px 0; font-size:12px; font-weight:700; }
+      #nfe-manual { background:${colors.panelBg}; border-radius:9px; padding:4px 10px 10px; margin-bottom:10px; }
+      #nfe-manual label { display:block; font-size:11px; margin:7px 0; color:${colors.textSecondary}; }
+      #nfe-manual input:not([type="checkbox"]), #nfe-manual select { width:100%; min-width:0; margin-top:4px; padding:6px; background:#242424; color:#fff; border:1px solid #444; border-radius:5px; font:12px Arial,sans-serif; }
+      #nfe-manual button { flex:1; padding:7px 5px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; cursor:pointer; font:12px Arial,sans-serif; }
+      #nfe-manual button:disabled { opacity:.45; cursor:default; }
+      #nfe-manual input[type="checkbox"] { appearance:auto; -webkit-appearance:auto; }
+      #nfe-manual [hidden] { display:none!important; }
     </style>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <span style="font-size:13px;font-weight:700;color:${nameColor}">${config.name} ${branding.title}</span>
@@ -184,6 +216,24 @@ export function createPanel() {
         <div id="nfe-cnt-files-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Files</div>
       </div>
     </div>
+
+    <details id="nfe-manual" open><summary>Mark timestamps from video</summary>
+      <div style="font-size:11px;line-height:1.4;color:${colors.textSecondary}">Confirm the IMDb title above and the playing episode below. Each mark pauses the video.</div>
+      <div style="display:flex;gap:6px">
+        <label style="flex:1">Media<select id="nfe-manual-media"><option value="tv" ${state.mediaType === 'movie' ? '' : 'selected'}>TV episode</option><option value="movie" ${state.mediaType === 'movie' ? 'selected' : ''}>Movie</option></select></label>
+        <label style="flex:1">Segment type<select id="nfe-manual-type"><option value="intro">Intro</option><option value="recap">Recap</option><option value="outro" ${state.mediaType === 'movie' ? 'selected' : ''}>Outro</option></select></label>
+      </div>
+      <div id="nfe-manual-episode-fields" ${state.mediaType === 'movie' ? 'hidden' : ''}>
+        <div style="display:flex;gap:6px"><label style="flex:1">Season<input id="nfe-manual-season" type="number" min="1" step="1" placeholder="1"></label><label style="flex:1">Episode<input id="nfe-manual-episode" type="number" min="1" step="1" placeholder="1"></label></div>
+        <label>Episode title<input id="nfe-manual-title" type="text" placeholder="Actual episode title for TVDB matching"></label>
+      </div>
+      <div style="display:flex;gap:6px"><button id="nfe-manual-start">Start here</button><button id="nfe-manual-end">End here</button></div>
+      <div style="display:flex;justify-content:space-between;margin:6px 0;font:11px monospace"><span>Start: <output id="nfe-manual-start-value">Not marked</output></span><span>End: <output id="nfe-manual-end-value">Not marked</output></span></div>
+      <div style="display:flex;gap:6px"><button id="nfe-manual-preview-start" disabled>Preview start</button><button id="nfe-manual-preview-end" disabled>Preview end</button></div>
+      <label><input id="nfe-manual-reviewed" type="checkbox"> I checked this title/episode and both boundaries.</label>
+      <div style="display:flex;gap:6px"><button id="nfe-manual-save" disabled>Save segment</button><button id="nfe-manual-reset">Reset marks</button></div>
+      <div id="nfe-manual-status" role="status" style="font-size:11px;line-height:1.4;margin-top:7px">Choose Intro, Recap or Outro. Saving keeps a local candidate; uploading requires separate approval.</div>
+    </details>
 
     <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
       <div style="flex:1;height:1px;background:${colors.border}"></div>
@@ -248,11 +298,8 @@ export function createPanel() {
        </div>
      </div>
 
-     </details>
-     <div id="nfe-session-status" role="status" style="font-size:11px;color:#aaa;margin:8px 0;line-height:1.4"></div>
-     <div id="nfe-introdb-status" role="status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
-
-     <div style="margin-bottom:10px;font-size:11px;color:${colors.textSecondary}">
+     <div style="display:flex;align-items:center;gap:6px;margin:8px 0"><div style="flex:1;height:1px;background:#222"></div><span style="font-size:10px;color:${colors.textMuted};font-weight:600;letter-spacing:0.5px">TMDB</span><div style="flex:1;height:1px;background:#222"></div></div>
+     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px;font-size:11px;line-height:1.4;color:${colors.textSecondary}">
        <label for="nfe-tmdb-input">TMDB API Read Access Token (movie scene check)</label>
        <div style="display:flex;gap:4px;margin:5px 0">
          <input id="nfe-tmdb-input" type="password" autocomplete="off" placeholder="Paste token; blank clears it"
@@ -262,6 +309,9 @@ export function createPanel() {
        <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer" style="color:${colors.textSecondary}">Get a TMDB token</a> · Saved locally. Movie export/upload requires a successful check. Missing keywords do not prove scene absence.
        <div>This product uses the TMDB API but is not endorsed or certified by TMDB.</div>
      </div>
+     </details>
+     <div id="nfe-session-status" role="status" style="font-size:11px;color:#aaa;margin:8px 0;line-height:1.4"></div>
+     <div id="nfe-introdb-status" role="status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
      <button id="nfe-submit"
        style="width:100%;background:${providerColors.secondary};border:none;border-radius:8px;color:#fff;
               padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
@@ -547,9 +597,12 @@ export function showExportPreview(view) {
   };
   const approvedKeys = new Set();
   const approvalInputs = new Map();
+  let typeFilter = 'all';
+  const matchesFilter = item => typeFilter === 'all' || item.segment_type === typeFilter;
+  const exportSelection = () => (view.items || []).filter(matchesFilter);
   const candidates = () => {
     const allowed = new Set((view.rows || []).filter(row => row.status === 'NEW').map(row => uploadSegmentKey(row.canonical || row.item)));
-    return (view.mode === 'submit' ? (view.items || []) : (view.uploadItems || [])).filter(item => allowed.has(uploadSegmentKey(item)));
+    return (view.mode === 'submit' ? (view.items || []) : (view.uploadItems || [])).filter(item => matchesFilter(item) && allowed.has(uploadSegmentKey(item)));
   };
   const selected = () => candidates().filter(item => approvedKeys.has(uploadSegmentKey(item)));
   const approvalControl = (text, items) => {
@@ -571,14 +624,29 @@ export function showExportPreview(view) {
   };
   const update = next => {
     view = next;
-    const rows = view.rows || [];
-    summary.textContent = `${rows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${view.duplicateCount} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
+    const allRows = view.rows || [];
+    const rows = allRows.filter(row => matchesFilter(row.item));
+    summary.textContent = `${rows.length} of ${allRows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${rows.filter(row => row.status === 'In IntroDB').length} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
+    const filterLabel = document.createElement('label'), filter = document.createElement('select');
+    filterLabel.textContent = 'Segment filter: ';
+    filterLabel.style.cssText = 'display:block;margin-top:10px;font:12px Arial,sans-serif;';
+    filter.setAttribute('aria-label', 'Filter timestamps by segment type');
+    filter.style.cssText = 'background:#242424;color:#fff;border:1px solid #555;border-radius:5px;padding:6px;font:12px Arial,sans-serif;';
+    for (const [value, label] of [['all','All'],['intro','Intro'],['recap','Recap'],['outro','Outro'],['post-credits','Extra scenes']]) {
+      const option = document.createElement('option'); option.value = value;
+      option.textContent = `${label} (${allRows.filter(row => value === 'all' || row.item.segment_type === value).length})`;
+      filter.append(option);
+    }
+    filter.value = typeFilter;
+    filter.addEventListener('change', () => { typeFilter = filter.value; approvedKeys.clear(); update(view); summary.querySelector?.('select')?.focus(); });
+    filterLabel.append(filter, document.createTextNode(' · Export and approval apply to the visible type.'));
+    summary.append(filterLabel);
     preview.replaceChildren();
     approvalInputs.clear();
     const eligible = candidates();
     const eligibleKeys = new Set(eligible.map(uploadSegmentKey));
     for(const key of approvedKeys) if(!eligibleKeys.has(key)) approvedKeys.delete(key);
-    if(eligible.length) preview.append(approvalControl('Approve all eligible timestamps after video and IntroDB comparison', eligible));
+    if(eligible.length) preview.append(approvalControl('Approve all visible eligible timestamps after video and IntroDB comparison', eligible));
     const groups = new Set();
     for (const row of rows) {
       const item = row.item;
@@ -602,9 +670,15 @@ export function showExportPreview(view) {
       const canonicalEpisode = row.canonical?.episode;
       if (!movie && canonicalSeason != null && canonicalEpisode != null) meta.textContent += ` · TVDB S${canonicalSeason}E${canonicalEpisode}`;
       if (row.reason) meta.textContent += `\n${row.reason}`;
+      if (item._timing) {
+        const evidence = item._timing;
+        const divisor = evidence.unit === 'milliseconds' ? 1000 : 1;
+        meta.textContent += `\nSource: ${evidence.provider} / ${evidence.source} · raw ${evidence.raw_start ?? 'unknown'} → ${evidence.raw_end ?? 'unknown'} ${evidence.unit}`;
+        if (evidence.correction_sec) meta.textContent += `\nStart correction: ${evidence.correction_sec} s · original ${clock(evidence.raw_start / divisor)}`;
+      }
       meta.style.cssText = 'margin-top:4px; white-space:pre-line; color:#ddd; font:11px/1.5 ui-monospace,Consolas,monospace;';
       const currentRanges = row.existingSegments
-        ? row.existingSegments
+        ? row.existingSegments.filter(matchesFilter)
         : (row.existingRanges || []).map(range => ({ segment_type: item.segment_type, start_sec: range.startSec, end_sec: range.endSec }));
       const comparison = document.createElement('div');
       comparison.style.cssText = 'display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:9px;';
@@ -616,15 +690,22 @@ export function showExportPreview(view) {
       if(eligibleKeys.has(uploadSegmentKey(canonical)) && row.status !== 'In IntroDB' && row.status !== 'Unavailable') {
         entry.append(approvalControl('I checked this timestamp against the video and IntroDB and approve its upload', [canonical]));
       }
+      if (row.onChoose && !view.checking) {
+        const choose = document.createElement('button');
+        choose.textContent = 'Use this range after video review';
+        choose.style.cssText = cancel.style.cssText;
+        choose.addEventListener('click', () => { close(false); row.onChoose(); });
+        entry.append(choose);
+      }
       preview.append(entry);
     }
     confirm.hidden = typeof view.onConfirm !== 'function';
-    confirm.disabled = Boolean(view.checking || !(view.items || []).length || typeof view.onConfirm !== 'function' || (view.mode === 'submit' && !selected().length));
+    confirm.disabled = Boolean(view.checking || !exportSelection().length || typeof view.onConfirm !== 'function' || (view.mode === 'submit' && !selected().length));
     confirm.style.opacity = confirm.disabled ? '.45' : '1';
     confirm.style.cursor = confirm.disabled ? 'not-allowed' : 'pointer';
     confirm.textContent = view.checking
       ? 'Checking…'
-      : view.mode === 'submit' ? `Upload to IntroDB (${selected().length})` : `Download JSON (${view.fileCount})`;
+      : view.mode === 'submit' ? `Upload to IntroDB (${selected().length})` : `Download JSON (${exportSelection().length} timestamps)`;
     upload.hidden = typeof view.onUpload !== 'function';
     upload.disabled = Boolean(view.checking || !selected().length || !view.onUpload);
     upload.style.opacity = upload.disabled ? '.45' : '1';
@@ -648,14 +729,14 @@ export function showExportPreview(view) {
     if (event.key === 'Escape') { event.preventDefault(); close(); }
     if (event.key === 'Tab') {
       event.preventDefault();
-      const focusables = [...dialog.querySelectorAll('input,button')].filter(button => !button.hidden && !button.disabled);
+      const focusables = [...dialog.querySelectorAll('input,button,select')].filter(button => !button.hidden && !button.disabled);
       const currentIndex = focusables.indexOf(document.activeElement);
       focusables[(currentIndex + (event.shiftKey ? -1 : 1) + focusables.length) % focusables.length]?.focus();
     }
   });
   cancel.addEventListener('click', close);
   overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  confirm.addEventListener('click', () => { if (!confirm.disabled) { const onConfirm = view.onConfirm; close(false); onConfirm(selected()); } });
+  confirm.addEventListener('click', () => { if (!confirm.disabled) { const onConfirm = view.onConfirm; close(false); onConfirm(selected(), exportSelection()); } });
   upload.addEventListener('click', () => { if (!upload.disabled) { const onUpload = view.onUpload; close(false); onUpload(selected()); } });
   actions.append(cancel, confirm, upload);
   dialog.append(heading, summary, preview, actions);

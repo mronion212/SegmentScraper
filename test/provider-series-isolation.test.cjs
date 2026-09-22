@@ -84,6 +84,22 @@ function netflixPayload(id, title, episodeId) {
   };
 }
 
+test('Netflix retains changed markers with raw milliseconds and movie correction evidence', () => {
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus() {} });
+  const payload = netflixPayload(100, 'Alpha', 123);
+  netflix.process(payload);
+  payload.video.seasons[0].episodes[0].skipMarkers.intro.start = 2000;
+  netflix.process(payload);
+  netflix.process(payload);
+  assert.equal(netflix.state.allItems.length, 2);
+  assert.equal(netflix.state.allItems[1]._timing.raw_start, 2000);
+  netflix.process({ video: { id: 200, type: 'movie', title: 'Movie', creditsOffset: 5400, runtime: 5700 } });
+  const movie = netflix.state.allItems.at(-1);
+  assert.equal(movie.start_sec, 5394);
+  assert.equal(movie._timing.raw_start, 5400);
+  assert.equal(movie._timing.correction_sec, -6);
+});
+
 test('Netflix captures a late outro after an intro, including restored numeric IDs', () => {
   const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata');
   const payload = netflixPayload(100, 'Alpha', 123);
@@ -228,6 +244,17 @@ function videolandPayload(programId, programTitle, clipId, {
     },
   };
 }
+
+test('Videoland retains changed chapter boundaries and deduplicates repeats', () => {
+  const videoland = loadExtractor('src/providers/videoland/extractor.js', 'processVideolandLayout');
+  const payload = videolandPayload('program-a', 'Alpha', 'clip-a');
+  videoland.process(payload);
+  payload.content.itemContent.video.chapters[0].tcEnd = 13;
+  videoland.process(payload);
+  videoland.process(payload);
+  assert.equal(videoland.state.allItems.length, 2);
+  assert.equal(videoland.state.allItems[1]._timing.raw_end, 13);
+});
 
 test('Videoland tags timestamps and incremental catalogs with their own program id', () => {
   const videoland = loadExtractor('src/providers/videoland/extractor.js', 'processVideolandLayout');
