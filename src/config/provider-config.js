@@ -78,7 +78,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Series segments are fetched per episode. Movie credits are temporarily disabled while provider markers are verified.',
+    captureHint: 'Episode counts are scanned from the season lists. Open each episode to capture its timestamps. Movie credits are temporarily disabled.',
   },
   hbo: {
     name: 'HBO Max',
@@ -110,7 +110,7 @@ export const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Series segments are fetched per episode. Movie credits are temporarily disabled while provider markers are verified.',
+    captureHint: 'Episode counts are collected from the complete series catalogue. Open each episode to capture its timestamps. Movie credits are temporarily disabled while provider markers are verified.',
   },
   skyshowtime: {
     name: 'SkyShowtime',
@@ -137,12 +137,4 @@ export const PROVIDER_CONFIGS = {
  */
 export function getProviderConfig(providerName) {
   return PROVIDER_CONFIGS[providerName.toLowerCase()] || PROVIDER_CONFIGS.netflix;
-}
-
-/**
- * Get all provider names
- * @returns {string[]} - Array of provider names
- */
-export function getProviderNames() {
-  return Object.keys(PROVIDER_CONFIGS);
 }

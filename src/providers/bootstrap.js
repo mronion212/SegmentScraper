@@ -337,11 +337,6 @@ export function recordExtractedSegments(items, providerName = activeProviderName
   toast(`+${items.length} timestamps captured · total: ${state.allItems.length}`);
 }
 
-export function isAlreadyInIntroDB(item) {
-  const key = getItemCacheKey(item);
-  return hasExistingSegment(state.dedupCacheV2[key], item);
-}
-
 function hasExistingSegment(existing, item) {
   if (acceptedUploadKeys.has(uploadSegmentKey(item))) return true;
   if (!existing) return false;
@@ -411,6 +406,7 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.m
   const items = movieItems.slice();
   let unreliableSkipped = 0;
   let specialSegmentsExcluded = 0;
+  const unavailableReasons = new Map();
   const reasonLabels = {
     genericTitle: 'generic title',
     missingTitle: 'missing title',
@@ -429,6 +425,9 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.m
   for (const seriesItems of seriesGroups.values()) {
     const imdbId = seriesItems[0].imdb_id;
     const showId = getItemShowId(seriesItems[0]);
+    if (seriesItems[0]._timing?.source !== 'manual' && showId) {
+      await state.providerCatalogLoads?.get(showId)?.promise;
+    }
     const catalog = seriesItems[0]._timing?.source === 'manual'
       ? seriesItems.map(item => ({ season: item.season, episode: item.episode, title: item._episodeTitle }))
       : showId
@@ -438,6 +437,8 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.m
     const stats = mapped.stats;
     if (!mapped.success) {
       unreliableSkipped += seriesItems.length;
+      const reason = `TVDB mapping blocked${stats ? ` (provider ${stats.providerRegular}, TVDB ${stats.tvdbRegular})` : ''}: ${mapped.reason}`;
+      for (const item of seriesItems) unavailableReasons.set(item, reason);
       const counts = stats ? ` Provider regular: ${stats.providerRegular}; TVDB regular: ${stats.tvdbRegular}; provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}.` : '';
       const titleCounts = stats ? ` Regular episodes matched: ${stats.regularEpisodesMatched ?? 0}; skipped: ${stats.regularEpisodesSkipped ?? stats.providerRegular}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}.` : '';
       console.warn(`[NFE-TVDB] Skipping series ${imdbId} from ${action}: ${mapped.reason}.${counts}${titleCounts}`);
@@ -446,8 +447,8 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.m
 
     specialSegmentsExcluded += stats?.capturedSpecialsExcluded || 0;
     unreliableSkipped += stats?.capturedRegularSegmentsSkipped || 0;
-    if (mapped.method === 'order') {
-      console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts match (${stats.providerRegular}); mapped by TVDB order. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
+    if (mapped.method === 'order' || mapped.method === 'released-order') {
+      console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts match (${stats.providerRegular}); mapped by TVDB order.${stats.tvdbFutureExcluded ? ` Future episodes excluded: ${stats.tvdbFutureExcluded}.` : ''}${stats.tvdbUndatedExcluded ? ` Undated episodes absent from provider excluded: ${stats.tvdbUndatedExcluded}.` : ''} Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
     } else if (mapped.method === 'title') {
       console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts differ (provider ${stats.providerRegular}, TVDB ${stats.tvdbRegular}); retained reliable exact normalized one-to-one title mappings. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
     } else if (mapped.method === 'absolute-title') {
@@ -467,6 +468,7 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.m
     pendingSkipped: pendingItems.length,
     unreliableSkipped,
     specialSegmentsExcluded,
+    unavailableReasons,
   };
 }
 
@@ -554,7 +556,7 @@ async function prepareJSONExport() {
     for (const row of view.rows) {
       row.status = 'Unavailable';
       row.reason = !row.item.imdb_id || row.item.imdb_id === 'IMDB_PENDING'
-        ? 'Missing IMDb ID' : 'No reliable TVDB mapping / excluded special';
+        ? 'Missing IMDb ID' : mapped.unavailableReasons.get(row.item) || 'No reliable TVDB mapping / excluded special';
     }
     for (const item of mappedItems) {
       const row = view.rows[item[overviewSource]];
@@ -579,12 +581,14 @@ async function prepareJSONExport() {
         return;
       }
       if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-        toast(`All mapped segments have invalid durations or unsupported movie types; nothing was exported.`);
+        view.message = 'All mapped segments have invalid durations or unsupported movie types; nothing was exported.';
+        toast(view.message);
         return;
       }
       const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
       const noMappingMessage = 'No series has a reliable TVDB episode mapping; nothing was exported.';
-      toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
+      view.message = onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage;
+      toast(view.message);
       return;
     }
 
@@ -727,7 +731,9 @@ async function prepareJSONExport() {
     }
     view.message = view.items.length
       ? 'Only verified NEW timestamps are included in the JSON download. Use Upload to IntroDB to submit the reviewed scraper ranges directly.'
-      : 'No eligible new timestamps. Exact duplicates cannot be uploaded again. ' + (view.message.includes('Checking') ? '' : view.message);
+      : (view.rows.some(row => row.status === 'In IntroDB')
+        ? 'No eligible new timestamps. Exact duplicates cannot be uploaded again. '
+        : 'Validation blocked export. Your captured timestamps are retained. ') + (view.message.includes('Checking') ? '' : view.message);
     refresh?.(view);
   }
 }

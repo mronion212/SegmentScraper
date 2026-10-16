@@ -3,7 +3,7 @@ import { createCore } from './shared-core.mjs';
 
 const BASE = 'https://api.introdb.app';
 const types = ['intro', 'recap', 'outro', 'post-credits'];
-const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries, sameIntrodbRange, timestampRangeIssue, assessTimestampCandidates, timestampEvidence } = createCore({request:()=>{}});
+const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries, sameIntrodbRange, timestampRangeIssue, assessTimestampCandidates, timestampEvidence, imdbSearchQueries, filterImdbTitleResults } = createCore({request:()=>{}});
 export async function jsonRequest(url, options = {}, fetcher = fetch) {
   let response;
   try { response = await fetcher(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) }); }
@@ -77,9 +77,12 @@ export function createUploadService({ fetcher = fetch, adminCode = process.env.S
   async function lookup(query, mediaType) {
     const q = String(query || '').trim();
     if (!q || q.length > 200) throw new Error('Enter a title or IMDb ID.');
-    const data = await jsonRequest(`https://v3.sg.media-imdb.com/suggestion/x/${encodeURIComponent(q)}.json`, {}, fetcher);
-    const allowed = mediaType === 'movie' ? ['movie','tvmovie','videomovie','featurefilm','film','short','tvshort'] : ['tvseries','tvminiseries'];
-    return (data.d || []).filter(r => allowed.includes(String(r.qid).toLowerCase())).map(r => ({ id:r.id, title:r.l, year:r.y, type:r.qid }));
+    for (const [index, title] of imdbSearchQueries(q, {mediaType}).entries()) {
+      const data = await jsonRequest(`https://v3.sg.media-imdb.com/suggestion/x/${encodeURIComponent(title)}.json`, {}, fetcher);
+      const results = filterImdbTitleResults(data.d, mediaType, index > 0 ? title : '');
+      if (results.length) return results.map(r => ({ id:r.id, title:r.l, year:r.y, type:r.qid }));
+    }
+    return [];
   }
   function check(job, draft) {
     if (busy) throw new Error('An upload or check is already running.');

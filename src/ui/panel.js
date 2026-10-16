@@ -106,6 +106,7 @@ export function createPanel() {
   }
   const { colors: providerColors, branding, infoAccent, nameColor } = config;
   const colors = PANEL_COLORS;
+  const runningVersion = typeof SEGMENTSCRAPER_VERSION === 'string' ? SEGMENTSCRAPER_VERSION : state.currentVersion || 'development';
   
   if (document.getElementById('nfe-panel')) {
     console.log('[NFE] Panel already exists');
@@ -166,7 +167,12 @@ export function createPanel() {
       }
       #nfe-panel button, #nfe-panel input { min-height:0; }
       #nfe-panel :focus-visible { outline:2px solid white; outline-offset:2px; }
-      #nfe-panel summary { cursor:pointer; padding:8px 0; font-size:12px; font-weight:700; }
+      #nfe-panel details { display:block!important; visibility:visible!important; }
+      #nfe-panel details:not([open]) > :not(summary) { display:none!important; }
+      #nfe-panel summary { display:flex!important; visibility:visible!important; align-items:center; gap:6px; cursor:pointer; padding:8px 0; font-size:12px; font-weight:700; color:${colors.text}; list-style:none!important; }
+      #nfe-panel summary::-webkit-details-marker { display:none; }
+      #nfe-panel summary::before { content:'▸'; display:inline-block!important; }
+      #nfe-panel details[open] > summary::before { content:'▾'; }
       #nfe-manual { background:${colors.panelBg}; border-radius:9px; padding:4px 10px 10px; margin-bottom:10px; }
       #nfe-manual label { display:block; font-size:11px; margin:7px 0; color:${colors.textSecondary}; }
       #nfe-manual input:not([type="checkbox"]), #nfe-manual select { width:100%; min-width:0; margin-top:4px; padding:6px; background:#242424; color:#fff; border:1px solid #444; border-radius:5px; font:12px Arial,sans-serif; }
@@ -181,6 +187,7 @@ export function createPanel() {
         onmouseenter="this.style.color='${colors.text}'" onmouseleave="this.style.color='${colors.textMuted}'">✕</button>
     </div>
 
+    <div id="nfe-running-version" style="font-size:10px;color:${colors.textMuted};margin-bottom:8px">Running version: v${runningVersion}</div>
     <div id="nfe-title-display" style="color:${colors.textSecondary};font-size:11px;margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:13px"></div>
 
     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
@@ -217,7 +224,7 @@ export function createPanel() {
       </div>
     </div>
 
-    <details id="nfe-manual" open><summary>Mark timestamps from video</summary>
+    <details id="nfe-manual"><summary>Mark timestamps from video</summary>
       <div style="font-size:11px;line-height:1.4;color:${colors.textSecondary}">Confirm the IMDb title above and the playing episode below. Each mark pauses the video.</div>
       <div style="display:flex;gap:6px">
         <label style="flex:1">Media<select id="nfe-manual-media"><option value="tv" ${state.mediaType === 'movie' ? '' : 'selected'}>TV episode</option><option value="movie" ${state.mediaType === 'movie' ? 'selected' : ''}>Movie</option></select></label>
@@ -473,14 +480,6 @@ export function updatePanelTitle() {
 export function updateImdbInput() {
   const inp = document.getElementById('nfe-imdb-input');
   if (inp) inp.value = state.imdbId || '';
-}
-
-/**
- * Update the API key input field with current API key
- */
-export function updateApikeyInput() {
-  const inp = document.getElementById('nfe-apikey-input');
-  if (inp) inp.value = '';
 }
 
 /**

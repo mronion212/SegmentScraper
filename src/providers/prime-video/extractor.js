@@ -6,6 +6,15 @@ import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { recordProviderEpisode } from '../../core/tvdb.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
 
+/** A visible player window (for example E7–E9) is not a full season catalogue. */
+function isPrimeVideoSeasonCatalogComplete(episodes, expectedCount) {
+  const numbers = new Set(episodes.map(episode => Number(episode.episode)));
+  const last = Math.max(0, ...numbers);
+  return numbers.size > 0 && last <= 1000 &&
+    [...numbers].every(number => Number.isInteger(number) && number >= 1) &&
+    numbers.size === last && (!Number.isInteger(expectedCount) || numbers.size >= expectedCount);
+}
+
 const PRIME_VIDEO_METADATA_URL_PATTERN = /getvodplaybackresources/i;
 const PRIME_VIDEO_ID_PATTERN = /^(?:[A-Z0-9]{9,12}|amzn1\.dv\.gti\.[a-f0-9-]{20,})$/i;
 const PRIME_VIDEO_CARD_SELECTOR = '[data-testid="episode-list-item"], li[id^="av-ep-episode-"]';
@@ -108,6 +117,9 @@ function ensurePrimeVideoState() {
   if (!(state.primeVideoMovieRuntimeByTitleId instanceof Map)) state.primeVideoMovieRuntimeByTitleId = new Map();
   if (!(state.primeVideoMovieDurationPolls instanceof Map)) state.primeVideoMovieDurationPolls = new Map();
   if (!(state.primeVideoFetchedSeasonCatalogUrls instanceof Set)) state.primeVideoFetchedSeasonCatalogUrls = new Set();
+  if (!(state.primeVideoSeasonCatalogRequests instanceof Map)) state.primeVideoSeasonCatalogRequests = new Map();
+  if (!(state.primeVideoSeasonEpisodeCounts instanceof Map)) state.primeVideoSeasonEpisodeCounts = new Map();
+  if (!(state.primeVideoSeasonCatalogRetryAfter instanceof Map)) state.primeVideoSeasonCatalogRetryAfter = new Map();
   if (!(state.primeVideoPollingTitleIds instanceof Set)) state.primeVideoPollingTitleIds = new Set();
   if (!(state.primeVideoPendingOutroTitleIds instanceof Set)) state.primeVideoPendingOutroTitleIds = new Set();
   if (!(state.primeVideoSegmentBatches instanceof Map)) state.primeVideoSegmentBatches = new Map();
@@ -451,10 +463,14 @@ function readPrimeVideoPlayerSnapshot() {
   return { isPlayerActive, season, episode, title: document.title, episodeTitle };
 }
 
-function updatePrimeVideoTitle(rawTitle) {
+function cleanPrimeVideoSeriesTitle(rawTitle) {
   const cleaned = rawTitle.replace(/^Prime Video[:\-]\s*/i, '').trim();
   const seasonMatch = cleaned.match(/\s*(?:-|–)?\s*(?:S|SEASON|SEIZOEN|SAISON|STAFFEL|TEMPORADA|STAGIONE)\s*\d+\s*$/i);
-  const title = seasonMatch ? cleaned.slice(0, seasonMatch.index).trim() : cleaned;
+  return seasonMatch ? cleaned.slice(0, seasonMatch.index).trim() : cleaned;
+}
+
+function updatePrimeVideoTitle(rawTitle) {
+  const title = cleanPrimeVideoSeriesTitle(rawTitle);
   handleDetectedShow({ title, showId: title });
   return title;
 }
@@ -635,13 +651,19 @@ export function rememberPrimeVideoEpisodeSelection(card, root = document) {
  * Cache them up front because the player overlay no longer reliably renders
  * the old atvwebplayersdk episode-info element.
  */
-export function scanPrimeVideoEpisodeCatalog(root = document) {
+export function scanPrimeVideoEpisodeCatalog(root = document, options = {}) {
   ensurePrimeVideoState();
   const season = readPrimeVideoSelectedSeason(root);
   const seriesTitle = readPrimeVideoSeriesTitle(root);
   if (season == null || !seriesTitle) return 0;
 
-  const showId = updatePrimeVideoTitle(seriesTitle);
+  const showId = cleanPrimeVideoSeriesTitle(seriesTitle);
+  if ((options.expectedShowId && options.expectedShowId !== showId) ||
+      (options.expectedSeason != null && options.expectedSeason !== season)) return 0;
+  if (options.detectShow !== false) updatePrimeVideoTitle(seriesTitle);
+  const countText = String(root.querySelector?.('#tab-content-episodes')?.textContent || '').trim();
+  const declaredCount = countText.match(/^(\d+)\s+(?:episodes?|afleveringen|folgen|episodios?|episodi)\b/i);
+  if (declaredCount) state.primeVideoSeasonEpisodeCounts.set(`${showId}|${season}`, Number(declaredCount[1]));
   const cards = root.querySelectorAll?.(PRIME_VIDEO_CARD_SELECTOR) || [];
   let seasons = state.primeVideoCatalogByShowId.get(showId);
   if (!seasons) {
@@ -701,46 +723,53 @@ export async function preloadPrimeVideoSeasonCatalogs(root = document, options =
   ensurePrimeVideoState();
   const baseUrl = root.location?.href || (typeof location !== 'undefined' ? location.href : '');
   if (!baseUrl) return 0;
-  const currentDetailId = readPrimeVideoDetailId(baseUrl);
+  scanPrimeVideoEpisodeCatalog(root);
+  const showId = state.showId;
+  const requestCache = state.primeVideoSeasonCatalogRequests;
   const links = root.querySelectorAll?.('a[href*="atv_dp_season_select_s"]') || [];
   const fetchImpl = options.fetchImpl || ((...args) => fetch(...args));
   const parseHtml = options.parseHtml || (html => new DOMParser().parseFromString(html, 'text/html'));
-  let total = 0;
-
-  await Promise.all([...links].map(async link => {
+  const urls = new Map();
+  for (const link of links) {
     const href = link.getAttribute?.('href') || '';
-    if (!href) return;
-    let url;
+    if (!href) continue;
     try {
-      url = new URL(href, baseUrl);
-      if (url.origin !== new URL(baseUrl).origin) return;
-    } catch (_) {
-      return;
-    }
-
-    const urlKey = url.href;
-    if (state.primeVideoFetchedSeasonCatalogUrls.has(urlKey)) return;
-    state.primeVideoFetchedSeasonCatalogUrls.add(urlKey);
-    if (readPrimeVideoDetailId(urlKey) === currentDetailId) return;
-
+      const url = new URL(href, baseUrl);
+      const season = Number(url.searchParams.get('ref_')?.match(/^atv_dp_season_select_s(\d+)$/)?.[1]);
+      if (url.origin !== new URL(baseUrl).origin || !readPrimeVideoDetailId(url.href) || !Number.isInteger(season) || season < 1) continue;
+      urls.set(url.href, season);
+    } catch (_) {}
+  }
+  const results = await Promise.all([...urls].map(async ([urlKey, season]) => {
     try {
-      const response = await fetchImpl(urlKey, { credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
-      if (!response?.ok) throw new Error(`HTTP ${response?.status || 'error'}`);
-      const seasonDocument = parseHtml(await response.text());
-      const found = scanPrimeVideoEpisodeCatalog(seasonDocument);
-      total += found;
-      if (found) {
-        logPrimeVideo('Preloaded Prime Video season catalogue:', {
-          url: urlKey,
-          episodes: found,
-        });
-      }
+      // Await an automatic preload already in progress instead of proceeding
+      // with the player's truncated list. Include the currently selected season.
+      if (requestCache.has(urlKey)) return await requestCache.get(urlKey);
+      if (state.primeVideoFetchedSeasonCatalogUrls.has(urlKey)) return 0;
+      if (Date.now() < (state.primeVideoSeasonCatalogRetryAfter.get(urlKey) || 0)) return 0;
+      const pending = (async () => {
+        const response = await fetchImpl(urlKey, { credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
+        if (!response?.ok) throw new Error(`HTTP ${response?.status || 'error'}`);
+        const seasonDocument = parseHtml(await response.text());
+        if (state.showId !== showId || state.primeVideoSeasonCatalogRequests !== requestCache) return 0;
+        const found = scanPrimeVideoEpisodeCatalog(seasonDocument, { detectShow: false, expectedShowId: showId, expectedSeason: season });
+        if (!found) throw new Error('Prime returned no matching season catalogue.');
+        const snapshots = [...state.primeVideoCatalogByShowId.get(showId)?.get(season)?.values() || []];
+        if (isPrimeVideoSeasonCatalogComplete(snapshots, state.primeVideoSeasonEpisodeCounts.get(`${showId}|${season}`))) state.primeVideoFetchedSeasonCatalogUrls.add(urlKey);
+        else state.primeVideoSeasonCatalogRetryAfter.set(urlKey, Date.now() + 60000);
+        logPrimeVideo('Preloaded Prime Video season catalogue:', { season, episodes: found });
+        return found;
+      })();
+      requestCache.set(urlKey, pending);
+      try { return await pending; }
+      finally { requestCache.delete(urlKey); }
     } catch (error) {
-      state.primeVideoFetchedSeasonCatalogUrls.delete(urlKey);
-      console.warn('[PVE] Could not preload season catalogue:', urlKey, error);
+      state.primeVideoSeasonCatalogRetryAfter.set(urlKey, Date.now() + 60000);
+      console.warn('[PVE] Could not preload season catalogue:', error.message);
+      return 0;
     }
   }));
-  return total;
+  return results.reduce((total, count) => total + count, 0);
 }
 
 function findPrimeVideoEpisodeCollision(titleId, showId, season, episode) {

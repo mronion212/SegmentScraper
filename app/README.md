@@ -6,7 +6,7 @@ This is an experimental alpha release. Features, review flows and desktop storag
 
 ## Install and use
 
-Run `dist/SegmentScraper-Desktop-1.12.6-x64-Setup.exe`, or the Portable EXE. The application is labeled **Desktop Alpha 0.1**. ffprobe and FFmpeg are bundled.
+Run `dist/SegmentScraper-Desktop-1.12.7-x64-Setup.exe`, or the Portable EXE. The application is labeled **Desktop Alpha 0.1**. ffprobe and FFmpeg are bundled.
 
 1. Choose local files/a season folder, or connect the same TorBox account used in Nuvio. Torrents, Usenet and web downloads are supported. Real-Debrid supports existing torrents. No content is added to TorBox.
 2. Inspect directly from your provider, or download and inspect. Remote inspection uses bandwidth and may read substantial data. Completed downloads remain on disk.

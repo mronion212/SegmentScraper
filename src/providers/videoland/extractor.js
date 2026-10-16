@@ -8,11 +8,13 @@ import { splitCreditRange } from '../../normalization/segment-mapper.js';
 import { handleDetectedShow, recordExtractedSegments } from '../bootstrap.js';
 import { recordProviderEpisode } from '../../core/tvdb.js';
 import { logCapturedTimestamps } from '../timestamp-logger.js';
+import { extractVideolandEpisodeCatalog, loadVideolandEpisodeCatalog } from '../../core/videoland.js';
 
 const VIDEOLAND_LAYOUT_URL_MATCH = /\/layout(\?|$)/i;
 
 function ensureVideolandState() {
   if (!(state.clipMap instanceof Map)) state.clipMap = new Map();
+  if (!(state.providerCatalogLoads instanceof Map)) state.providerCatalogLoads = new Map();
   if (state.currentSeason == null) state.currentSeason = 1;
   if (state.currentEpisode == null) state.currentEpisode = 1;
 }
@@ -42,12 +44,15 @@ function extractVideolandRootMeta(json) {
     season: coerceVideolandNumber(video?.season ?? entity?.season ?? json?.season),
     episode: coerceVideolandNumber(video?.episode ?? entity?.episode ?? json?.episode),
     duration: coerceVideolandNumber(video?.duration ?? entity?.duration ?? json?.duration),
-    programId: parent?.id != null
+    programId: String(entity?.type || '').toLowerCase() === 'program' && entity?.id != null
+      ? String(entity.id)
+      : parent?.id != null
       ? String(parent.id)
       : (json?.programId ?? entity?.programId ?? entity?.seriesId) != null
         ? String(json?.programId ?? entity?.programId ?? entity?.seriesId)
         : null,
-    programTitle: parent?.name || json?.programTitle || json?.seriesTitle || null,
+    programTitle: parent?.name || json?.programTitle || json?.seriesTitle ||
+      (String(entity?.type || '').toLowerCase() === 'program' ? entity.name || entity.title : null) || null,
     episodeTitle: video?.name || video?.title || entity?.episodeTitle || entity?.episodeName || null,
     extraTitle: video?.extraTitle || entity?.extraTitle || null,
   };
@@ -150,6 +155,16 @@ export function processVideolandLayout(json) {
   } catch (error) {
     console.error('[VLE] Failed to traverse layout JSON:', error);
     return;
+  }
+  if (rootMeta.programId && rootMeta.programTitle && rootMeta.mediaType !== 'movie') {
+    const catalog = extractVideolandEpisodeCatalog(json, rootMeta.programId);
+    if (catalog.length) {
+      const showId = updateVideolandTitle(rootMeta.programTitle, rootMeta.programId);
+      for (const entry of catalog) recordProviderEpisode(entry, showId);
+      // A series page can include chapter metadata in recommendation cards.
+      // Only episode playback metadata may supply timestamp candidates.
+      if (rootMeta.season == null || rootMeta.episode == null) return;
+    }
   }
   if (!videoItems.length) return;
 
@@ -295,6 +310,60 @@ export function processVideolandLayout(json) {
   recordExtractedSegments(extractedItems);
 }
 
+/** Catalogue requests keep authentication in memory and never capture other videos' chapters. */
+export function preloadVideolandEpisodeCatalog(json, context, fetchImpl) {
+  ensureVideolandState();
+  const meta = extractVideolandRootMeta(json);
+  try {
+    const program = new URL(context.url).pathname.match(/\/program\/([^/]+)\/layout$/);
+    if (program) meta.programId = decodeURIComponent(program[1]);
+  } catch (_) {}
+  if (meta.mediaType === 'movie' || !meta.programId) return Promise.resolve();
+  const showId = String(meta.programId);
+  const loads = state.providerCatalogLoads;
+  const previous = loads.get(showId);
+  if (previous && (!previous.error || Date.now() < previous.retryAt)) return previous.promise;
+  const load = { promise: null, error: null, retryAt: 0 };
+  const headers = { ...(context.headers || {}) };
+  const locationKey = Object.keys(headers).find(key => key.toLowerCase() === 'x-location');
+  if (locationKey) {
+    try {
+      const page = new URL(headers[locationKey]);
+      if (page.protocol === 'https:' && /(^|\.)videoland\.com$/.test(page.hostname)) {
+        const parent = json?.seo?.parent || json?.parent;
+        page.pathname = parent?.seo ? `/${parent.seo}-p_${showId}` : '/';
+        page.search = ''; page.hash = '';
+        headers[locationKey] = page.href;
+      }
+    } catch (_) {}
+  }
+  load.promise = loadVideolandEpisodeCatalog({ layout: json, url: context.url, programId: showId,
+    request: async url => {
+      const response = await fetchImpl(url, { method: 'GET', headers, credentials: context.credentials || 'include', signal: AbortSignal.timeout(15000) });
+      if (!response.ok) {
+        const error = new Error(`Videoland catalogue request failed (HTTP ${response.status}).`);
+        error.status = response.status;
+        throw error;
+      }
+      return response.json();
+    },
+  }).then(episodes => {
+    // A clear/reload invalidates outstanding requests. A series switch does not
+    // attach the previous series' episodes to the newly active programme.
+    if (state.providerCatalogLoads !== loads) return;
+    for (const entry of episodes) recordProviderEpisode(entry, showId);
+    console.info('[VLE] Loaded programme episode catalogue:', { showId, episodes: episodes.length });
+  }).catch(error => {
+    load.error = error;
+    load.retryAt = Date.now() + 60000;
+    throw new Error(`Could not load the complete Videoland episode catalogue for ${meta.programTitle || 'programme'} (${showId}): ${error.message}`);
+  });
+  loads.set(showId, load);
+  // The mapping step also awaits this promise and reports failure before export.
+  load.promise.catch(error => console.warn('[VLE]', error.message));
+  return load.promise;
+}
+
 export function setupVideolandInterception() {
   ensureVideolandState();
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -303,8 +372,13 @@ export function setupVideolandInterception() {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     const responsePromise = originalFetch(input, init);
     if (VIDEOLAND_LAYOUT_URL_MATCH.test(url)) {
-      responsePromise.then(response => response.clone().json())
-        .then(processVideolandLayout)
+      responsePromise.then(async response => {
+        if (!response.ok) return;
+        const json = await response.clone().json();
+        processVideolandLayout(json);
+        const headers = Object.fromEntries(new Headers(init?.headers || input?.headers || {}).entries());
+        return preloadVideolandEpisodeCatalog(json, { url, headers, credentials: init?.credentials || input?.credentials || 'include' }, originalFetch);
+      })
         .catch(error => console.warn('[VLE] Failed to process fetch response:', error));
     }
     return responsePromise;
@@ -314,16 +388,25 @@ export function setupVideolandInterception() {
   function VideolandInterceptedXHR() {
     const xhr = new OriginalXHR();
     let url = '';
+    const headers = {};
+    const originalSetRequestHeader = xhr.setRequestHeader.bind(xhr);
+    xhr.setRequestHeader = function (name, value) { headers[name] = value; return originalSetRequestHeader(name, value); };
     const originalOpen = xhr.open.bind(xhr);
     const originalSend = xhr.send.bind(xhr);
     xhr.open = function (method, requestUrl, ...rest) {
+      for (const key of Object.keys(headers)) delete headers[key];
       url = requestUrl;
       return originalOpen(method, requestUrl, ...rest);
     };
     xhr.send = function (...args) {
       if (url && VIDEOLAND_LAYOUT_URL_MATCH.test(url)) {
         xhr.addEventListener('load', () => {
-          try { processVideolandLayout(JSON.parse(xhr.responseText)); }
+          try {
+            if (xhr.status < 200 || xhr.status >= 300) return;
+            const json = JSON.parse(xhr.responseText);
+            processVideolandLayout(json);
+            preloadVideolandEpisodeCatalog(json, { url: String(url), headers: { ...headers }, credentials: xhr.withCredentials ? 'include' : 'same-origin' }, originalFetch);
+          }
           catch (error) { console.error('[VLE] Failed to process XHR response:', error); }
         });
       }

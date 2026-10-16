@@ -142,13 +142,3 @@ export function createNormalizedSegment({
     end_sec: endSec,
   };
 }
-
-/**
- * Get all known segment types for a provider
- * @param {string} providerName - The provider name
- * @returns {string[]} - Array of normalized segment types
- */
-export function getProviderSegmentTypes(providerName) {
-  const mappings = PROVIDER_MAPPINGS[providerName.toLowerCase()] || {};
-  return [...new Set(Object.values(mappings))];
-}

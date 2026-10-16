@@ -6,7 +6,7 @@ const vm = require('node:vm');
 
 const plain = value => JSON.parse(JSON.stringify(value));
 
-function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
+function loadPrimeVideoExtractor(document, { deferTimers = false, playerWindow = null } = {}) {
   const state = {
     allItems: [],
     imdbId: '',
@@ -27,10 +27,13 @@ function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
   ].join('\n')
     .replace(/^\s*import\s+[^;]+;?\s*$/gm, '')
     .replace(/\bexport\s+(?=(?:async\s+)?function\b|const\b|let\b|var\b|class\b)/g, '');
-  source += '\nglobalThis.primeExports = { extractPrimeVideoTitleId, processPrimeVideoMetadata, readPrimeVideoPlayerSnapshot, rememberPrimeVideoEpisodeSelection, scanPrimeVideoEpisodeCatalog, preloadPrimeVideoSeasonCatalogs };';
+  source += '\nglobalThis.primeExports = { extractPrimeVideoTitleId, processPrimeVideoMetadata, readPrimeVideoPlayerSnapshot, rememberPrimeVideoEpisodeSelection, scanPrimeVideoEpisodeCatalog, preloadPrimeVideoSeasonCatalogs, setupPrimeVideoInterception };';
 
   const contextValues = {
     AbortSignal,
+    AbortController,
+    URLSearchParams,
+    Headers,
     state,
     document,
     location: document.location,
@@ -65,9 +68,10 @@ function loadPrimeVideoExtractor(document, { deferTimers = false } = {}) {
     clearTimeout(id) {
       timers.delete(id);
     },
+    setInterval() {},
     URL,
   };
-  if (deferTimers) contextValues.window = {};
+  if (deferTimers || playerWindow) contextValues.window = playerWindow || {};
   const context = vm.createContext(contextValues);
   vm.runInContext(source, context, { filename: 'prime-video-extractor.js' });
   return {

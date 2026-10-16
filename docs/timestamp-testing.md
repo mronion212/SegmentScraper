@@ -1,6 +1,6 @@
-# Timestamp review branch
+# Timestamp review and catalogue testing
 
-Branch: `improve-timestamp-discovery`. These changes are for branch testing, not a published release. Build outputs retain the current release version. Install the local `SegmentScraper.user.js` from this checkout to test the branch; the existing remote update URLs still point at `main`.
+Release candidate: **1.12.7**, branch `release/1.12.7`. Install this checkout's generated userscript to test it; the update URLs continue to point at `main`. Follow the normal update path after publication, or manually replace higher-numbered local test builds once.
 
 ## Changes to test
 
@@ -49,3 +49,11 @@ Open `http://127.0.0.1:8096/manual` for the manual capture fixture. This uses a 
 8. Start a provider boundary preview and reset the marks before it finishes: playback must pause. In desktop, play a 1× review clip and immediately select **Set start here**: playback pauses, the source clock updates and the stored boundary must match it. Marking during a seek or before the clip loads must leave the previous boundary unchanged.
 
 Online movie exclusion for known extra scenes and the temporary non-Netflix movie gate remain in place, including manual captures. Online manual movie marking supports only an explicitly bounded outro. Desktop keeps its separate reviewed scene-safe outro/scene policy. Multiple real scenes stay in local reports. Additional network interception and a finer second analysis pass remain follow-up work. Local automated and simulated-player checks do not establish timing accuracy or player compatibility on a live streaming service.
+
+## Catalogue and lookup checks
+
+- Compare a provider season with nine available episodes against TVDB with a future or undated tenth entry. The extra TVDB row must not block an otherwise reliable available-count match. An episode already playable on the provider stays counted even with a later TVDB date.
+- For Prime, open an episode late in the season and verify the catalogue includes episodes outside the nearby player window and linked seasons. Capture timestamps through each episode; there is no season-fetch timestamp button.
+- For Videoland, verify the complete programme count, pagination completion and a long catalogue. Recommendations and trailers must not inflate the count. Export/upload must wait for catalogue loading and report failures instead of validating a partial list. Live confirmation of the latest pagination changes is still outstanding.
+- Search for **Gooische Vrouwen De Serie** and confirm the fallback resolves TV series **tt0477217**, excluding the films. Original exact-title results must remain preferred.
+- On every provider, verify manual marking is collapsed on first opening and can be expanded/collapsed.

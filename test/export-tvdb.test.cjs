@@ -4,6 +4,31 @@ const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+test('export waits for the complete provider catalogue before comparing TVDB counts', async () => {
+  let finish;
+  const promise=new Promise(resolve=>{finish=resolve;});
+  const bootstrap=loadBootstrap({stateOverrides:{showId:'series-a',allItems:[{_showId:'series-a',imdb_id:'tt123',season:1,episode:1,segment_type:'intro',start_sec:1,end_sec:10}],providerCatalogLoads:new Map([['series-a',{promise}]])}});
+  const pending=bootstrap.exportJSON();
+  await Promise.resolve();
+  assert.equal(bootstrap.calls.map.length,0);
+  bootstrap.state.providerEpisodesByShowId['series-a']=Array.from({length:9},(_,i)=>({season:1,episode:i+1,title:`Episode ${i+1}`}));
+  finish();await pending;
+  assert.equal(bootstrap.calls.map[0].catalog.length,9);
+});
+
+test('failed provider catalogue loading blocks export and upload before using partial counts', async () => {
+  const promise=Promise.reject(new Error('Could not load the complete Videoland episode catalogue: HTTP 401'));
+  promise.catch(()=>{});
+  const bootstrap=loadBootstrap({stateOverrides:{showId:'series-a',allItems:[{_showId:'series-a',imdb_id:'tt123',season:1,episode:1,segment_type:'intro',start_sec:1,end_sec:10}],providerCatalogLoads:new Map([['series-a',{promise}]])}});
+  await bootstrap.exportJSON();
+  await bootstrap.submitToIntroDB();
+  assert.equal(bootstrap.calls.map.length,0);
+  assert.equal(bootstrap.calls.submissions.length,0);
+  assert.equal(bootstrap.calls.downloadBodies?.length||0,0);
+  assert.equal(bootstrap.state.allItems.length,1);
+  assert.ok(bootstrap.calls.toasts.some(message=>message.includes('Videoland episode catalogue')));
+});
+
 test('type-filtered JSON exports only visible ranges and retains other captures', async () => {
   const base={_showId:'show',imdb_id:'tt1234567',season:1,episode:1,start_sec:0,end_sec:20};
   const bootstrap=loadBootstrap({stateOverrides:{allItems:[{...base,segment_type:'intro'},{...base,segment_type:'outro',start_sec:90,end_sec:100}]}});
@@ -21,6 +46,18 @@ test('manual episode mapping uses explicit titles separately from the provider c
   await bootstrap.exportJSON();
   assert.deepEqual(JSON.parse(JSON.stringify(bootstrap.calls.map[0].catalog)),[{season:1,episode:1,title:'Pilot'}]);
   assert.equal(bootstrap.calls.map[0].items[0]._tvdbRequireTitleMatch,true);
+});
+
+test('blocked TVDB mapping explains the actual count mismatch in the review instead of suggesting duplicates', async () => {
+  const bootstrap=loadBootstrap({mappingResult:{success:false,reason:'Additional TVDB episode(s): S4E10 (air date unknown)',stats:{providerRegular:36,tvdbRegular:37}}});
+  await bootstrap.exportJSON();
+  const view=bootstrap.calls.previews.at(-1);
+  assert.match(view.rows[0].reason,/provider 36, TVDB 37/);
+  assert.match(view.rows[0].reason,/S4E10 \(air date unknown\)/);
+  assert.match(view.message,/Validation blocked export/);
+  assert.doesNotMatch(view.message,/Exact duplicates/);
+  assert.equal(bootstrap.calls.downloadBodies?.length || 0,0);
+  assert.equal(bootstrap.state.allItems.length,2);
 });
 
 test('incomplete extra-scene evidence withholds a movie even without accepted scene boundaries', async () => {

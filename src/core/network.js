@@ -17,12 +17,27 @@ function getGmXhr() {
          (typeof GM !== 'undefined' && GM.xmlHttpRequest ? GM.xmlHttpRequest : null);
 }
 
-function filterImdbTitleResults(results, mediaType = 'tv') {
+function normalizeImdbSearchTitle(title) {
+  return String(title || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+export function imdbSearchQueries(title, { mediaType = 'tv' } = {}) {
+  const original = String(title || '').trim();
+  const queries = [original];
+  if (String(mediaType).toLowerCase() !== 'movie') {
+    const fallback = original.replace(/(?:\s+|\s*[-:–—]\s*)(?:de\s+serie|the\s+series)\s*$/i, '').trim();
+    if (fallback && fallback !== original) queries.push(fallback);
+  }
+  return queries;
+}
+
+export function filterImdbTitleResults(results, mediaType = 'tv', exactTitle = '') {
   const movieQids = new Set(['movie', 'tvmovie', 'videomovie', 'featurefilm', 'film', 'short', 'tvshort']);
   const allowedQids = String(mediaType).toLowerCase() === 'movie'
     ? movieQids
     : new Set(['tvseries', 'tvminiseries', 'tvshort', 'tvspecial']);
-  return (results || []).filter(result => allowedQids.has(String(result?.qid || '').toLowerCase()));
+  return (results || []).filter(result => allowedQids.has(String(result?.qid || '').toLowerCase()) &&
+    (!exactTitle || normalizeImdbSearchTitle(result?.l) === normalizeImdbSearchTitle(exactTitle)));
 }
 
 function chooseImdbTitleResult(results, title, year) {
@@ -43,8 +58,9 @@ function chooseImdbTitleResult(results, title, year) {
   return best;
 }
 
-function resolveImdbSearchResponse(data, title, year, mediaType) {
-  const results = filterImdbTitleResults(data?.d, mediaType);
+function resolveImdbSearchResponse(data, title, year, mediaType, exactTitle = false) {
+  const results = filterImdbTitleResults(data?.d, mediaType, exactTitle ? title : '')
+    .filter(result => !exactTitle || !year || String(result.y || '') === String(year));
   console.log(`[NFE] Filtered ${mediaType === 'movie' ? 'movie' : 'TV series'} results:`, results.length);
   if (!results.length) return { success: false, error: 'Not found on IMDb' };
 
@@ -66,6 +82,16 @@ function resolveImdbSearchResponse(data, title, year, mediaType) {
  * Search IMDb by title and return the best matching media ID.
  */
 export async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
+  const queries = imdbSearchQueries(title, { mediaType });
+  let result;
+  for (const [index, queryTitle] of queries.entries()) {
+    result = await searchImdbQuery(queryTitle, year, { mediaType, exactTitle: index > 0 });
+    if (result.success || result.error !== 'Not found on IMDb') return result;
+  }
+  return result;
+}
+
+async function searchImdbQuery(title, year, { mediaType, exactTitle }) {
   const query = encodeURIComponent(String(title || '').toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').trim());
   const url = `https://v3.sg.media-imdb.com/suggestion/x/${query}.json`;
   console.log('[NFE] IMDb search request URL:', url, 'for title:', title, 'year:', year);
@@ -86,9 +112,10 @@ export async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) 
         onload: (response) => {
           console.log('[NFE] IMDb search response status:', response.status, 'responseText length:', response.responseText?.length);
           try {
+            if (response.status !== 200) { resolve({ success: false, error: `IMDb returned HTTP ${response.status}` }); return; }
             const data = JSON.parse(response.responseText);
             console.log('[NFE] IMDb search response data:', data);
-            resolve(resolveImdbSearchResponse(data, title, year, mediaType));
+            resolve(resolveImdbSearchResponse(data, title, year, mediaType, exactTitle));
           } catch (parseError) {
             console.error('[NFE] IMDb response parse error:', parseError);
             resolve({ success: false, error: 'Failed to parse IMDb response' });
@@ -109,9 +136,10 @@ export async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) 
   console.log('[NFE] Using fetch fallback (may fail due to CORS)');
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) return { success: false, error: `IMDb returned HTTP ${response.status}` };
     const data = await response.json();
     console.log('[NFE] IMDb search response data:', data);
-    return resolveImdbSearchResponse(data, title, year, mediaType);
+    return resolveImdbSearchResponse(data, title, year, mediaType, exactTitle);
   } catch (error) {
     console.error('[NFE] Fetch fallback error:', error);
     return { success: false, error: 'Network error connecting to IMDb (CORS or network issue)' };

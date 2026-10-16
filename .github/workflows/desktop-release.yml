@@ -50,8 +50,9 @@ jobs:
             notes=(--notes-file "release-notes/${GITHUB_REF_NAME#v}.md")
           fi
           gh release create "$GITHUB_REF_NAME" \
+            SegmentScraper.user.js \
             dist/*-Setup.exe \
             dist/*-Portable.exe \
-            --title "SegmentScraper $GITHUB_REF_NAME — Desktop Alpha 0.1" \
+            --title "SegmentScraper $GITHUB_REF_NAME" \
             "${notes[@]}" \
             --generate-notes

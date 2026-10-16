@@ -2,21 +2,19 @@
 
 SegmentScraper extracts intro, recap, and outro timestamps from supported streaming services. It includes automatic IMDb lookup, JSON export, and IntroDB submission with duplicate filtering.
 
+## Version 1.12.7
+
+This update improves available-episode validation, complete Videoland catalogue collection, IMDb title lookup and timestamp review. Manual player marking starts collapsed on every provider. Prime timestamps are captured per opened episode; season-wide timestamp replay is not included.
+
+See the [changelog](CHANGELOG.md), [release notes](release-notes/1.12.7.md), [userscript usage](#usage) and [timestamp testing guide](docs/timestamp-testing.md). The generated userscript version and package version are both 1.12.7.
+
+Normal installations update from the existing main-branch URL. If you used a local test build numbered 1.12.8–1.12.14, manually install 1.12.7 once and reload provider tabs; automatic update managers do not downgrade higher local test versions.
+
 ## Desktop media app
 
-This branch includes a Windows desktop app with its own window, native file/folder pickers and bundled ffprobe. Connect the same TorBox account used in Nuvio to browse existing torrents, Usenet and webdownloads, inspect chapters directly from the provider or download whole season packs for local inspection. No magnet links are needed. Real-Debrid and already downloaded local files are also supported. Install it with the Setup EXE in `dist`, or use the portable EXE, or develop with `npm ci`, `npm run setup:media` and `npm run app`. See [the desktop guide](app/README.md) for build instructions and limitations.
+The Windows desktop app has its own window, native file/folder pickers and bundled FFmpeg/ffprobe. Connect TorBox or Real-Debrid to inspect existing provider items, or inspect downloaded files and season folders. It provides movie-ending analysis, short review clips, boundary editing, saved workspaces and an explicit review/upload workflow. See [the desktop guide](app/README.md) for installation and limitations.
 
-Desktop 1.10.0 adds an English review/upload workflow, IMDb identity lookup, shared TVDB/TMDB checks, duplicate filtering, visible validation progress, an audited admin override, and required desktop-update dialogs. Users must personally review all output against the video. The app follows the official IntroDB API at `api.introdb.app`.
-
-Desktop 1.11.0 adds automatic movie-ending analysis using FFmpeg, credit-text heuristics, a 12× overview and short boundary previews. It can submit a reviewed scene-safe outro and one mid-/post-credits scene. The online userscript captures Netflix movie outros, while movie credit capture for the other streaming providers is temporarily disabled until their markers are verified against playback. Multiple real scenes are preserved in local reports because IntroDB does not currently model them separately. Applicable future changes must be carried to both clients; shared code and CI checks enforce generated-code parity (see `AGENTS.md`).
-
-Userscript 1.12.6 contains the provider fixes, Netflix movie boundary correction, movie scene checks, completed-export cleanup, temporary non-Netflix movie-capture gate, and the side-by-side IntroDB review with direct upload approval. The generated userscript uses `@version 1.12.6`.
-
-Desktop Alpha 0.1 is an experimental test release based on the published 1.12.6 desktop build. Its review workflow, movie-ending analysis, uploads and local workspace are still under development; always review suggested boundaries before uploading.
-
-Desktop 1.12.1 reduces image processing before scaling, creates boundary clips on demand, and offers an optional last-15-minute scan with explicit coverage warnings. The default remains the last quarter. Provider 4K streams still require downloading and decoding the selected source window; scan speed and approximate time remaining are displayed.
-
-Desktop 1.12.0 adds saved workspaces and upload history, resumable inspection tasks, a single-player review timeline with boundary editing, WebM previews, and a shared decode pass for analysis and overview. Local analysis reuse verifies the source file; uploads always need fresh checks after restart.
+Desktop remains **Alpha 0.1**. The release version in installer filenames identifies its shared code version. Review every suggested boundary before uploading. Desktop may submit a reviewed scene-safe movie outro and one bounded scene; online capture retains its separate Netflix-only movie policy.
 
 ## Supported Services
 
@@ -31,7 +29,7 @@ SkyShowtime captures catalogue metadata automatically from page or worker networ
 
 Crunchyroll is temporarily disabled because extraction is unreliable.
 
-Every active provider logs each captured episode with readable timestamps and the exact raw start/end seconds. Netflix, Prime Video, Videoland, and SkyShowtime movies bypass TheTVDB and use their IMDb ID with movie metadata in JSON exports and IntroDB submissions.
+Every active provider logs each captured episode with readable timestamps and the exact raw start/end seconds. Movie candidates bypass TheTVDB and use their IMDb ID with movie metadata; the online movie-capture gate described above still applies.
 
 ## Features
 
@@ -52,6 +50,8 @@ Every active provider logs each captured episode with readable timestamps and th
 - Requires an explicit manual comparison approval before any IntroDB upload, so provider offsets such as Netflix timing differences cannot be accepted silently
 - Maps regular provider episodes to canonical TheTVDB season/episode numbers before JSON export or submission; movies bypass TheTVDB
 - Excludes provider specials and TheTVDB Season 0 from count checks and normal submission mapping
+- If provider and TVDB totals differ, excludes TVDB episodes with a valid future `aired` date when checking for an available-count match. With matching canonical numbering, extra TVDB rows with an empty/missing air date and no corresponding provider episode are excluded as undated placeholders. This counting policy does not establish their actual release status. Available provider episodes still count even if TVDB has no date. Episodes dated today count; malformed/conflicting dates do not excuse a mismatch. Desktop/manual subsets retain exact-title verification.
+- When matching canonical season/episode numbers reveal extra TVDB rows with missing dates, checks their individual episode records (at most 20, four requests at a time) before applying the counting rule. Failed mappings discard the cached list for retry, and the timestamp review displays the count mismatch and additional episode numbers instead of implying an IntroDB duplicate.
 - Uses one shared provider panel based on the Netflix layout
 - Checks GitHub for a newer release and blocks normal use until a confirmed update is installed
 - Lets compatible userscript managers update automatically through `@updateURL` and `@downloadURL`
@@ -71,7 +71,8 @@ SegmentScraper/
 |   |-- core/
 |   |   |-- state.js             # Shared state and cache management
 |   |   |-- network.js           # IMDb and IntroDB requests
-|   |   `-- tvdb.js              # TVDB authentication and canonical episode mapping
+|   |   |-- tvdb.js              # TVDB authentication and canonical episode mapping
+|   |   `-- videoland.js         # Programme catalogue parsing and pagination
 |   |-- ui/
 |   |   |-- panel.js             # Shared Netflix-based provider panel
 |   |   `-- button.js            # Shared player trigger button
@@ -141,6 +142,16 @@ Captured sessions are stored in browser session storage, separately per provider
 
 IntroDB errors and malformed responses are not cached as empty records. Export or submission stops when its duplicate check fails; use the same action again to retry. Requests made by SegmentScraper have timeouts, and duplicate checks for export/submission use batches of at most four. POST submissions are not automatically retried after an uncertain network result; a later submission checks IntroDB again first. The players' own network requests are left under provider control.
 
+### Episode catalogue validation
+
+IMDb lookup first searches the provider's original title. If no result of the requested media type exists, TV titles ending in “De Serie” or “The Series” are retried without that suffix. Fallback results must match the shortened title exactly and, for automatic lookup, the supplied year. Movie titles are preserved. The desktop lookup shares these query and result-filter rules and still requires manual identity selection.
+
+Prime scans season episode lists, including linked seasons. Videoland collects programme season blocks and follows both section and episode pagination; chapter metadata is not required for counting. Recommendation and trailer blocks are excluded. Episode pages are fetched in batches of eight, falling back to individual pages if a block rejects batching with a server error. Repeated contents with advancing cursors stop collection before a pagination loop can exhaust the request limit; errors identify the programme, season and cursor. Export and upload wait for Videoland catalogue loading; a failed catalogue request blocks validation instead of trusting a partial player window. Catalogue pagination follows the Bedrock layout/block model also observed by the [Videoland client](https://github.com/Nigel1992/Videoland-Kodi-Addon/blob/master/resources/lib/api.py).
+
+Both clients use the shared TVDB validation rules. On a total mismatch, additional future TVDB episodes and undated placeholders absent from matching provider numbering can be excluded. Episodes already listed as available by the provider remain counted even if TVDB has a later or unknown date. Malformed dates and conflicting metadata do not excuse mismatches.
+
+Prime timestamps are captured through ordinary episode playback. The experimental season timestamp fetch, request replay and diagnostic download have been removed. Videoland also captures chapters only from the active episode; catalogue collection does not copy timestamp ranges from other cards.
+
 ## Releasing an Update
 
 Every published change must have a higher semantic version in `package.json`. The bundler uses that single value for `@version` and the runtime version check. Never put the version in `@name` and do not change `@name` or `@namespace` between releases: Tampermonkey uses that stable identity to recognize existing installations.
@@ -153,7 +164,9 @@ npm run build
 npm test
 ```
 
-Use `minor` or `major` instead of `patch` when appropriate. Commit and push both `package.json` and the generated `SegmentScraper.user.js` to `main`; users only see the required-update screen after the newer generated userscript is available there.
+Use `minor` or `major` instead of `patch` when appropriate. Prepare a release branch with the package/lockfile, both generated clients, updated documentation and `release-notes/<version>.md`. Run `npm run check:desktop-core` and the tests, then open a pull request against `main`. Merge after CI succeeds; users see the required-update screen once the newer generated userscript is available on `main`.
+
+Tag the merged commit as `v<version>`. Pushing that tag triggers the Windows release workflow, which verifies the version, runs tests and builds the installers before publishing the release with the userscript, Setup EXE, Portable EXE and the prepared release notes. Keep the existing userscript name, namespace and update URLs stable. Never publish a tag from a release branch whose changes have not reached `main`.
 
 ## Usage
 
@@ -168,7 +181,7 @@ Use `minor` or `major` instead of `patch` when appropriate. Commit and push both
 
 At startup, SegmentScraper compares its installed semantic version with the `@version` in the userscript on the `main` branch. If GitHub confirms that a newer version exists, a non-dismissible update screen replaces the normal panel. The update link opens the raw userscript so Tampermonkey or Violentmonkey can install it. After installation, reload the streaming page. If GitHub is temporarily unreachable, the check fails open and the installed version remains usable.
 
-Before a JSON export or IntroDB submission, SegmentScraper compares regular-episode counts against TheTVDB. Equal counts map by order. When counts differ, every regular provider episode is checked for an exact normalized, one-to-one, non-generic title match. Reliable matches are retained and unmatched episodes are skipped; the series is skipped only when no reliable mappings exist. Specials remain outside this normal mapping, export, and submission flow.
+Before a JSON export or IntroDB submission, SegmentScraper compares regular-episode counts against TheTVDB. Equal counts map by order. If totals differ, it first checks for an available-count match by excluding additional future TVDB episodes and undated provider-absent placeholders with matching canonical numbering. Already available provider episodes remain counted even when TVDB has a later or unknown date. Otherwise, every regular provider episode is checked for an exact normalized, one-to-one, non-generic title match. Reliable matches are retained and unmatched episodes are skipped; the series is skipped only when no reliable mappings exist. Specials remain outside this normal mapping, export, and submission flow.
 
 Episode metadata provided by [TheTVDB](https://thetvdb.com/).
 
