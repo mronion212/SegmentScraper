@@ -1,10 +1,10 @@
 # SegmentScraper
 
-SegmentScraper extracts intro, recap, and outro timestamps from supported streaming services. It includes automatic IMDb lookup, JSON export, and IntroDB submission with duplicate filtering.
+SegmentScraper has two clients: a browser userscript that captures streaming-service timestamps, and a Windows desktop app that inspects local media or files from TorBox and Real-Debrid. Both provide IMDb lookup, timestamp review and IntroDB submission with duplicate filtering.
 
 ## Version 1.12.7
 
-This update improves available-episode validation, complete Videoland catalogue collection, IMDb title lookup and timestamp review. Manual player marking starts collapsed on every provider. Prime timestamps are captured per opened episode; season-wide timestamp replay is not included.
+The userscript update improves available-episode validation, complete Videoland catalogue collection, IMDb title lookup and timestamp review. Manual player marking starts collapsed on every streaming service. Prime timestamps are captured per opened episode. The desktop receives the applicable IMDb lookup and timestamp-review improvements for its own media sources.
 
 See the [changelog](CHANGELOG.md), [release notes](release-notes/1.12.7.md), [userscript usage](#usage) and [timestamp testing guide](docs/timestamp-testing.md). The generated userscript version and package version are both 1.12.7.
 
@@ -12,11 +12,13 @@ Normal installations update from the existing main-branch URL. If you used a loc
 
 ## Desktop media app
 
-The Windows desktop app has its own window, native file/folder pickers and bundled FFmpeg/ffprobe. Connect TorBox or Real-Debrid to inspect existing provider items, or inspect downloaded files and season folders. It provides movie-ending analysis, short review clips, boundary editing, saved workspaces and an explicit review/upload workflow. See [the desktop guide](app/README.md) for installation and limitations.
+The Windows desktop app has its own window, native file/folder pickers and bundled FFmpeg/ffprobe. Its media sources are local files/season folders, TorBox and Real-Debrid. It provides movie-ending analysis, short review clips, boundary editing, saved workspaces and an explicit review/upload workflow. See [the desktop guide](app/README.md) for installation and limitations.
 
-Desktop remains **Alpha 0.1**. The release version in installer filenames identifies its shared code version. Review every suggested boundary before uploading. Desktop may submit a reviewed scene-safe movie outro and one bounded scene; online capture retains its separate Netflix-only movie policy.
+Desktop remains **Alpha 0.1**. The release version in installer filenames identifies its shared code version. Review every suggested boundary before uploading. Desktop may submit a reviewed scene-safe movie outro and one bounded scene.
 
-## Supported Services
+## Userscript
+
+### Supported streaming services
 
 - Netflix
 - Prime Video
@@ -31,7 +33,7 @@ Crunchyroll is temporarily disabled because extraction is unreliable.
 
 Every active provider logs each captured episode with readable timestamps and the exact raw start/end seconds. Movie candidates bypass TheTVDB and use their IMDb ID with movie metadata; the online movie-capture gate described above still applies.
 
-## Features
+### Features
 
 - Provider-specific playback-control anchors with automatic insertion when controls appear or rerender
 - Fullscreen-aware panels, keyboard focus restoration, Escape to close, and collapsible API settings
@@ -107,11 +109,11 @@ SegmentScraper/
 
 ## Architecture
 
-The shared core handles state, IMDb lookup, IntroDB communication, export, duplicate filtering, and panel actions. Each active provider supplies only its detection, interception, extraction, and player-control integration.
+The clients share applicable IMDb lookup, TVDB mapping, timestamp validation and IntroDB rules from `src/core`. The userscript has streaming-service adapters for detection, interception, extraction and player controls. The desktop inspects its own media sources with FFmpeg/ffprobe; its workflow and UI are separate.
 
-Provider metadata is normalized into the common intro, recap, and outro format before it enters shared state. The Netflix panel is the visual source of truth, with sizing and native controls isolated from streaming-site CSS so Prime Video and Videoland render identically.
+In the userscript, streaming-service metadata is normalized into the common intro, recap, and outro format before it enters capture state. The Netflix panel is the visual source of truth, with sizing and native controls isolated from streaming-site CSS so Prime Video and Videoland render identically.
 
-## Adding a Provider
+## Adding a userscript provider
 
 1. Create `src/providers/{provider-name}/index.js`.
 2. Create `src/providers/{provider-name}/extractor.js`.

@@ -22,7 +22,7 @@
 - Applicable rules are shared with desktop; unused helpers and experimental Prime timestamp replay code are removed.
 - Release assets include the userscript and Windows Setup/Portable builds. Desktop remains Alpha 0.1.
 
-See [full release notes](release-notes/1.12.7.md) for validation, scope and local-test-build upgrade instructions.
+See [release notes](release-notes/1.12.7.md) for the features and bug fixes.
 
 ## Earlier updates
 
