@@ -7,6 +7,7 @@
 - Manual player marks and boundary previews, collapsed by default on every provider.
 - Segment-type filtering for timestamp review, export and upload approval in both clients.
 - Complete Videoland programme episode collection, including paginated season blocks.
+- Automatic GitHub Releases for every new version published to `main`, enforced by version and release-note checks.
 
 ### Fixed
 

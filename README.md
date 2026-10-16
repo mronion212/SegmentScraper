@@ -168,7 +168,9 @@ npm test
 
 Use `minor` or `major` instead of `patch` when appropriate. Prepare a release branch with the package/lockfile, both generated clients, updated documentation and `release-notes/<version>.md`. Run `npm run check:desktop-core` and the tests, then open a pull request against `main`. Merge after CI succeeds; users see the required-update screen once the newer generated userscript is available on `main`.
 
-Tag the merged commit as `v<version>`. Pushing that tag triggers the Windows release workflow, which verifies the version, runs tests and builds the installers before publishing the release with the userscript, Setup EXE, Portable EXE and the prepared release notes. Keep the existing userscript name, namespace and update URLs stable. Never publish a tag from a release branch whose changes have not reached `main`.
+Every update to `main` must increase the version and include release notes. CI verifies matching package/lockfile/userscript versions and rejects a main-targeted PR without a higher version. After merge, the main-branch release workflow automatically runs tests, builds the Windows installers, creates `v<version>` at that exact commit and publishes the release with the userscript, Setup EXE, Portable EXE and prepared notes. A separate manual tag push is no longer needed. Feature-branch pushes remain review work and do not publish a release.
+
+If the release build fails, fix the problem and rerun the workflow; `workflow_dispatch` on `main` also supports retrying the same commit. Existing published releases are not duplicated. Keep the userscript name, namespace and update URLs stable. Never publish a release from changes that have not reached `main`.
 
 ## Usage
 
