@@ -1,9 +1,10 @@
 /** Tab-scoped recovery across reloads. Credentials and network caches are excluded. */
 import { state } from './state.js';
+import { timestampRangeIssue } from './output-policy.js';
 
 let captureSessionKey = '';
 let captureSaveTimer = null;
-const CAPTURE_FIELDS = ['allItems', 'showTitle', 'mediaType', 'showId', 'showYear', 'imdbId', 'imdbIdsByShowId', 'providerEpisodes', 'providerEpisodesByShowId', 'interceptedCount'];
+const CAPTURE_FIELDS = ['allItems', 'knownMovieScenes', 'showTitle', 'mediaType', 'showId', 'showYear', 'imdbId', 'imdbIdsByShowId', 'providerEpisodes', 'providerEpisodesByShowId', 'interceptedCount'];
 
 export function saveCaptureSession() {
   if (!captureSessionKey) return;
@@ -30,7 +31,7 @@ export function restoreCaptureSession(providerName) {
   try {
     const saved = JSON.parse(sessionStorage.getItem(captureSessionKey) || 'null');
     if (saved?.version !== 1 || !Array.isArray(saved.data?.allItems) || !Array.isArray(saved.showIds)) return false;
-    if (!saved.data.allItems.every(item => item && typeof item === 'object' && Number.isFinite(Number(item.start_sec)) && Number.isFinite(Number(item.end_sec)))) return false;
+    if (!saved.data.allItems.every(item => item && typeof item === 'object' && !timestampRangeIssue(item))) return false;
     for (const key of CAPTURE_FIELDS) {
       if (Object.hasOwn(saved.data, key)) state[key] = saved.data[key];
     }

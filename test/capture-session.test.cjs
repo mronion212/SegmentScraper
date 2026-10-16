@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const test = require('node:test');
 
 function loadSession(storage = new Map()) {
-  const source = ['state.js', 'capture-session.js'].map(file => fs.readFileSync(path.join(__dirname, '../src/core', file), 'utf8')
+  const source = ['state.js', 'output-policy.js', 'capture-session.js'].map(file => fs.readFileSync(path.join(__dirname, '../src/core', file), 'utf8')
     .replace(/^import .*$/gm, '').replace(/^export /gm, '')).join('\n');
   const context = vm.createContext({
     setTimeout, clearTimeout,
@@ -47,12 +47,14 @@ test('movie capture recovery preserves media type and scene markers', () => {
   const first = loadSession();
   first.restoreCaptureSession('skyshowtime');
   first.state.mediaType = 'movie';
+  first.state.knownMovieScenes = [{showId:'movie',imdbId:'tt1234567'}];
   first.state.allItems = [{ media_type: 'movie', segment_type: 'post-credits', start_sec: 5400, end_sec: 5460 }];
   first.saveCaptureSession();
   const restored = loadSession(first.storage);
   assert.equal(restored.restoreCaptureSession('skyshowtime'), true);
   assert.equal(restored.state.mediaType, 'movie');
   assert.equal(restored.state.allItems[0].segment_type, 'post-credits');
+  assert.equal(restored.state.knownMovieScenes[0].showId, 'movie');
 });
 
 test('corrupt or unavailable storage does not prevent startup', () => {
@@ -62,4 +64,20 @@ test('corrupt or unavailable storage does not prevent startup', () => {
   assert.equal(unavailable.restoreCaptureSession('netflix'), false);
   assert.doesNotThrow(() => unavailable.saveCaptureSession());
   assert.equal(unavailable.state.sessionStorageError, true);
+});
+
+test('recovery preserves candidate evidence and choices but rejects coerced timestamp values', () => {
+  const first = loadSession();
+  first.restoreCaptureSession('netflix');
+  const original = { start_sec: 10, end_sec: 30, _timingReview: 'reviewed-set', _timing: { provider: 'netflix', raw_start: 16000, raw_end: 30000, correction_sec: -6 } };
+  first.state.allItems = [original, { start_sec: 12, end_sec: 30 }];
+  first.saveCaptureSession();
+  const restored = loadSession(first.storage);
+  assert.equal(restored.restoreCaptureSession('netflix'), true);
+  assert.deepEqual(JSON.parse(JSON.stringify(restored.state.allItems[0])), original);
+  for (const value of [null, '', true]) {
+    first.state.allItems = [{ start_sec: value, end_sec: 30 }];
+    first.saveCaptureSession();
+    assert.equal(loadSession(first.storage).restoreCaptureSession('netflix'), false);
+  }
 });

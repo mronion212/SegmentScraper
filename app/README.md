@@ -1,15 +1,15 @@
 # SegmentScraper Desktop — Alpha 0.1
 
-Inspect embedded chapters, automatically analyze movie endings, review timestamps, and contribute to **IntroDB (introdb.app)**. This complements streaming-provider metadata. Ending analysis is a visual heuristic, not a trained scene-recognition model or automatic intro detector.
+Inspect embedded chapters, automatically analyze movie endings, review timestamps, and contribute to **IntroDB (introdb.app)**. Media sources are local files and folders, TorBox and Real-Debrid. Ending analysis is a visual heuristic, not a trained scene-recognition model or automatic intro detector.
 
 This is an experimental alpha release. Features, review flows and desktop storage behavior are still under development. Keep backups of important reports and review every suggested boundary before uploading.
 
 ## Install and use
 
-Run `dist/SegmentScraper-Desktop-1.12.6-x64-Setup.exe`, or the Portable EXE. The application is labeled **Desktop Alpha 0.1**. ffprobe and FFmpeg are bundled.
+Run `dist/SegmentScraper-Desktop-1.12.7-x64-Setup.exe`, or the Portable EXE. The application is labeled **Desktop Alpha 0.1**. ffprobe and FFmpeg are bundled.
 
 1. Choose local files/a season folder, or connect the same TorBox account used in Nuvio. Torrents, Usenet and web downloads are supported. Real-Debrid supports existing torrents. No content is added to TorBox.
-2. Inspect directly from your provider, or download and inspect. Remote inspection uses bandwidth and may read substantial data. Completed downloads remain on disk.
+2. Inspect remotely from TorBox/Real-Debrid, or download and inspect locally. Remote inspection uses bandwidth and may read substantial data. Completed downloads remain on disk.
 3. Choose **Review for IntroDB** on a completed inspection. No chapters means ffprobe found no embedded chapter entries, not that the video has no intro or credits. Inspect the downloaded file to rule out remote-access limitations. Short videos are flagged as possible trailers/samples.
 4. Enter your IntroDB key, TMDB read access token for movies, and TheTVDB key/optional subscriber PIN for TV. Upload credentials stay in backend memory for this session; saving replaces all four fields. Provider accounts can separately be remembered using Electron safeStorage encryption.
 5. Search by title or IMDb ID and select the correct movie/series. For TV, enter the actual episode title and positive season/episode numbers. Season 0/specials are excluded.
@@ -22,7 +22,7 @@ Run `dist/SegmentScraper-Desktop-1.12.6-x64-Setup.exe`, or the Portable EXE. The
 
 The desktop checks finite numeric boundaries, ordering, overlap and actual duration. Both clients share timing rules and the IntroDB payload builder in `src/core/output-policy.js`: minimum 5 seconds; movie outro/post-credits maximums 900/600 seconds. IntroDB does not accept movie intro/recap submissions. IMDb identity/media type are verified. Missing TMDB keywords do not prove scene absence.
 
-**Intentional policy difference:** the online userscript still withholds the entire movie when extra scenes are known. Desktop accepts a reviewed, scene-safe outro plus a separately bounded scene. Known chapter/IntroDB/TMDB scene indications cannot silently disappear: a missing scene range blocks normal upload. Final acknowledgment is always required.
+Desktop accepts a reviewed, scene-safe outro plus a separately bounded scene. Known chapter/IntroDB/TMDB scene indications cannot silently disappear: a missing scene range blocks normal upload. Final acknowledgment is always required.
 
 ## Analysis and IntroDB movie convention
 

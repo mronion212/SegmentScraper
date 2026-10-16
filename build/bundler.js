@@ -101,11 +101,13 @@ function bundle() {
     'core/introdb-settings.js',
     'core/tmdb.js',
     'core/tvdb.js',
+    'core/videoland.js',
     'config/provider-config.js',
     'normalization/segment-mapper.js',
     'providers/timestamp-logger.js',
     'ui/panel.js',
     'ui/button.js',
+    'providers/manual-capture.js',
     'providers/bootstrap.js',
   ];
 

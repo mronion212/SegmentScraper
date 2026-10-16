@@ -161,11 +161,15 @@ function cachedTvdbGet(cache, key, path) {
   return cache.get(key);
 }
 
+function tvdbEpisodeListCacheKey(seriesId, language = TVDB_EPISODE_LANGUAGE) {
+  return `series:${seriesId}|seasonType:${TVDB_SEASON_TYPE}|language:${String(language || TVDB_EPISODE_LANGUAGE).trim().toLowerCase()}|page:0`;
+}
+
 async function fetchTvdbEpisodeList(seriesId, language = TVDB_EPISODE_LANGUAGE) {
   const normalizedLanguage = String(language || TVDB_EPISODE_LANGUAGE).trim().toLowerCase();
   const encodedSeriesId = encodeURIComponent(seriesId);
   const encodedLanguage = encodeURIComponent(normalizedLanguage);
-  const cacheKey = `series:${seriesId}|seasonType:${TVDB_SEASON_TYPE}|language:${normalizedLanguage}|page:0`;
+  const cacheKey = tvdbEpisodeListCacheKey(seriesId, normalizedLanguage);
   const path = `/series/${encodedSeriesId}/episodes/${TVDB_SEASON_TYPE}/${encodedLanguage}`;
   if (!episodeListCache.has(cacheKey)) episodeListCache.set(cacheKey, fetchAllTvdbEpisodes(path).catch(error => { episodeListCache.delete(cacheKey); throw error; }));
   return episodeListCache.get(cacheKey);
@@ -518,6 +522,7 @@ function logTvdbEpisodeMatchTitles(seriesId, providerEpisodes, episodes) {
       season: episode.season,
       episode: episode.episode,
       titles: [episode.title, ...(episode.alternateTitles || [])].filter(Boolean),
+      aired: validTvdbAirDate(episode.aired) ? episode.aired : null,
     })),
   };
   console.info('[TVDB] Episode titles available for matching', matchingInput);
@@ -540,6 +545,7 @@ function cleanTvdbEpisodes(episodes) {
       season,
       episode: number,
       title: String(episode.name || '').trim(),
+      aired: episode.aired,
     });
   }
   return {
@@ -575,6 +581,50 @@ function findDuplicateNumber(episodes) {
   return null;
 }
 
+// TVDB's EpisodeBaseRecord.aired is a calendar date, not a UTC timestamp.
+// Undated provider-absent placeholders use a separate counting policy below.
+function validTvdbAirDate(aired) {
+  if (typeof aired !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(aired)) return false;
+  const parsed = new Date(`${aired}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === aired;
+}
+
+function tvdbEpisodeAirsInFuture(episode, today) {
+  return validTvdbAirDate(episode.aired) && episode.aired > today;
+}
+
+/** Some translated lists omit aired. Verify only the additional canonical rows. */
+async function completeTvdbExtraEpisodeAirDates(tvdbEpisodes, providerEpisodes, seriesId) {
+  if (providerEpisodes.length >= tvdbEpisodes.length) return [];
+  const byNumber = new Map(tvdbEpisodes.map(episode => [`${episode.season}|${episode.episode}`, episode]));
+  const providerNumbers = new Set(providerEpisodes.map(episode => `${episode.season}|${episode.episode}`));
+  // Different provider numbering still needs the existing exact-title fallback.
+  if (![...providerNumbers].every(key => byNumber.has(key))) return [];
+  const extra = tvdbEpisodes.filter(episode => !providerNumbers.has(`${episode.season}|${episode.episode}`));
+  const missingDates = extra.filter(episode => !validTvdbAirDate(episode.aired));
+  // A mismatch must not fan out into hundreds of detail requests.
+  if (missingDates.length <= 20) {
+    for (let index = 0; index < missingDates.length; index += 4) {
+      await Promise.all(missingDates.slice(index, index + 4).map(async episode => {
+        try {
+          const base = await fetchTvdbEpisodeBase(episode.id);
+          if (base && typeof base === 'object') {
+            const sameEpisode = String(base.id) === String(episode.id) && Number(base.seasonNumber) === episode.season && Number(base.number) === episode.episode &&
+              (base.seriesId == null || String(base.seriesId) === String(seriesId));
+            episode._airDateConflict = !sameEpisode || (base.aired != null && String(base.aired).trim() !== '' && !validTvdbAirDate(base.aired));
+            if (sameEpisode && validTvdbAirDate(base.aired)) episode.aired = base.aired;
+          }
+        } catch (error) {
+          console.warn('[TVDB] Could not verify additional episode air date', { episodeId: episode.id, reason: error.message });
+        }
+        // Missing dates and failed lookups can be corrected; allow a later retry.
+        if (!validTvdbAirDate(episode.aired)) episodeBaseCache.delete(`episode:${episode.id}|base`);
+      }));
+    }
+  }
+  return extra.map(episode => ({ season: episode.season, episode: episode.episode, aired: validTvdbAirDate(episode.aired) ? episode.aired : null }));
+}
+
 function mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch = false } = {}) {
   const mapping = new Map();
   if (!requireTitleMatch && providerEpisodes.length === tvdbEpisodes.length) {
@@ -584,6 +634,34 @@ function mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch = false
       mapping,
       method: 'order',
       reason: 'regular-episode counts match',
+      matchStats: { matched: providerEpisodes.length, skipped: 0, skipReasons: {} },
+    };
+  }
+
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const providerNumbers = new Set(providerEpisodes.map(episode => `${episode.season}|${episode.episode}`));
+  const tvdbNumbers = new Set(tvdbEpisodes.map(episode => `${episode.season}|${episode.episode}`));
+  const sameNumbering = [...providerNumbers].every(key => tvdbNumbers.has(key));
+  const excludeFuture = episode => tvdbEpisodeAirsInFuture(episode, today) &&
+    !(sameNumbering && providerNumbers.has(`${episode.season}|${episode.episode}`));
+  const futureExcluded = tvdbEpisodes.filter(excludeFuture).length;
+  // Product counting policy: an undated extra row is a placeholder until it
+  // appears in the provider catalogue. Never remove an actually available row.
+  const excludeUndated = episode => sameNumbering && !episode._airDateConflict &&
+    (episode.aired == null || (typeof episode.aired === 'string' && episode.aired.trim() === '')) &&
+    !providerNumbers.has(`${episode.season}|${episode.episode}`);
+  const undatedExcluded = tvdbEpisodes.filter(excludeUndated).length;
+  const releasedEpisodes = tvdbEpisodes.filter(episode => !excludeFuture(episode) && !excludeUndated(episode));
+  if (!requireTitleMatch && (futureExcluded || undatedExcluded) && providerEpisodes.length === releasedEpisodes.length) {
+    providerEpisodes.forEach((episode, index) => mapping.set(`${episode.season}|${episode.episode}`, releasedEpisodes[index]));
+    return {
+      success: true,
+      mapping,
+      method: 'released-order',
+      reason: `available regular-episode counts match (${futureExcluded} future and ${undatedExcluded} undated provider-absent episode(s) excluded)`,
+      futureExcluded,
+      undatedExcluded,
       matchStats: { matched: providerEpisodes.length, skipped: 0, skipReasons: {} },
     };
   }
@@ -726,6 +804,7 @@ export async function mapSeriesItemsToTvdb(items, providerCatalog) {
     let result;
     let tvdbEpisodes = [];
     let tvdbSpecialsExcluded = 0;
+    let additionalTvdbEpisodes = [];
     if (useGtstAbsoluteTitleMatch) {
       result = await mapGtstAbsoluteTitleEpisodes(
         providerEpisodes,
@@ -739,6 +818,7 @@ export async function mapSeriesItemsToTvdb(items, providerCatalog) {
       const tvdbCatalog = cleanTvdbEpisodes(localizedEpisodes);
       tvdbEpisodes = tvdbCatalog.episodes;
       tvdbSpecialsExcluded = tvdbCatalog.specialsExcluded;
+      if (!requireTitleMatch) additionalTvdbEpisodes = await completeTvdbExtraEpisodeAirDates(tvdbEpisodes, providerEpisodes, tvdbSeriesId);
       if (requireTitleMatch || providerEpisodes.length !== tvdbEpisodes.length) {
         const additionalLanguages = episodeLanguages
           .filter(language => language !== TVDB_EPISODE_LANGUAGE);
@@ -761,7 +841,9 @@ export async function mapSeriesItemsToTvdb(items, providerCatalog) {
     }
     const stats = {
       providerRegular: providerEpisodes.length,
-      tvdbRegular: useGtstAbsoluteTitleMatch ? result.matchStats?.matched ?? 0 : tvdbEpisodes.length,
+      tvdbRegular: useGtstAbsoluteTitleMatch ? result.matchStats?.matched ?? 0 : tvdbEpisodes.length - (result.futureExcluded || 0) - (result.undatedExcluded || 0),
+      ...(result.futureExcluded ? { tvdbFutureExcluded: result.futureExcluded } : {}),
+      ...(result.undatedExcluded ? { tvdbUndatedExcluded: result.undatedExcluded } : {}),
       providerSpecialsExcluded,
       tvdbSpecialsExcluded,
       capturedSpecialsExcluded,
@@ -769,7 +851,16 @@ export async function mapSeriesItemsToTvdb(items, providerCatalog) {
       regularEpisodesSkipped: result.matchStats?.skipped ?? providerEpisodes.length,
       regularEpisodeSkipReasons: result.matchStats?.skipReasons || {},
     };
-    if (!result.success) return { ...result, stats };
+    if (!result.success) {
+      // A retry should not remain stuck on a stale catalogue after a TVDB edit.
+      episodeListCache.delete(tvdbEpisodeListCacheKey(tvdbSeriesId));
+      const additional = additionalTvdbEpisodes.slice(0, 20).map(episode => `S${episode.season}E${episode.episode} (${episode.aired ? `air date ${episode.aired}` : 'air date unknown'})`).join(', ') + (additionalTvdbEpisodes.length > 20 ? `, and ${additionalTvdbEpisodes.length - 20} more` : '');
+      return {
+        ...result,
+        reason: `${result.reason}${additional ? `. Additional TVDB episode(s): ${additional}` : ''}`,
+        stats,
+      };
+    }
 
     const mappedItems = [];
     for (const item of regularItems) {

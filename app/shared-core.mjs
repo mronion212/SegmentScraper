@@ -30,20 +30,9 @@ function createMediaCacheKey(imdbId, mediaType = 'tv', season, episode) {
     : createEpisodeCacheKey(imdbId, season, episode);
 }
 
-/**
- * Create a cache key for a segment (includes segment type)
- * @param {string} imdbId - IMDb ID
- * @param {string|number} season - Season number
- * @param {string|number} episode - Episode number
- * @param {string} segmentType - Segment type (intro, recap, outro)
- * @returns {string} - Cache key in format 'imdbId|season|episode|segment_type'
- */
-function createSegmentCacheKey(imdbId, season, episode, segmentType) {
-  return `${String(imdbId)}|${String(season)}|${String(episode)}|${segmentType}`;
-}
-
 const createState = (providerName) => ({
   allItems: [],
+  knownMovieScenes: [],
   imdbId: '',
   dbSearchDone: false,
   dbStatusMsg: `Waiting for ${providerName} metadata...`,
@@ -75,7 +64,7 @@ const createState = (providerName) => ({
 
 const state = createState('Streaming Service');
 
-return { createEpisodeCacheKey, createMediaCacheKey, createSegmentCacheKey, createState, state };
+return { createEpisodeCacheKey, createMediaCacheKey, createState, state };
 })();
 const { state, createMediaCacheKey } = stateModule;
 const output_policy = (() => {
@@ -98,12 +87,111 @@ function providerCaptureAllowed(item, providerName) {
 }
 
 function capturedSegmentKey(item) {
-  return JSON.stringify([String(item._showId || ''), String(item._eid), item.season, item.episode, item.segment_type, Number(item.start_sec), Number(item.end_sec)]);
+  return JSON.stringify([String(item._showId || ''), String(item._eid), item.season, item.episode, item.segment_type, ...timestampRangeKey(item)]);
 }
+
+/** Reject missing/coerced values rather than turning null, blanks or booleans into zero. */
+function timestampNumber(value) {
+  if (typeof value !== 'number' && (typeof value !== 'string' || !/^\d+(?:\.\d+)?$/.test(value.trim()))) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function timestampRangeIssue(item, duration = item?._duration_sec) {
+  const start = timestampNumber(item?.start_sec), end = timestampNumber(item?.end_sec);
+  if (start === null || end === null || start < 0 || end <= start) return 'Invalid or missing timestamp boundaries';
+  if (duration != null) {
+    const limit = timestampNumber(duration);
+    if (limit === null || limit <= 0 || end > limit) return 'Timestamp exceeds or has an invalid video duration';
+  }
+  return '';
+}
+
+function timestampRangeKey(item) {
+  return [item?.start_sec, item?.end_sec].map(value => {
+    const number = timestampNumber(value);
+    return number === null ? null : Math.round(number * 1000);
+  });
+}
+
+/** Only numeric timing evidence and fixed labels belong in recovery, never requests or tokens. */
+function timestampEvidence({ provider, source, unit = 'seconds', rawStart, rawEnd, correction = 0 } = {}) {
+  const providers = ['netflix', 'prime-video', 'videoland', 'skyshowtime', 'desktop'];
+  const sources = ['provider-metadata', 'skip-marker', 'credits-offset', 'playback-event', 'chapter', 'catalogue-marker', 'visual-analysis', 'manual'];
+  return {
+    provider: providers.includes(provider) ? provider : 'unknown',
+    source: sources.includes(source) ? source : 'provider-metadata',
+    unit: unit === 'milliseconds' ? unit : 'seconds',
+    raw_start: timestampNumber(rawStart), raw_end: timestampNumber(rawEnd),
+    correction_sec: typeof correction === 'number' && Number.isFinite(correction) ? correction : 0,
+  };
+}
+
+/** A manual observation has explicit identity, real boundaries and no provider offset. */
+function validateManualIdentity({ imdbId, mediaType, season, episode, episodeTitle, segmentType }) {
+  if (!/^tt\d{7,8}$/.test(imdbId || '')) throw new Error('Confirm a valid IMDb ID before marking timestamps.');
+  if (!['tv', 'movie'].includes(mediaType)) throw new Error('Confirm the media type first.');
+  if (!['intro', 'recap', 'outro'].includes(segmentType)) throw new Error('Choose Intro, Recap or Outro.');
+  const movie = mediaType === 'movie';
+  if (movie && segmentType !== 'outro') throw new Error('Online movie capture supports Outro only.');
+  if (!movie && (![season, episode].every(value => Number.isInteger(value) && value > 0) || !String(episodeTitle || '').trim())) {
+    throw new Error('Enter the playing episode’s season, episode number and actual title.');
+  }
+}
+
+function createManualSegment({ provider, showId, imdbId, mediaType, season, episode, episodeTitle, segmentType, start, end, duration }) {
+  validateManualIdentity({ imdbId, mediaType, season, episode, episodeTitle, segmentType });
+  const movie = mediaType === 'movie';
+  const item = {
+    _eid: `manual:${movie ? 'movie' : `${season}:${episode}`}:${segmentType}`,
+    _showId: String(showId || `manual:${imdbId}`), _episodeTitle: String(episodeTitle || '').trim(),
+    _duration_sec: duration, _tvdbRequireTitleMatch: true,
+    _tvdbEpisodeLanguages: provider === 'videoland' ? ['eng', 'nld'] : ['eng'],
+    ...(movie ? { media_type: 'movie' } : {}), imdb_id: imdbId,
+    season: movie ? null : season, episode: movie ? null : episode,
+    segment_type: segmentType, start_sec: start, end_sec: end,
+    _timing: timestampEvidence({ provider, source: 'manual', rawStart: start, rawEnd: end }),
+  };
+  if (!Number.isFinite(duration) || duration <= 0 || ![start, end].every(Number.isFinite) || !outputSegmentAllowed(item)) {
+    throw new Error('Mark valid start and end points within this video: at least 5 seconds; movie outros at most 900 seconds.');
+  }
+  return item;
+}
+
+/** Compare candidates only after identity mapping. A changed candidate set invalidates a choice. */
+function assessTimestampCandidates(items) {
+  const groups = new Map(), decisions = new Map();
+  for (const item of items) {
+    const issue = timestampRangeIssue(item);
+    if (issue) { decisions.set(item, { allowed: false, reason: issue }); continue; }
+    const key = JSON.stringify([item.imdb_id || item._showId || '', isMovieSegment(item) ? 'movie' : [item.season, item.episode], normalizeIntrodbSegmentType(item.segment_type)]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  for (const [key, group] of groups) {
+    const variants = [...new Set(group.map(item => JSON.stringify(timestampRangeKey(item))))].sort();
+    const signature = JSON.stringify([key, variants]);
+    const chosen = new Set(group.filter(item => item._timingReview === signature).map(item => JSON.stringify(timestampRangeKey(item))));
+    const selected = chosen.size === 1 ? [...chosen][0] : null;
+    const seen = new Set();
+    for (const item of group) {
+      const range = JSON.stringify(timestampRangeKey(item));
+      const conflict = variants.length > 1;
+      const allowed = (!conflict || selected === range) && !seen.has(range);
+      decisions.set(item, {
+        allowed, conflict, signature,
+        reason: allowed ? '' : conflict ? selected ? 'Alternative retained; another range was reviewed' : 'Conflicting timestamps: review the video and choose one range' : 'Repeated observation of the same range',
+      });
+      seen.add(range);
+    }
+  }
+  return decisions;
+}
+
 function outputSegmentAllowed(item) {
   const movie = isMovieSegment(item);
   const start=Number(item?.start_sec),end=Number(item?.end_sec);
-  return Number.isFinite(start)&&Number.isFinite(end)&&start>=0&&end-start>=5&&(!movie||(['outro','post-credits'].includes(item.segment_type)&&end-start<=(item.segment_type==='outro'?900:600)));
+  return !timestampRangeIssue(item)&&['intro','recap','outro','post-credits'].includes(item.segment_type)&&end-start>=5&&(!movie||(['outro','post-credits'].includes(item.segment_type)&&end-start<=(item.segment_type==='outro'?900:600)));
 }
 function introdbPayload(item) {
   const movie = isMovieSegment(item);
@@ -112,7 +200,8 @@ function introdbPayload(item) {
 
 /** IntroDB stores boundaries in milliseconds. */
 function sameIntrodbRange(a, b) {
-  return normalizeIntrodbSegmentType(a.segment_type) === normalizeIntrodbSegmentType(b.segment_type)
+  return !timestampRangeIssue(a) && !timestampRangeIssue(b)
+    && normalizeIntrodbSegmentType(a.segment_type) === normalizeIntrodbSegmentType(b.segment_type)
     && ['start_sec', 'end_sec'].every(key => a[key] != null && b[key] != null
       && Number.isFinite(Number(a[key])) && Number.isFinite(Number(b[key]))
       && Math.round(Number(a[key]) * 1000) === Math.round(Number(b[key]) * 1000));
@@ -136,12 +225,14 @@ function normalizeIntrodbSegmentType(segmentType) {
 }
 
 function introdbSeconds(value) {
-  if (typeof value === 'string' && !value.trim()) return null;
-  const number = Number(value);
-  if (Number.isFinite(number)) return number;
-  const parts = String(value || '').trim().split(':').map(Number);
-  if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
-  if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  const number = timestampNumber(value);
+  if (number !== null) return number;
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!/^(?:\d+:)?\d{1,2}:\d{2}(?:\.\d+)?$/.test(text)) return null;
+  const parts = text.split(':').map(Number);
+  if (parts.at(-1) >= 60 || (parts.length === 3 && parts[1] >= 60)) return null;
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   return null;
 }
 
@@ -149,7 +240,10 @@ function introdbRangeValue(source, secondsKeys, millisecondsKey) {
   for (const key of secondsKeys) {
     if (source?.[key] != null) return introdbSeconds(source[key]);
   }
-  if (source?.[millisecondsKey] != null) return Number(source[millisecondsKey]) / 1000;
+  if (source?.[millisecondsKey] != null) {
+    const value = timestampNumber(source[millisecondsKey]);
+    return value === null ? null : value / 1000;
+  }
   return null;
 }
 
@@ -208,7 +302,7 @@ function introdbRangeEntries(response) {
   return parseIntrodbSegments(response).ranges;
 }
 
-return { isMovieSegment, movieCaptureAllowedForProvider, providerCaptureAllowed, capturedSegmentKey, outputSegmentAllowed, introdbPayload, sameIntrodbRange, uploadSegmentKey, normalizeIntrodbSegmentType, parseIntrodbSegments, introdbRangeEntries };
+return { isMovieSegment, movieCaptureAllowedForProvider, providerCaptureAllowed, capturedSegmentKey, timestampNumber, timestampRangeIssue, timestampRangeKey, timestampEvidence, validateManualIdentity, createManualSegment, assessTimestampCandidates, outputSegmentAllowed, introdbPayload, sameIntrodbRange, uploadSegmentKey, normalizeIntrodbSegmentType, parseIntrodbSegments, introdbRangeEntries };
 })();
 const { outputSegmentAllowed, introdbPayload, parseIntrodbSegments, introdbRangeEntries } = output_policy;
 const network = (() => {
@@ -229,12 +323,27 @@ function getGmXhr() {
          (typeof GM !== 'undefined' && GM.xmlHttpRequest ? GM.xmlHttpRequest : null);
 }
 
-function filterImdbTitleResults(results, mediaType = 'tv') {
+function normalizeImdbSearchTitle(title) {
+  return String(title || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+function imdbSearchQueries(title, { mediaType = 'tv' } = {}) {
+  const original = String(title || '').trim();
+  const queries = [original];
+  if (String(mediaType).toLowerCase() !== 'movie') {
+    const fallback = original.replace(/(?:\s+|\s*[-:–—]\s*)(?:de\s+serie|the\s+series)\s*$/i, '').trim();
+    if (fallback && fallback !== original) queries.push(fallback);
+  }
+  return queries;
+}
+
+function filterImdbTitleResults(results, mediaType = 'tv', exactTitle = '') {
   const movieQids = new Set(['movie', 'tvmovie', 'videomovie', 'featurefilm', 'film', 'short', 'tvshort']);
   const allowedQids = String(mediaType).toLowerCase() === 'movie'
     ? movieQids
     : new Set(['tvseries', 'tvminiseries', 'tvshort', 'tvspecial']);
-  return (results || []).filter(result => allowedQids.has(String(result?.qid || '').toLowerCase()));
+  return (results || []).filter(result => allowedQids.has(String(result?.qid || '').toLowerCase()) &&
+    (!exactTitle || normalizeImdbSearchTitle(result?.l) === normalizeImdbSearchTitle(exactTitle)));
 }
 
 function chooseImdbTitleResult(results, title, year) {
@@ -255,8 +364,9 @@ function chooseImdbTitleResult(results, title, year) {
   return best;
 }
 
-function resolveImdbSearchResponse(data, title, year, mediaType) {
-  const results = filterImdbTitleResults(data?.d, mediaType);
+function resolveImdbSearchResponse(data, title, year, mediaType, exactTitle = false) {
+  const results = filterImdbTitleResults(data?.d, mediaType, exactTitle ? title : '')
+    .filter(result => !exactTitle || !year || String(result.y || '') === String(year));
   console.log(`[NFE] Filtered ${mediaType === 'movie' ? 'movie' : 'TV series'} results:`, results.length);
   if (!results.length) return { success: false, error: 'Not found on IMDb' };
 
@@ -278,6 +388,16 @@ function resolveImdbSearchResponse(data, title, year, mediaType) {
  * Search IMDb by title and return the best matching media ID.
  */
 async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
+  const queries = imdbSearchQueries(title, { mediaType });
+  let result;
+  for (const [index, queryTitle] of queries.entries()) {
+    result = await searchImdbQuery(queryTitle, year, { mediaType, exactTitle: index > 0 });
+    if (result.success || result.error !== 'Not found on IMDb') return result;
+  }
+  return result;
+}
+
+async function searchImdbQuery(title, year, { mediaType, exactTitle }) {
   const query = encodeURIComponent(String(title || '').toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').trim());
   const url = `https://v3.sg.media-imdb.com/suggestion/x/${query}.json`;
   console.log('[NFE] IMDb search request URL:', url, 'for title:', title, 'year:', year);
@@ -298,9 +418,10 @@ async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
         onload: (response) => {
           console.log('[NFE] IMDb search response status:', response.status, 'responseText length:', response.responseText?.length);
           try {
+            if (response.status !== 200) { resolve({ success: false, error: `IMDb returned HTTP ${response.status}` }); return; }
             const data = JSON.parse(response.responseText);
             console.log('[NFE] IMDb search response data:', data);
-            resolve(resolveImdbSearchResponse(data, title, year, mediaType));
+            resolve(resolveImdbSearchResponse(data, title, year, mediaType, exactTitle));
           } catch (parseError) {
             console.error('[NFE] IMDb response parse error:', parseError);
             resolve({ success: false, error: 'Failed to parse IMDb response' });
@@ -321,9 +442,10 @@ async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
   console.log('[NFE] Using fetch fallback (may fail due to CORS)');
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) return { success: false, error: `IMDb returned HTTP ${response.status}` };
     const data = await response.json();
     console.log('[NFE] IMDb search response data:', data);
-    return resolveImdbSearchResponse(data, title, year, mediaType);
+    return resolveImdbSearchResponse(data, title, year, mediaType, exactTitle);
   } catch (error) {
     console.error('[NFE] Fetch fallback error:', error);
     return { success: false, error: 'Network error connecting to IMDb (CORS or network issue)' };
@@ -552,7 +674,7 @@ async function lookupImdbTitle(imdbId) {
   }
 }
 
-return { searchImdbByTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment, lookupImdbTitle };
+return { imdbSearchQueries, filterImdbTitleResults, searchImdbByTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment, lookupImdbTitle };
 })();
 const tvdb = (() => {
 /** TVDB v4 authentication, local settings, and conservative episode mapping. */
@@ -717,11 +839,15 @@ function cachedTvdbGet(cache, key, path) {
   return cache.get(key);
 }
 
+function tvdbEpisodeListCacheKey(seriesId, language = TVDB_EPISODE_LANGUAGE) {
+  return `series:${seriesId}|seasonType:${TVDB_SEASON_TYPE}|language:${String(language || TVDB_EPISODE_LANGUAGE).trim().toLowerCase()}|page:0`;
+}
+
 async function fetchTvdbEpisodeList(seriesId, language = TVDB_EPISODE_LANGUAGE) {
   const normalizedLanguage = String(language || TVDB_EPISODE_LANGUAGE).trim().toLowerCase();
   const encodedSeriesId = encodeURIComponent(seriesId);
   const encodedLanguage = encodeURIComponent(normalizedLanguage);
-  const cacheKey = `series:${seriesId}|seasonType:${TVDB_SEASON_TYPE}|language:${normalizedLanguage}|page:0`;
+  const cacheKey = tvdbEpisodeListCacheKey(seriesId, normalizedLanguage);
   const path = `/series/${encodedSeriesId}/episodes/${TVDB_SEASON_TYPE}/${encodedLanguage}`;
   if (!episodeListCache.has(cacheKey)) episodeListCache.set(cacheKey, fetchAllTvdbEpisodes(path).catch(error => { episodeListCache.delete(cacheKey); throw error; }));
   return episodeListCache.get(cacheKey);
@@ -1074,6 +1200,7 @@ function logTvdbEpisodeMatchTitles(seriesId, providerEpisodes, episodes) {
       season: episode.season,
       episode: episode.episode,
       titles: [episode.title, ...(episode.alternateTitles || [])].filter(Boolean),
+      aired: validTvdbAirDate(episode.aired) ? episode.aired : null,
     })),
   };
   console.info('[TVDB] Episode titles available for matching', matchingInput);
@@ -1096,6 +1223,7 @@ function cleanTvdbEpisodes(episodes) {
       season,
       episode: number,
       title: String(episode.name || '').trim(),
+      aired: episode.aired,
     });
   }
   return {
@@ -1131,6 +1259,50 @@ function findDuplicateNumber(episodes) {
   return null;
 }
 
+// TVDB's EpisodeBaseRecord.aired is a calendar date, not a UTC timestamp.
+// Undated provider-absent placeholders use a separate counting policy below.
+function validTvdbAirDate(aired) {
+  if (typeof aired !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(aired)) return false;
+  const parsed = new Date(`${aired}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === aired;
+}
+
+function tvdbEpisodeAirsInFuture(episode, today) {
+  return validTvdbAirDate(episode.aired) && episode.aired > today;
+}
+
+/** Some translated lists omit aired. Verify only the additional canonical rows. */
+async function completeTvdbExtraEpisodeAirDates(tvdbEpisodes, providerEpisodes, seriesId) {
+  if (providerEpisodes.length >= tvdbEpisodes.length) return [];
+  const byNumber = new Map(tvdbEpisodes.map(episode => [`${episode.season}|${episode.episode}`, episode]));
+  const providerNumbers = new Set(providerEpisodes.map(episode => `${episode.season}|${episode.episode}`));
+  // Different provider numbering still needs the existing exact-title fallback.
+  if (![...providerNumbers].every(key => byNumber.has(key))) return [];
+  const extra = tvdbEpisodes.filter(episode => !providerNumbers.has(`${episode.season}|${episode.episode}`));
+  const missingDates = extra.filter(episode => !validTvdbAirDate(episode.aired));
+  // A mismatch must not fan out into hundreds of detail requests.
+  if (missingDates.length <= 20) {
+    for (let index = 0; index < missingDates.length; index += 4) {
+      await Promise.all(missingDates.slice(index, index + 4).map(async episode => {
+        try {
+          const base = await fetchTvdbEpisodeBase(episode.id);
+          if (base && typeof base === 'object') {
+            const sameEpisode = String(base.id) === String(episode.id) && Number(base.seasonNumber) === episode.season && Number(base.number) === episode.episode &&
+              (base.seriesId == null || String(base.seriesId) === String(seriesId));
+            episode._airDateConflict = !sameEpisode || (base.aired != null && String(base.aired).trim() !== '' && !validTvdbAirDate(base.aired));
+            if (sameEpisode && validTvdbAirDate(base.aired)) episode.aired = base.aired;
+          }
+        } catch (error) {
+          console.warn('[TVDB] Could not verify additional episode air date', { episodeId: episode.id, reason: error.message });
+        }
+        // Missing dates and failed lookups can be corrected; allow a later retry.
+        if (!validTvdbAirDate(episode.aired)) episodeBaseCache.delete(`episode:${episode.id}|base`);
+      }));
+    }
+  }
+  return extra.map(episode => ({ season: episode.season, episode: episode.episode, aired: validTvdbAirDate(episode.aired) ? episode.aired : null }));
+}
+
 function mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch = false } = {}) {
   const mapping = new Map();
   if (!requireTitleMatch && providerEpisodes.length === tvdbEpisodes.length) {
@@ -1140,6 +1312,34 @@ function mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch = false
       mapping,
       method: 'order',
       reason: 'regular-episode counts match',
+      matchStats: { matched: providerEpisodes.length, skipped: 0, skipReasons: {} },
+    };
+  }
+
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const providerNumbers = new Set(providerEpisodes.map(episode => `${episode.season}|${episode.episode}`));
+  const tvdbNumbers = new Set(tvdbEpisodes.map(episode => `${episode.season}|${episode.episode}`));
+  const sameNumbering = [...providerNumbers].every(key => tvdbNumbers.has(key));
+  const excludeFuture = episode => tvdbEpisodeAirsInFuture(episode, today) &&
+    !(sameNumbering && providerNumbers.has(`${episode.season}|${episode.episode}`));
+  const futureExcluded = tvdbEpisodes.filter(excludeFuture).length;
+  // Product counting policy: an undated extra row is a placeholder until it
+  // appears in the provider catalogue. Never remove an actually available row.
+  const excludeUndated = episode => sameNumbering && !episode._airDateConflict &&
+    (episode.aired == null || (typeof episode.aired === 'string' && episode.aired.trim() === '')) &&
+    !providerNumbers.has(`${episode.season}|${episode.episode}`);
+  const undatedExcluded = tvdbEpisodes.filter(excludeUndated).length;
+  const releasedEpisodes = tvdbEpisodes.filter(episode => !excludeFuture(episode) && !excludeUndated(episode));
+  if (!requireTitleMatch && (futureExcluded || undatedExcluded) && providerEpisodes.length === releasedEpisodes.length) {
+    providerEpisodes.forEach((episode, index) => mapping.set(`${episode.season}|${episode.episode}`, releasedEpisodes[index]));
+    return {
+      success: true,
+      mapping,
+      method: 'released-order',
+      reason: `available regular-episode counts match (${futureExcluded} future and ${undatedExcluded} undated provider-absent episode(s) excluded)`,
+      futureExcluded,
+      undatedExcluded,
       matchStats: { matched: providerEpisodes.length, skipped: 0, skipReasons: {} },
     };
   }
@@ -1282,6 +1482,7 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
     let result;
     let tvdbEpisodes = [];
     let tvdbSpecialsExcluded = 0;
+    let additionalTvdbEpisodes = [];
     if (useGtstAbsoluteTitleMatch) {
       result = await mapGtstAbsoluteTitleEpisodes(
         providerEpisodes,
@@ -1295,6 +1496,7 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
       const tvdbCatalog = cleanTvdbEpisodes(localizedEpisodes);
       tvdbEpisodes = tvdbCatalog.episodes;
       tvdbSpecialsExcluded = tvdbCatalog.specialsExcluded;
+      if (!requireTitleMatch) additionalTvdbEpisodes = await completeTvdbExtraEpisodeAirDates(tvdbEpisodes, providerEpisodes, tvdbSeriesId);
       if (requireTitleMatch || providerEpisodes.length !== tvdbEpisodes.length) {
         const additionalLanguages = episodeLanguages
           .filter(language => language !== TVDB_EPISODE_LANGUAGE);
@@ -1317,7 +1519,9 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
     }
     const stats = {
       providerRegular: providerEpisodes.length,
-      tvdbRegular: useGtstAbsoluteTitleMatch ? result.matchStats?.matched ?? 0 : tvdbEpisodes.length,
+      tvdbRegular: useGtstAbsoluteTitleMatch ? result.matchStats?.matched ?? 0 : tvdbEpisodes.length - (result.futureExcluded || 0) - (result.undatedExcluded || 0),
+      ...(result.futureExcluded ? { tvdbFutureExcluded: result.futureExcluded } : {}),
+      ...(result.undatedExcluded ? { tvdbUndatedExcluded: result.undatedExcluded } : {}),
       providerSpecialsExcluded,
       tvdbSpecialsExcluded,
       capturedSpecialsExcluded,
@@ -1325,7 +1529,16 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
       regularEpisodesSkipped: result.matchStats?.skipped ?? providerEpisodes.length,
       regularEpisodeSkipReasons: result.matchStats?.skipReasons || {},
     };
-    if (!result.success) return { ...result, stats };
+    if (!result.success) {
+      // A retry should not remain stuck on a stale catalogue after a TVDB edit.
+      episodeListCache.delete(tvdbEpisodeListCacheKey(tvdbSeriesId));
+      const additional = additionalTvdbEpisodes.slice(0, 20).map(episode => `S${episode.season}E${episode.episode} (${episode.aired ? `air date ${episode.aired}` : 'air date unknown'})`).join(', ') + (additionalTvdbEpisodes.length > 20 ? `, and ${additionalTvdbEpisodes.length - 20} more` : '');
+      return {
+        ...result,
+        reason: `${result.reason}${additional ? `. Additional TVDB episode(s): ${additional}` : ''}`,
+        stats,
+      };
+    }
 
     const mappedItems = [];
     for (const item of regularItems) {
@@ -1550,5 +1763,147 @@ function checkForRequiredUpdate(request = _GM_xmlhttpRequest) {
 
 return { compareVersions, extractUserscriptVersion, checkForRequiredUpdate };
 })();
-return { ...output_policy, ...network, ...tvdb, ...tmdb, ...update_check };
+const videoland = (() => {
+/** Videoland programme layouts group episode cards into season blocks. */
+function videolandSeasonNumber(block) {
+  const label = block?.analytics?.tealium?.block_title || block?.title || '';
+  const match = String(label).match(/\b(?:seizoen|season)\s+(\d+)\b/i);
+  return match ? Number(match[1]) : null;
+}
+
+function videolandEpisodeBlock(block) {
+  const feature = String(block?.analytics?.tealium?.from || '');
+  const label = String(block?.analytics?.tealium?.block_title || block?.title || '');
+  return videolandSeasonNumber(block) != null && !/recommend|related|trailer|advertis/i.test(`${feature} ${label}`);
+}
+
+function extractVideolandEpisodeCatalog(layout, programId) {
+  const episodes = new Map();
+  for (const block of layout?.blocks || []) {
+    if (!videolandEpisodeBlock(block)) continue;
+    const season = videolandSeasonNumber(block);
+    for (const row of block.content?.items || []) {
+      const item = row?.itemContent;
+      const target = item?.action?.target;
+      const video = target?.type === 'layout' ? target.value_layout : null;
+      if (!video || video.type !== 'video' || video.id == null) continue;
+      if (video.parent?.id != null && String(video.parent.id) !== String(programId)) continue;
+      if (item.isAvailable === false || item.isPlayable === false || item.isComingSoon === true) continue;
+      const label = String(item.extraTitle || item.title || '');
+      const episode = Number(item.episode ?? item.metadata?.episode ?? item.video?.episode ?? label.match(/^\s*#?(\d+)\s*[.):\-]/)?.[1]);
+      if (!Number.isInteger(episode) || episode < 1) continue;
+      const title = String(item.episodeTitle || item.image?.caption || item.extraTitle || item.title || '')
+        .replace(/^\s*#?\d+\s*[.):\-]\s*/, '').trim();
+      const entry = { providerId: String(video.id), season, episode, title };
+      const previous = episodes.get(entry.providerId);
+      if (previous && (previous.season !== season || previous.episode !== episode)) throw new Error('Videoland returned conflicting episode numbering.');
+      episodes.set(entry.providerId, entry);
+    }
+  }
+  return [...episodes.values()].sort((a, b) => a.season - b.season || a.episode - b.episode);
+}
+
+function videolandItemIds(items) {
+  return (items || []).map(row => row?.itemContent?.action?.target?.value_layout?.id ?? row?.itemContent?.video?.id ?? row?.id ?? null);
+}
+
+function videolandPaginationInfo(pagination) {
+  return ['currentPage', 'nextPage', 'totalPages', 'totalItems', 'itemsPerPage'].filter(key =>
+    pagination?.[key] != null && /^\d+$/.test(String(pagination[key])))
+    .map(key => `${key}=${pagination[key]}`).join(', ');
+}
+
+/** Follow both section and episode cursors, using the observed layout route. */
+async function loadVideolandEpisodeCatalog({ layout, url, programId, request }) {
+  const base = new URL(url);
+  if (base.protocol !== 'https:' || base.hostname !== 'layout.videoland.bedrock.tech' || !/\/(?:program|video)\/[^/]+\/layout$/.test(base.pathname)) {
+    throw new Error('Unsupported Videoland catalogue endpoint.');
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(String(programId))) throw new Error('Invalid Videoland programme ID.');
+  const originalPath = base.pathname;
+  base.pathname = base.pathname.replace(/\/(?:program|video)\/[^/]+\/layout$/, `/program/${encodeURIComponent(programId)}/layout`);
+  base.searchParams.delete('page');
+  base.searchParams.set('blockPage', '1');
+  base.searchParams.set('nbPages', '2');
+  let requests = 0;
+  const get = async (url, stage) => {
+    if (++requests > 200) throw new Error(`Videoland catalogue pagination limit reached while loading ${stage} (200 requests).`);
+    const result = await request(url.href);
+    if (!result || typeof result !== 'object') throw new Error('Videoland returned an invalid catalogue page.');
+    if (result.entity?.id != null && String(result.entity.id) !== String(programId)) throw new Error('Videoland returned another programme catalogue.');
+    return result;
+  };
+  const initialCursor = new URL(url).searchParams.get('blockPage') || '1';
+  // A video layout contains recommendations and a partial episode window. Load
+  // the programme itself, including its first page, before trusting its count.
+  const first = originalPath === base.pathname && initialCursor === '1' ? layout : await get(base, 'season sections');
+  if (first?.entity?.id != null && String(first.entity.id) !== String(programId)) throw new Error('Videoland returned another programme catalogue.');
+  const blocks = [...(first?.blocks || [])];
+  const seenBlocks = new Set(['1']);
+  const sectionSignature = blocks => JSON.stringify(blocks.map(block => [block.blockId, videolandItemIds(block.content?.items)]));
+  const seenSectionContents = new Set([sectionSignature(blocks)]);
+  let next = first?.pagination?.nextPage;
+  while (next != null) {
+    if (!/^[1-9]\d*$/.test(String(next)) || seenBlocks.has(String(next))) throw new Error('Videoland section pagination did not advance.');
+    seenBlocks.add(String(next));
+    const pageUrl = new URL(base);
+    pageUrl.searchParams.set('blockPage', String(next));
+    const page = await get(pageUrl, `season sections, page ${next}`);
+    if (!Array.isArray(page.blocks) || !page.blocks.length) throw new Error('Videoland returned an incomplete section page.');
+    const signature = sectionSignature(page.blocks);
+    if (seenSectionContents.has(signature) && page.pagination?.nextPage != null) {
+      throw new Error(`Videoland repeated the same season sections at page ${next}; ${videolandPaginationInfo(page.pagination)}. Open the series page and retry.`);
+    }
+    seenSectionContents.add(signature);
+    blocks.push(...page.blocks);
+    next = page.pagination?.nextPage;
+  }
+  const complete = [];
+  for (const block of blocks) {
+    if (!videolandEpisodeBlock(block)) continue;
+    const items = [...(block.content?.items || [])];
+    let cursor = block.content?.pagination?.nextPage;
+    const seen = new Set();
+    const seenItemContents = new Set([JSON.stringify(videolandItemIds(items))]);
+    let pagesPerRequest = 8;
+    while (cursor != null) {
+      if (!/^[1-9]\d*$/.test(String(cursor)) || seen.has(String(cursor)) || !/^[A-Za-z0-9_-]+$/.test(String(block.blockId || ''))) {
+        throw new Error('Videoland episode pagination did not advance.');
+      }
+      seen.add(String(cursor));
+      const pageUrl = new URL(base);
+      pageUrl.pathname = pageUrl.pathname.replace(/\/layout$/, `/block/${encodeURIComponent(block.blockId)}`);
+      pageUrl.searchParams.delete('blockPage');
+      pageUrl.searchParams.set('page', String(cursor));
+      pageUrl.searchParams.set('nbPages', String(pagesPerRequest));
+      let page;
+      const stage = `season ${videolandSeasonNumber(block)}, episode page ${cursor}`;
+      try { page = await get(pageUrl, stage); }
+      catch (error) {
+        // Some catalogue blocks support only one page per request. Never retry
+        // authentication, rate-limit, or malformed-data failures as a batch.
+        if (pagesPerRequest === 1 || ![500, 502, 503, 504].includes(error.status)) throw error;
+        pagesPerRequest = 1;
+        pageUrl.searchParams.set('nbPages', '1');
+        page = await get(pageUrl, stage);
+      }
+      if (!Array.isArray(page.content?.items)) throw new Error('Videoland returned an incomplete episode page.');
+      const signature = JSON.stringify(videolandItemIds(page.content.items));
+      if (page.content.items.length && seenItemContents.has(signature) && page.content.pagination?.nextPage != null) {
+        throw new Error(`Videoland repeated episode contents for ${stage}; ${videolandPaginationInfo(page.content.pagination)}. Open the series page and retry.`);
+      }
+      seenItemContents.add(signature);
+      items.push(...page.content.items);
+      cursor = page.content.pagination?.nextPage;
+    }
+    complete.push({ ...block, content: { ...block.content, items } });
+  }
+  const episodes = extractVideolandEpisodeCatalog({ blocks: complete }, programId);
+  if (!episodes.length) throw new Error('Videoland did not provide a usable season episode catalogue. Open the series page and retry.');
+  return episodes;
+}
+
+return { extractVideolandEpisodeCatalog, loadVideolandEpisodeCatalog };
+})();
+return { ...output_policy, ...network, ...tvdb, ...tmdb, ...update_check, ...videoland };
 }

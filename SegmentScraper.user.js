@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
-// @version      1.12.6
+// @version      1.12.7
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -35,7 +35,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const SEGMENTSCRAPER_VERSION = "1.12.6";
+  const SEGMENTSCRAPER_VERSION = "1.12.7";
   const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
@@ -65,20 +65,9 @@ function createMediaCacheKey(imdbId, mediaType = 'tv', season, episode) {
     : createEpisodeCacheKey(imdbId, season, episode);
 }
 
-/**
- * Create a cache key for a segment (includes segment type)
- * @param {string} imdbId - IMDb ID
- * @param {string|number} season - Season number
- * @param {string|number} episode - Episode number
- * @param {string} segmentType - Segment type (intro, recap, outro)
- * @returns {string} - Cache key in format 'imdbId|season|episode|segment_type'
- */
-function createSegmentCacheKey(imdbId, season, episode, segmentType) {
-  return `${String(imdbId)}|${String(season)}|${String(episode)}|${segmentType}`;
-}
-
 const createState = (providerName) => ({
   allItems: [],
+  knownMovieScenes: [],
   imdbId: '',
   dbSearchDone: false,
   dbStatusMsg: `Waiting for ${providerName} metadata...`,
@@ -129,12 +118,111 @@ function providerCaptureAllowed(item, providerName) {
 }
 
 function capturedSegmentKey(item) {
-  return JSON.stringify([String(item._showId || ''), String(item._eid), item.season, item.episode, item.segment_type, Number(item.start_sec), Number(item.end_sec)]);
+  return JSON.stringify([String(item._showId || ''), String(item._eid), item.season, item.episode, item.segment_type, ...timestampRangeKey(item)]);
 }
+
+/** Reject missing/coerced values rather than turning null, blanks or booleans into zero. */
+function timestampNumber(value) {
+  if (typeof value !== 'number' && (typeof value !== 'string' || !/^\d+(?:\.\d+)?$/.test(value.trim()))) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function timestampRangeIssue(item, duration = item?._duration_sec) {
+  const start = timestampNumber(item?.start_sec), end = timestampNumber(item?.end_sec);
+  if (start === null || end === null || start < 0 || end <= start) return 'Invalid or missing timestamp boundaries';
+  if (duration != null) {
+    const limit = timestampNumber(duration);
+    if (limit === null || limit <= 0 || end > limit) return 'Timestamp exceeds or has an invalid video duration';
+  }
+  return '';
+}
+
+function timestampRangeKey(item) {
+  return [item?.start_sec, item?.end_sec].map(value => {
+    const number = timestampNumber(value);
+    return number === null ? null : Math.round(number * 1000);
+  });
+}
+
+/** Only numeric timing evidence and fixed labels belong in recovery, never requests or tokens. */
+function timestampEvidence({ provider, source, unit = 'seconds', rawStart, rawEnd, correction = 0 } = {}) {
+  const providers = ['netflix', 'prime-video', 'videoland', 'skyshowtime', 'desktop'];
+  const sources = ['provider-metadata', 'skip-marker', 'credits-offset', 'playback-event', 'chapter', 'catalogue-marker', 'visual-analysis', 'manual'];
+  return {
+    provider: providers.includes(provider) ? provider : 'unknown',
+    source: sources.includes(source) ? source : 'provider-metadata',
+    unit: unit === 'milliseconds' ? unit : 'seconds',
+    raw_start: timestampNumber(rawStart), raw_end: timestampNumber(rawEnd),
+    correction_sec: typeof correction === 'number' && Number.isFinite(correction) ? correction : 0,
+  };
+}
+
+/** A manual observation has explicit identity, real boundaries and no provider offset. */
+function validateManualIdentity({ imdbId, mediaType, season, episode, episodeTitle, segmentType }) {
+  if (!/^tt\d{7,8}$/.test(imdbId || '')) throw new Error('Confirm a valid IMDb ID before marking timestamps.');
+  if (!['tv', 'movie'].includes(mediaType)) throw new Error('Confirm the media type first.');
+  if (!['intro', 'recap', 'outro'].includes(segmentType)) throw new Error('Choose Intro, Recap or Outro.');
+  const movie = mediaType === 'movie';
+  if (movie && segmentType !== 'outro') throw new Error('Online movie capture supports Outro only.');
+  if (!movie && (![season, episode].every(value => Number.isInteger(value) && value > 0) || !String(episodeTitle || '').trim())) {
+    throw new Error('Enter the playing episode’s season, episode number and actual title.');
+  }
+}
+
+function createManualSegment({ provider, showId, imdbId, mediaType, season, episode, episodeTitle, segmentType, start, end, duration }) {
+  validateManualIdentity({ imdbId, mediaType, season, episode, episodeTitle, segmentType });
+  const movie = mediaType === 'movie';
+  const item = {
+    _eid: `manual:${movie ? 'movie' : `${season}:${episode}`}:${segmentType}`,
+    _showId: String(showId || `manual:${imdbId}`), _episodeTitle: String(episodeTitle || '').trim(),
+    _duration_sec: duration, _tvdbRequireTitleMatch: true,
+    _tvdbEpisodeLanguages: provider === 'videoland' ? ['eng', 'nld'] : ['eng'],
+    ...(movie ? { media_type: 'movie' } : {}), imdb_id: imdbId,
+    season: movie ? null : season, episode: movie ? null : episode,
+    segment_type: segmentType, start_sec: start, end_sec: end,
+    _timing: timestampEvidence({ provider, source: 'manual', rawStart: start, rawEnd: end }),
+  };
+  if (!Number.isFinite(duration) || duration <= 0 || ![start, end].every(Number.isFinite) || !outputSegmentAllowed(item)) {
+    throw new Error('Mark valid start and end points within this video: at least 5 seconds; movie outros at most 900 seconds.');
+  }
+  return item;
+}
+
+/** Compare candidates only after identity mapping. A changed candidate set invalidates a choice. */
+function assessTimestampCandidates(items) {
+  const groups = new Map(), decisions = new Map();
+  for (const item of items) {
+    const issue = timestampRangeIssue(item);
+    if (issue) { decisions.set(item, { allowed: false, reason: issue }); continue; }
+    const key = JSON.stringify([item.imdb_id || item._showId || '', isMovieSegment(item) ? 'movie' : [item.season, item.episode], normalizeIntrodbSegmentType(item.segment_type)]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  for (const [key, group] of groups) {
+    const variants = [...new Set(group.map(item => JSON.stringify(timestampRangeKey(item))))].sort();
+    const signature = JSON.stringify([key, variants]);
+    const chosen = new Set(group.filter(item => item._timingReview === signature).map(item => JSON.stringify(timestampRangeKey(item))));
+    const selected = chosen.size === 1 ? [...chosen][0] : null;
+    const seen = new Set();
+    for (const item of group) {
+      const range = JSON.stringify(timestampRangeKey(item));
+      const conflict = variants.length > 1;
+      const allowed = (!conflict || selected === range) && !seen.has(range);
+      decisions.set(item, {
+        allowed, conflict, signature,
+        reason: allowed ? '' : conflict ? selected ? 'Alternative retained; another range was reviewed' : 'Conflicting timestamps: review the video and choose one range' : 'Repeated observation of the same range',
+      });
+      seen.add(range);
+    }
+  }
+  return decisions;
+}
+
 function outputSegmentAllowed(item) {
   const movie = isMovieSegment(item);
   const start=Number(item?.start_sec),end=Number(item?.end_sec);
-  return Number.isFinite(start)&&Number.isFinite(end)&&start>=0&&end-start>=5&&(!movie||(['outro','post-credits'].includes(item.segment_type)&&end-start<=(item.segment_type==='outro'?900:600)));
+  return !timestampRangeIssue(item)&&['intro','recap','outro','post-credits'].includes(item.segment_type)&&end-start>=5&&(!movie||(['outro','post-credits'].includes(item.segment_type)&&end-start<=(item.segment_type==='outro'?900:600)));
 }
 function introdbPayload(item) {
   const movie = isMovieSegment(item);
@@ -143,7 +231,8 @@ function introdbPayload(item) {
 
 /** IntroDB stores boundaries in milliseconds. */
 function sameIntrodbRange(a, b) {
-  return normalizeIntrodbSegmentType(a.segment_type) === normalizeIntrodbSegmentType(b.segment_type)
+  return !timestampRangeIssue(a) && !timestampRangeIssue(b)
+    && normalizeIntrodbSegmentType(a.segment_type) === normalizeIntrodbSegmentType(b.segment_type)
     && ['start_sec', 'end_sec'].every(key => a[key] != null && b[key] != null
       && Number.isFinite(Number(a[key])) && Number.isFinite(Number(b[key]))
       && Math.round(Number(a[key]) * 1000) === Math.round(Number(b[key]) * 1000));
@@ -167,12 +256,14 @@ function normalizeIntrodbSegmentType(segmentType) {
 }
 
 function introdbSeconds(value) {
-  if (typeof value === 'string' && !value.trim()) return null;
-  const number = Number(value);
-  if (Number.isFinite(number)) return number;
-  const parts = String(value || '').trim().split(':').map(Number);
-  if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
-  if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  const number = timestampNumber(value);
+  if (number !== null) return number;
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!/^(?:\d+:)?\d{1,2}:\d{2}(?:\.\d+)?$/.test(text)) return null;
+  const parts = text.split(':').map(Number);
+  if (parts.at(-1) >= 60 || (parts.length === 3 && parts[1] >= 60)) return null;
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   return null;
 }
 
@@ -180,7 +271,10 @@ function introdbRangeValue(source, secondsKeys, millisecondsKey) {
   for (const key of secondsKeys) {
     if (source?.[key] != null) return introdbSeconds(source[key]);
   }
-  if (source?.[millisecondsKey] != null) return Number(source[millisecondsKey]) / 1000;
+  if (source?.[millisecondsKey] != null) {
+    const value = timestampNumber(source[millisecondsKey]);
+    return value === null ? null : value / 1000;
+  }
   return null;
 }
 
@@ -243,7 +337,7 @@ function introdbRangeEntries(response) {
 
 let captureSessionKey = '';
 let captureSaveTimer = null;
-const CAPTURE_FIELDS = ['allItems', 'showTitle', 'mediaType', 'showId', 'showYear', 'imdbId', 'imdbIdsByShowId', 'providerEpisodes', 'providerEpisodesByShowId', 'interceptedCount'];
+const CAPTURE_FIELDS = ['allItems', 'knownMovieScenes', 'showTitle', 'mediaType', 'showId', 'showYear', 'imdbId', 'imdbIdsByShowId', 'providerEpisodes', 'providerEpisodesByShowId', 'interceptedCount'];
 
 function saveCaptureSession() {
   if (!captureSessionKey) return;
@@ -270,7 +364,7 @@ function restoreCaptureSession(providerName) {
   try {
     const saved = JSON.parse(sessionStorage.getItem(captureSessionKey) || 'null');
     if (saved?.version !== 1 || !Array.isArray(saved.data?.allItems) || !Array.isArray(saved.showIds)) return false;
-    if (!saved.data.allItems.every(item => item && typeof item === 'object' && Number.isFinite(Number(item.start_sec)) && Number.isFinite(Number(item.end_sec)))) return false;
+    if (!saved.data.allItems.every(item => item && typeof item === 'object' && !timestampRangeIssue(item))) return false;
     for (const key of CAPTURE_FIELDS) {
       if (Object.hasOwn(saved.data, key)) state[key] = saved.data[key];
     }
@@ -421,12 +515,27 @@ function getGmXhr() {
          (typeof GM !== 'undefined' && GM.xmlHttpRequest ? GM.xmlHttpRequest : null);
 }
 
-function filterImdbTitleResults(results, mediaType = 'tv') {
+function normalizeImdbSearchTitle(title) {
+  return String(title || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+function imdbSearchQueries(title, { mediaType = 'tv' } = {}) {
+  const original = String(title || '').trim();
+  const queries = [original];
+  if (String(mediaType).toLowerCase() !== 'movie') {
+    const fallback = original.replace(/(?:\s+|\s*[-:–—]\s*)(?:de\s+serie|the\s+series)\s*$/i, '').trim();
+    if (fallback && fallback !== original) queries.push(fallback);
+  }
+  return queries;
+}
+
+function filterImdbTitleResults(results, mediaType = 'tv', exactTitle = '') {
   const movieQids = new Set(['movie', 'tvmovie', 'videomovie', 'featurefilm', 'film', 'short', 'tvshort']);
   const allowedQids = String(mediaType).toLowerCase() === 'movie'
     ? movieQids
     : new Set(['tvseries', 'tvminiseries', 'tvshort', 'tvspecial']);
-  return (results || []).filter(result => allowedQids.has(String(result?.qid || '').toLowerCase()));
+  return (results || []).filter(result => allowedQids.has(String(result?.qid || '').toLowerCase()) &&
+    (!exactTitle || normalizeImdbSearchTitle(result?.l) === normalizeImdbSearchTitle(exactTitle)));
 }
 
 function chooseImdbTitleResult(results, title, year) {
@@ -447,8 +556,9 @@ function chooseImdbTitleResult(results, title, year) {
   return best;
 }
 
-function resolveImdbSearchResponse(data, title, year, mediaType) {
-  const results = filterImdbTitleResults(data?.d, mediaType);
+function resolveImdbSearchResponse(data, title, year, mediaType, exactTitle = false) {
+  const results = filterImdbTitleResults(data?.d, mediaType, exactTitle ? title : '')
+    .filter(result => !exactTitle || !year || String(result.y || '') === String(year));
   console.log(`[NFE] Filtered ${mediaType === 'movie' ? 'movie' : 'TV series'} results:`, results.length);
   if (!results.length) return { success: false, error: 'Not found on IMDb' };
 
@@ -470,6 +580,16 @@ function resolveImdbSearchResponse(data, title, year, mediaType) {
  * Search IMDb by title and return the best matching media ID.
  */
 async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
+  const queries = imdbSearchQueries(title, { mediaType });
+  let result;
+  for (const [index, queryTitle] of queries.entries()) {
+    result = await searchImdbQuery(queryTitle, year, { mediaType, exactTitle: index > 0 });
+    if (result.success || result.error !== 'Not found on IMDb') return result;
+  }
+  return result;
+}
+
+async function searchImdbQuery(title, year, { mediaType, exactTitle }) {
   const query = encodeURIComponent(String(title || '').toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '').trim());
   const url = `https://v3.sg.media-imdb.com/suggestion/x/${query}.json`;
   console.log('[NFE] IMDb search request URL:', url, 'for title:', title, 'year:', year);
@@ -490,9 +610,10 @@ async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
         onload: (response) => {
           console.log('[NFE] IMDb search response status:', response.status, 'responseText length:', response.responseText?.length);
           try {
+            if (response.status !== 200) { resolve({ success: false, error: `IMDb returned HTTP ${response.status}` }); return; }
             const data = JSON.parse(response.responseText);
             console.log('[NFE] IMDb search response data:', data);
-            resolve(resolveImdbSearchResponse(data, title, year, mediaType));
+            resolve(resolveImdbSearchResponse(data, title, year, mediaType, exactTitle));
           } catch (parseError) {
             console.error('[NFE] IMDb response parse error:', parseError);
             resolve({ success: false, error: 'Failed to parse IMDb response' });
@@ -513,9 +634,10 @@ async function searchImdbByTitle(title, year, { mediaType = 'tv' } = {}) {
   console.log('[NFE] Using fetch fallback (may fail due to CORS)');
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) return { success: false, error: `IMDb returned HTTP ${response.status}` };
     const data = await response.json();
     console.log('[NFE] IMDb search response data:', data);
-    return resolveImdbSearchResponse(data, title, year, mediaType);
+    return resolveImdbSearchResponse(data, title, year, mediaType, exactTitle);
   } catch (error) {
     console.error('[NFE] Fetch fallback error:', error);
     return { success: false, error: 'Network error connecting to IMDb (CORS or network issue)' };
@@ -993,11 +1115,15 @@ function cachedTvdbGet(cache, key, path) {
   return cache.get(key);
 }
 
+function tvdbEpisodeListCacheKey(seriesId, language = TVDB_EPISODE_LANGUAGE) {
+  return `series:${seriesId}|seasonType:${TVDB_SEASON_TYPE}|language:${String(language || TVDB_EPISODE_LANGUAGE).trim().toLowerCase()}|page:0`;
+}
+
 async function fetchTvdbEpisodeList(seriesId, language = TVDB_EPISODE_LANGUAGE) {
   const normalizedLanguage = String(language || TVDB_EPISODE_LANGUAGE).trim().toLowerCase();
   const encodedSeriesId = encodeURIComponent(seriesId);
   const encodedLanguage = encodeURIComponent(normalizedLanguage);
-  const cacheKey = `series:${seriesId}|seasonType:${TVDB_SEASON_TYPE}|language:${normalizedLanguage}|page:0`;
+  const cacheKey = tvdbEpisodeListCacheKey(seriesId, normalizedLanguage);
   const path = `/series/${encodedSeriesId}/episodes/${TVDB_SEASON_TYPE}/${encodedLanguage}`;
   if (!episodeListCache.has(cacheKey)) episodeListCache.set(cacheKey, fetchAllTvdbEpisodes(path).catch(error => { episodeListCache.delete(cacheKey); throw error; }));
   return episodeListCache.get(cacheKey);
@@ -1350,6 +1476,7 @@ function logTvdbEpisodeMatchTitles(seriesId, providerEpisodes, episodes) {
       season: episode.season,
       episode: episode.episode,
       titles: [episode.title, ...(episode.alternateTitles || [])].filter(Boolean),
+      aired: validTvdbAirDate(episode.aired) ? episode.aired : null,
     })),
   };
   console.info('[TVDB] Episode titles available for matching', matchingInput);
@@ -1372,6 +1499,7 @@ function cleanTvdbEpisodes(episodes) {
       season,
       episode: number,
       title: String(episode.name || '').trim(),
+      aired: episode.aired,
     });
   }
   return {
@@ -1407,6 +1535,50 @@ function findDuplicateNumber(episodes) {
   return null;
 }
 
+// TVDB's EpisodeBaseRecord.aired is a calendar date, not a UTC timestamp.
+// Undated provider-absent placeholders use a separate counting policy below.
+function validTvdbAirDate(aired) {
+  if (typeof aired !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(aired)) return false;
+  const parsed = new Date(`${aired}T00:00:00Z`);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === aired;
+}
+
+function tvdbEpisodeAirsInFuture(episode, today) {
+  return validTvdbAirDate(episode.aired) && episode.aired > today;
+}
+
+/** Some translated lists omit aired. Verify only the additional canonical rows. */
+async function completeTvdbExtraEpisodeAirDates(tvdbEpisodes, providerEpisodes, seriesId) {
+  if (providerEpisodes.length >= tvdbEpisodes.length) return [];
+  const byNumber = new Map(tvdbEpisodes.map(episode => [`${episode.season}|${episode.episode}`, episode]));
+  const providerNumbers = new Set(providerEpisodes.map(episode => `${episode.season}|${episode.episode}`));
+  // Different provider numbering still needs the existing exact-title fallback.
+  if (![...providerNumbers].every(key => byNumber.has(key))) return [];
+  const extra = tvdbEpisodes.filter(episode => !providerNumbers.has(`${episode.season}|${episode.episode}`));
+  const missingDates = extra.filter(episode => !validTvdbAirDate(episode.aired));
+  // A mismatch must not fan out into hundreds of detail requests.
+  if (missingDates.length <= 20) {
+    for (let index = 0; index < missingDates.length; index += 4) {
+      await Promise.all(missingDates.slice(index, index + 4).map(async episode => {
+        try {
+          const base = await fetchTvdbEpisodeBase(episode.id);
+          if (base && typeof base === 'object') {
+            const sameEpisode = String(base.id) === String(episode.id) && Number(base.seasonNumber) === episode.season && Number(base.number) === episode.episode &&
+              (base.seriesId == null || String(base.seriesId) === String(seriesId));
+            episode._airDateConflict = !sameEpisode || (base.aired != null && String(base.aired).trim() !== '' && !validTvdbAirDate(base.aired));
+            if (sameEpisode && validTvdbAirDate(base.aired)) episode.aired = base.aired;
+          }
+        } catch (error) {
+          console.warn('[TVDB] Could not verify additional episode air date', { episodeId: episode.id, reason: error.message });
+        }
+        // Missing dates and failed lookups can be corrected; allow a later retry.
+        if (!validTvdbAirDate(episode.aired)) episodeBaseCache.delete(`episode:${episode.id}|base`);
+      }));
+    }
+  }
+  return extra.map(episode => ({ season: episode.season, episode: episode.episode, aired: validTvdbAirDate(episode.aired) ? episode.aired : null }));
+}
+
 function mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch = false } = {}) {
   const mapping = new Map();
   if (!requireTitleMatch && providerEpisodes.length === tvdbEpisodes.length) {
@@ -1416,6 +1588,34 @@ function mapEpisodes(providerEpisodes, tvdbEpisodes, { requireTitleMatch = false
       mapping,
       method: 'order',
       reason: 'regular-episode counts match',
+      matchStats: { matched: providerEpisodes.length, skipped: 0, skipReasons: {} },
+    };
+  }
+
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const providerNumbers = new Set(providerEpisodes.map(episode => `${episode.season}|${episode.episode}`));
+  const tvdbNumbers = new Set(tvdbEpisodes.map(episode => `${episode.season}|${episode.episode}`));
+  const sameNumbering = [...providerNumbers].every(key => tvdbNumbers.has(key));
+  const excludeFuture = episode => tvdbEpisodeAirsInFuture(episode, today) &&
+    !(sameNumbering && providerNumbers.has(`${episode.season}|${episode.episode}`));
+  const futureExcluded = tvdbEpisodes.filter(excludeFuture).length;
+  // Product counting policy: an undated extra row is a placeholder until it
+  // appears in the provider catalogue. Never remove an actually available row.
+  const excludeUndated = episode => sameNumbering && !episode._airDateConflict &&
+    (episode.aired == null || (typeof episode.aired === 'string' && episode.aired.trim() === '')) &&
+    !providerNumbers.has(`${episode.season}|${episode.episode}`);
+  const undatedExcluded = tvdbEpisodes.filter(excludeUndated).length;
+  const releasedEpisodes = tvdbEpisodes.filter(episode => !excludeFuture(episode) && !excludeUndated(episode));
+  if (!requireTitleMatch && (futureExcluded || undatedExcluded) && providerEpisodes.length === releasedEpisodes.length) {
+    providerEpisodes.forEach((episode, index) => mapping.set(`${episode.season}|${episode.episode}`, releasedEpisodes[index]));
+    return {
+      success: true,
+      mapping,
+      method: 'released-order',
+      reason: `available regular-episode counts match (${futureExcluded} future and ${undatedExcluded} undated provider-absent episode(s) excluded)`,
+      futureExcluded,
+      undatedExcluded,
       matchStats: { matched: providerEpisodes.length, skipped: 0, skipReasons: {} },
     };
   }
@@ -1558,6 +1758,7 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
     let result;
     let tvdbEpisodes = [];
     let tvdbSpecialsExcluded = 0;
+    let additionalTvdbEpisodes = [];
     if (useGtstAbsoluteTitleMatch) {
       result = await mapGtstAbsoluteTitleEpisodes(
         providerEpisodes,
@@ -1571,6 +1772,7 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
       const tvdbCatalog = cleanTvdbEpisodes(localizedEpisodes);
       tvdbEpisodes = tvdbCatalog.episodes;
       tvdbSpecialsExcluded = tvdbCatalog.specialsExcluded;
+      if (!requireTitleMatch) additionalTvdbEpisodes = await completeTvdbExtraEpisodeAirDates(tvdbEpisodes, providerEpisodes, tvdbSeriesId);
       if (requireTitleMatch || providerEpisodes.length !== tvdbEpisodes.length) {
         const additionalLanguages = episodeLanguages
           .filter(language => language !== TVDB_EPISODE_LANGUAGE);
@@ -1593,7 +1795,9 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
     }
     const stats = {
       providerRegular: providerEpisodes.length,
-      tvdbRegular: useGtstAbsoluteTitleMatch ? result.matchStats?.matched ?? 0 : tvdbEpisodes.length,
+      tvdbRegular: useGtstAbsoluteTitleMatch ? result.matchStats?.matched ?? 0 : tvdbEpisodes.length - (result.futureExcluded || 0) - (result.undatedExcluded || 0),
+      ...(result.futureExcluded ? { tvdbFutureExcluded: result.futureExcluded } : {}),
+      ...(result.undatedExcluded ? { tvdbUndatedExcluded: result.undatedExcluded } : {}),
       providerSpecialsExcluded,
       tvdbSpecialsExcluded,
       capturedSpecialsExcluded,
@@ -1601,7 +1805,16 @@ async function mapSeriesItemsToTvdb(items, providerCatalog) {
       regularEpisodesSkipped: result.matchStats?.skipped ?? providerEpisodes.length,
       regularEpisodeSkipReasons: result.matchStats?.skipReasons || {},
     };
-    if (!result.success) return { ...result, stats };
+    if (!result.success) {
+      // A retry should not remain stuck on a stale catalogue after a TVDB edit.
+      episodeListCache.delete(tvdbEpisodeListCacheKey(tvdbSeriesId));
+      const additional = additionalTvdbEpisodes.slice(0, 20).map(episode => `S${episode.season}E${episode.episode} (${episode.aired ? `air date ${episode.aired}` : 'air date unknown'})`).join(', ') + (additionalTvdbEpisodes.length > 20 ? `, and ${additionalTvdbEpisodes.length - 20} more` : '');
+      return {
+        ...result,
+        reason: `${result.reason}${additional ? `. Additional TVDB episode(s): ${additional}` : ''}`,
+        stats,
+      };
+    }
 
     const mappedItems = [];
     for (const item of regularItems) {
@@ -1647,6 +1860,145 @@ function recordProviderEpisode(episode, showId = state.showId) {
     state.providerEpisodesByShowId ||= {};
     state.providerEpisodesByShowId[normalizedShowId] = current;
   }
+}
+
+/** Videoland programme layouts group episode cards into season blocks. */
+function videolandSeasonNumber(block) {
+  const label = block?.analytics?.tealium?.block_title || block?.title || '';
+  const match = String(label).match(/\b(?:seizoen|season)\s+(\d+)\b/i);
+  return match ? Number(match[1]) : null;
+}
+
+function videolandEpisodeBlock(block) {
+  const feature = String(block?.analytics?.tealium?.from || '');
+  const label = String(block?.analytics?.tealium?.block_title || block?.title || '');
+  return videolandSeasonNumber(block) != null && !/recommend|related|trailer|advertis/i.test(`${feature} ${label}`);
+}
+
+function extractVideolandEpisodeCatalog(layout, programId) {
+  const episodes = new Map();
+  for (const block of layout?.blocks || []) {
+    if (!videolandEpisodeBlock(block)) continue;
+    const season = videolandSeasonNumber(block);
+    for (const row of block.content?.items || []) {
+      const item = row?.itemContent;
+      const target = item?.action?.target;
+      const video = target?.type === 'layout' ? target.value_layout : null;
+      if (!video || video.type !== 'video' || video.id == null) continue;
+      if (video.parent?.id != null && String(video.parent.id) !== String(programId)) continue;
+      if (item.isAvailable === false || item.isPlayable === false || item.isComingSoon === true) continue;
+      const label = String(item.extraTitle || item.title || '');
+      const episode = Number(item.episode ?? item.metadata?.episode ?? item.video?.episode ?? label.match(/^\s*#?(\d+)\s*[.):\-]/)?.[1]);
+      if (!Number.isInteger(episode) || episode < 1) continue;
+      const title = String(item.episodeTitle || item.image?.caption || item.extraTitle || item.title || '')
+        .replace(/^\s*#?\d+\s*[.):\-]\s*/, '').trim();
+      const entry = { providerId: String(video.id), season, episode, title };
+      const previous = episodes.get(entry.providerId);
+      if (previous && (previous.season !== season || previous.episode !== episode)) throw new Error('Videoland returned conflicting episode numbering.');
+      episodes.set(entry.providerId, entry);
+    }
+  }
+  return [...episodes.values()].sort((a, b) => a.season - b.season || a.episode - b.episode);
+}
+
+function videolandItemIds(items) {
+  return (items || []).map(row => row?.itemContent?.action?.target?.value_layout?.id ?? row?.itemContent?.video?.id ?? row?.id ?? null);
+}
+
+function videolandPaginationInfo(pagination) {
+  return ['currentPage', 'nextPage', 'totalPages', 'totalItems', 'itemsPerPage'].filter(key =>
+    pagination?.[key] != null && /^\d+$/.test(String(pagination[key])))
+    .map(key => `${key}=${pagination[key]}`).join(', ');
+}
+
+/** Follow both section and episode cursors, using the observed layout route. */
+async function loadVideolandEpisodeCatalog({ layout, url, programId, request }) {
+  const base = new URL(url);
+  if (base.protocol !== 'https:' || base.hostname !== 'layout.videoland.bedrock.tech' || !/\/(?:program|video)\/[^/]+\/layout$/.test(base.pathname)) {
+    throw new Error('Unsupported Videoland catalogue endpoint.');
+  }
+  if (!/^[A-Za-z0-9_-]+$/.test(String(programId))) throw new Error('Invalid Videoland programme ID.');
+  const originalPath = base.pathname;
+  base.pathname = base.pathname.replace(/\/(?:program|video)\/[^/]+\/layout$/, `/program/${encodeURIComponent(programId)}/layout`);
+  base.searchParams.delete('page');
+  base.searchParams.set('blockPage', '1');
+  base.searchParams.set('nbPages', '2');
+  let requests = 0;
+  const get = async (url, stage) => {
+    if (++requests > 200) throw new Error(`Videoland catalogue pagination limit reached while loading ${stage} (200 requests).`);
+    const result = await request(url.href);
+    if (!result || typeof result !== 'object') throw new Error('Videoland returned an invalid catalogue page.');
+    if (result.entity?.id != null && String(result.entity.id) !== String(programId)) throw new Error('Videoland returned another programme catalogue.');
+    return result;
+  };
+  const initialCursor = new URL(url).searchParams.get('blockPage') || '1';
+  // A video layout contains recommendations and a partial episode window. Load
+  // the programme itself, including its first page, before trusting its count.
+  const first = originalPath === base.pathname && initialCursor === '1' ? layout : await get(base, 'season sections');
+  if (first?.entity?.id != null && String(first.entity.id) !== String(programId)) throw new Error('Videoland returned another programme catalogue.');
+  const blocks = [...(first?.blocks || [])];
+  const seenBlocks = new Set(['1']);
+  const sectionSignature = blocks => JSON.stringify(blocks.map(block => [block.blockId, videolandItemIds(block.content?.items)]));
+  const seenSectionContents = new Set([sectionSignature(blocks)]);
+  let next = first?.pagination?.nextPage;
+  while (next != null) {
+    if (!/^[1-9]\d*$/.test(String(next)) || seenBlocks.has(String(next))) throw new Error('Videoland section pagination did not advance.');
+    seenBlocks.add(String(next));
+    const pageUrl = new URL(base);
+    pageUrl.searchParams.set('blockPage', String(next));
+    const page = await get(pageUrl, `season sections, page ${next}`);
+    if (!Array.isArray(page.blocks) || !page.blocks.length) throw new Error('Videoland returned an incomplete section page.');
+    const signature = sectionSignature(page.blocks);
+    if (seenSectionContents.has(signature) && page.pagination?.nextPage != null) {
+      throw new Error(`Videoland repeated the same season sections at page ${next}; ${videolandPaginationInfo(page.pagination)}. Open the series page and retry.`);
+    }
+    seenSectionContents.add(signature);
+    blocks.push(...page.blocks);
+    next = page.pagination?.nextPage;
+  }
+  const complete = [];
+  for (const block of blocks) {
+    if (!videolandEpisodeBlock(block)) continue;
+    const items = [...(block.content?.items || [])];
+    let cursor = block.content?.pagination?.nextPage;
+    const seen = new Set();
+    const seenItemContents = new Set([JSON.stringify(videolandItemIds(items))]);
+    let pagesPerRequest = 8;
+    while (cursor != null) {
+      if (!/^[1-9]\d*$/.test(String(cursor)) || seen.has(String(cursor)) || !/^[A-Za-z0-9_-]+$/.test(String(block.blockId || ''))) {
+        throw new Error('Videoland episode pagination did not advance.');
+      }
+      seen.add(String(cursor));
+      const pageUrl = new URL(base);
+      pageUrl.pathname = pageUrl.pathname.replace(/\/layout$/, `/block/${encodeURIComponent(block.blockId)}`);
+      pageUrl.searchParams.delete('blockPage');
+      pageUrl.searchParams.set('page', String(cursor));
+      pageUrl.searchParams.set('nbPages', String(pagesPerRequest));
+      let page;
+      const stage = `season ${videolandSeasonNumber(block)}, episode page ${cursor}`;
+      try { page = await get(pageUrl, stage); }
+      catch (error) {
+        // Some catalogue blocks support only one page per request. Never retry
+        // authentication, rate-limit, or malformed-data failures as a batch.
+        if (pagesPerRequest === 1 || ![500, 502, 503, 504].includes(error.status)) throw error;
+        pagesPerRequest = 1;
+        pageUrl.searchParams.set('nbPages', '1');
+        page = await get(pageUrl, stage);
+      }
+      if (!Array.isArray(page.content?.items)) throw new Error('Videoland returned an incomplete episode page.');
+      const signature = JSON.stringify(videolandItemIds(page.content.items));
+      if (page.content.items.length && seenItemContents.has(signature) && page.content.pagination?.nextPage != null) {
+        throw new Error(`Videoland repeated episode contents for ${stage}; ${videolandPaginationInfo(page.content.pagination)}. Open the series page and retry.`);
+      }
+      seenItemContents.add(signature);
+      items.push(...page.content.items);
+      cursor = page.content.pagination?.nextPage;
+    }
+    complete.push({ ...block, content: { ...block.content, items } });
+  }
+  const episodes = extractVideolandEpisodeCatalog({ blocks: complete }, programId);
+  if (!episodes.length) throw new Error('Videoland did not provide a usable season episode catalogue. Open the series page and retry.');
+  return episodes;
 }
 
 /**
@@ -1729,7 +2081,7 @@ const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Series segments are fetched per episode. Movie credits are temporarily disabled while provider markers are verified.',
+    captureHint: 'Episode counts are scanned from the season lists. Open each episode to capture its timestamps. Movie credits are temporarily disabled.',
   },
   hbo: {
     name: 'HBO Max',
@@ -1761,7 +2113,7 @@ const PROVIDER_CONFIGS = {
     branding: {
       title: 'SegmentScraper',
     },
-    captureHint: 'Series segments are fetched per episode. Movie credits are temporarily disabled while provider markers are verified.',
+    captureHint: 'Episode counts are collected from the complete series catalogue. Open each episode to capture its timestamps. Movie credits are temporarily disabled while provider markers are verified.',
   },
   skyshowtime: {
     name: 'SkyShowtime',
@@ -1788,14 +2140,6 @@ const PROVIDER_CONFIGS = {
  */
 function getProviderConfig(providerName) {
   return PROVIDER_CONFIGS[providerName.toLowerCase()] || PROVIDER_CONFIGS.netflix;
-}
-
-/**
- * Get all provider names
- * @returns {string[]} - Array of provider names
- */
-function getProviderNames() {
-  return Object.keys(PROVIDER_CONFIGS);
 }
 
 /**
@@ -1920,6 +2264,8 @@ function createNormalizedSegment({
   episodeTitle = '',
   mediaType = 'tv',
   creditPart = null,
+  timing = null,
+  durationSec = null,
 }) {
   const segmentType = normalizeSegmentType(providerSegmentType, providerName);
   if (!segmentType) return null;
@@ -1927,6 +2273,8 @@ function createNormalizedSegment({
   return {
     _eid: episodeId,
     _episodeTitle: episodeTitle,
+    ...(timing ? { _timing: timing } : {}),
+    ...(durationSec != null ? { _duration_sec: durationSec } : {}),
     ...(showId ? { _showId: String(showId) } : {}),
     ...(String(mediaType).toLowerCase() === 'movie' ? { media_type: 'movie' } : {}),
     ...(creditPart ? { credit_part: creditPart } : {}),
@@ -1937,16 +2285,6 @@ function createNormalizedSegment({
     start_sec: startSec,
     end_sec: endSec,
   };
-}
-
-/**
- * Get all known segment types for a provider
- * @param {string} providerName - The provider name
- * @returns {string[]} - Array of normalized segment types
- */
-function getProviderSegmentTypes(providerName) {
-  const mappings = PROVIDER_MAPPINGS[providerName.toLowerCase()] || {};
-  return [...new Set(Object.values(mappings))];
 }
 
 /** Shared, provider-agnostic logging for newly captured episode timestamps. */
@@ -2069,6 +2407,31 @@ function setupPanelEventListeners() {
   bindPanelCallback(document.getElementById('nfe-tmdb-set'), 'onTmdbSet');
   bindButtonClickOnEnter(document.getElementById('nfe-tmdb-input'), () => document.getElementById('nfe-tmdb-set'));
   tvdbInputs.filter(Boolean).forEach(input => bindButtonClickOnEnter(input, () => tvdbSetBtn));
+  for (const [id, callback] of [['start','onManualStart'],['end','onManualEnd'],['preview-start','onManualPreviewStart'],['preview-end','onManualPreviewEnd'],['save','onManualSave'],['reset','onManualReset']]) {
+    bindPanelCallback(document.getElementById(`nfe-manual-${id}`), callback);
+  }
+  for (const id of ['media','type','season','episode','title']) {
+    document.getElementById(`nfe-manual-${id}`)?.addEventListener('change', () => {
+      const fields = document.getElementById('nfe-manual-episode-fields');
+      if (fields) fields.hidden = document.getElementById('nfe-manual-media').value === 'movie';
+      window.nfePanelCallbacks?.onManualReset?.();
+    });
+  }
+}
+
+function updateManualCapture({ start, end, message }) {
+  for (const [key, value] of [['start', start], ['end', end]]) {
+    const label = document.getElementById(`nfe-manual-${key}-value`);
+    if (label) label.textContent = Number.isFinite(value) ? `${value.toFixed(3)} s` : 'Not marked';
+    const preview = document.getElementById(`nfe-manual-preview-${key}`);
+    if (preview) preview.disabled = !Number.isFinite(value);
+  }
+  const save = document.getElementById('nfe-manual-save');
+  if (save) save.disabled = !Number.isFinite(start) || !Number.isFinite(end);
+  const review = document.getElementById('nfe-manual-reviewed');
+  if (review) review.checked = false;
+  const status = document.getElementById('nfe-manual-status');
+  if (status) status.textContent = message || '';
 }
 
 /**
@@ -2084,6 +2447,7 @@ function createPanel() {
   }
   const { colors: providerColors, branding, infoAccent, nameColor } = config;
   const colors = PANEL_COLORS;
+  const runningVersion = typeof SEGMENTSCRAPER_VERSION === 'string' ? SEGMENTSCRAPER_VERSION : state.currentVersion || 'development';
   
   if (document.getElementById('nfe-panel')) {
     console.log('[NFE] Panel already exists');
@@ -2144,7 +2508,19 @@ function createPanel() {
       }
       #nfe-panel button, #nfe-panel input { min-height:0; }
       #nfe-panel :focus-visible { outline:2px solid white; outline-offset:2px; }
-      #nfe-panel summary { cursor:pointer; padding:8px 0; font-size:12px; font-weight:700; }
+      #nfe-panel details { display:block!important; visibility:visible!important; }
+      #nfe-panel details:not([open]) > :not(summary) { display:none!important; }
+      #nfe-panel summary { display:flex!important; visibility:visible!important; align-items:center; gap:6px; cursor:pointer; padding:8px 0; font-size:12px; font-weight:700; color:${colors.text}; list-style:none!important; }
+      #nfe-panel summary::-webkit-details-marker { display:none; }
+      #nfe-panel summary::before { content:'▸'; display:inline-block!important; }
+      #nfe-panel details[open] > summary::before { content:'▾'; }
+      #nfe-manual { background:${colors.panelBg}; border-radius:9px; padding:4px 10px 10px; margin-bottom:10px; }
+      #nfe-manual label { display:block; font-size:11px; margin:7px 0; color:${colors.textSecondary}; }
+      #nfe-manual input:not([type="checkbox"]), #nfe-manual select { width:100%; min-width:0; margin-top:4px; padding:6px; background:#242424; color:#fff; border:1px solid #444; border-radius:5px; font:12px Arial,sans-serif; }
+      #nfe-manual button { flex:1; padding:7px 5px; border:1px solid #444; border-radius:6px; background:#242424; color:#fff; cursor:pointer; font:12px Arial,sans-serif; }
+      #nfe-manual button:disabled { opacity:.45; cursor:default; }
+      #nfe-manual input[type="checkbox"] { appearance:auto; -webkit-appearance:auto; }
+      #nfe-manual [hidden] { display:none!important; }
     </style>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
       <span style="font-size:13px;font-weight:700;color:${nameColor}">${config.name} ${branding.title}</span>
@@ -2152,6 +2528,7 @@ function createPanel() {
         onmouseenter="this.style.color='${colors.text}'" onmouseleave="this.style.color='${colors.textMuted}'">✕</button>
     </div>
 
+    <div id="nfe-running-version" style="font-size:10px;color:${colors.textMuted};margin-bottom:8px">Running version: v${runningVersion}</div>
     <div id="nfe-title-display" style="color:${colors.textSecondary};font-size:11px;margin-bottom:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:13px"></div>
 
     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px">
@@ -2187,6 +2564,24 @@ function createPanel() {
         <div id="nfe-cnt-files-label" style="font-size:9px;color:${colors.textMuted};margin-top:3px;text-transform:uppercase;letter-spacing:0.4px">Files</div>
       </div>
     </div>
+
+    <details id="nfe-manual"><summary>Mark timestamps from video</summary>
+      <div style="font-size:11px;line-height:1.4;color:${colors.textSecondary}">Confirm the IMDb title above and the playing episode below. Each mark pauses the video.</div>
+      <div style="display:flex;gap:6px">
+        <label style="flex:1">Media<select id="nfe-manual-media"><option value="tv" ${state.mediaType === 'movie' ? '' : 'selected'}>TV episode</option><option value="movie" ${state.mediaType === 'movie' ? 'selected' : ''}>Movie</option></select></label>
+        <label style="flex:1">Segment type<select id="nfe-manual-type"><option value="intro">Intro</option><option value="recap">Recap</option><option value="outro" ${state.mediaType === 'movie' ? 'selected' : ''}>Outro</option></select></label>
+      </div>
+      <div id="nfe-manual-episode-fields" ${state.mediaType === 'movie' ? 'hidden' : ''}>
+        <div style="display:flex;gap:6px"><label style="flex:1">Season<input id="nfe-manual-season" type="number" min="1" step="1" placeholder="1"></label><label style="flex:1">Episode<input id="nfe-manual-episode" type="number" min="1" step="1" placeholder="1"></label></div>
+        <label>Episode title<input id="nfe-manual-title" type="text" placeholder="Actual episode title for TVDB matching"></label>
+      </div>
+      <div style="display:flex;gap:6px"><button id="nfe-manual-start">Start here</button><button id="nfe-manual-end">End here</button></div>
+      <div style="display:flex;justify-content:space-between;margin:6px 0;font:11px monospace"><span>Start: <output id="nfe-manual-start-value">Not marked</output></span><span>End: <output id="nfe-manual-end-value">Not marked</output></span></div>
+      <div style="display:flex;gap:6px"><button id="nfe-manual-preview-start" disabled>Preview start</button><button id="nfe-manual-preview-end" disabled>Preview end</button></div>
+      <label><input id="nfe-manual-reviewed" type="checkbox"> I checked this title/episode and both boundaries.</label>
+      <div style="display:flex;gap:6px"><button id="nfe-manual-save" disabled>Save segment</button><button id="nfe-manual-reset">Reset marks</button></div>
+      <div id="nfe-manual-status" role="status" style="font-size:11px;line-height:1.4;margin-top:7px">Choose Intro, Recap or Outro. Saving keeps a local candidate; uploading requires separate approval.</div>
+    </details>
 
     <div style="display:flex;align-items:center;gap:6px;margin:8px 0">
       <div style="flex:1;height:1px;background:${colors.border}"></div>
@@ -2251,11 +2646,8 @@ function createPanel() {
        </div>
      </div>
 
-     </details>
-     <div id="nfe-session-status" role="status" style="font-size:11px;color:#aaa;margin:8px 0;line-height:1.4"></div>
-     <div id="nfe-introdb-status" role="status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
-
-     <div style="margin-bottom:10px;font-size:11px;color:${colors.textSecondary}">
+     <div style="display:flex;align-items:center;gap:6px;margin:8px 0"><div style="flex:1;height:1px;background:#222"></div><span style="font-size:10px;color:${colors.textMuted};font-weight:600;letter-spacing:0.5px">TMDB</span><div style="flex:1;height:1px;background:#222"></div></div>
+     <div style="background:${colors.panelBg};border-radius:9px;padding:10px;margin-bottom:8px;font-size:11px;line-height:1.4;color:${colors.textSecondary}">
        <label for="nfe-tmdb-input">TMDB API Read Access Token (movie scene check)</label>
        <div style="display:flex;gap:4px;margin:5px 0">
          <input id="nfe-tmdb-input" type="password" autocomplete="off" placeholder="Paste token; blank clears it"
@@ -2265,6 +2657,9 @@ function createPanel() {
        <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer" style="color:${colors.textSecondary}">Get a TMDB token</a> · Saved locally. Movie export/upload requires a successful check. Missing keywords do not prove scene absence.
        <div>This product uses the TMDB API but is not endorsed or certified by TMDB.</div>
      </div>
+     </details>
+     <div id="nfe-session-status" role="status" style="font-size:11px;color:#aaa;margin:8px 0;line-height:1.4"></div>
+     <div id="nfe-introdb-status" role="status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:6px;line-height:1.4;text-align:center;${state.introdbApiKey ? '' : 'display:none;'}">${state.introdbApiKey ? 'API key saved locally' : ''}</div>
      <button id="nfe-submit"
        style="width:100%;background:${providerColors.secondary};border:none;border-radius:8px;color:#fff;
               padding:10px;cursor:pointer;font-size:13px;font-weight:700;margin-bottom:6px;
@@ -2429,14 +2824,6 @@ function updateImdbInput() {
 }
 
 /**
- * Update the API key input field with current API key
- */
-function updateApikeyInput() {
-  const inp = document.getElementById('nfe-apikey-input');
-  if (inp) inp.value = '';
-}
-
-/**
  * Show a toast notification
  */
 function toast(msg) {
@@ -2550,9 +2937,12 @@ function showExportPreview(view) {
   };
   const approvedKeys = new Set();
   const approvalInputs = new Map();
+  let typeFilter = 'all';
+  const matchesFilter = item => typeFilter === 'all' || item.segment_type === typeFilter;
+  const exportSelection = () => (view.items || []).filter(matchesFilter);
   const candidates = () => {
     const allowed = new Set((view.rows || []).filter(row => row.status === 'NEW').map(row => uploadSegmentKey(row.canonical || row.item)));
-    return (view.mode === 'submit' ? (view.items || []) : (view.uploadItems || [])).filter(item => allowed.has(uploadSegmentKey(item)));
+    return (view.mode === 'submit' ? (view.items || []) : (view.uploadItems || [])).filter(item => matchesFilter(item) && allowed.has(uploadSegmentKey(item)));
   };
   const selected = () => candidates().filter(item => approvedKeys.has(uploadSegmentKey(item)));
   const approvalControl = (text, items) => {
@@ -2574,14 +2964,29 @@ function showExportPreview(view) {
   };
   const update = next => {
     view = next;
-    const rows = view.rows || [];
-    summary.textContent = `${rows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${view.duplicateCount} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
+    const allRows = view.rows || [];
+    const rows = allRows.filter(row => matchesFilter(row.item));
+    summary.textContent = `${rows.length} of ${allRows.length} timestamps · ${rows.filter(row => row.status === 'NEW').length} NEW · ${rows.filter(row => row.status === 'In IntroDB').length} in IntroDB · ${rows.filter(row => row.status === 'Unavailable').length} unavailable. ${view.message || ''}`;
+    const filterLabel = document.createElement('label'), filter = document.createElement('select');
+    filterLabel.textContent = 'Segment filter: ';
+    filterLabel.style.cssText = 'display:block;margin-top:10px;font:12px Arial,sans-serif;';
+    filter.setAttribute('aria-label', 'Filter timestamps by segment type');
+    filter.style.cssText = 'background:#242424;color:#fff;border:1px solid #555;border-radius:5px;padding:6px;font:12px Arial,sans-serif;';
+    for (const [value, label] of [['all','All'],['intro','Intro'],['recap','Recap'],['outro','Outro'],['post-credits','Extra scenes']]) {
+      const option = document.createElement('option'); option.value = value;
+      option.textContent = `${label} (${allRows.filter(row => value === 'all' || row.item.segment_type === value).length})`;
+      filter.append(option);
+    }
+    filter.value = typeFilter;
+    filter.addEventListener('change', () => { typeFilter = filter.value; approvedKeys.clear(); update(view); summary.querySelector?.('select')?.focus(); });
+    filterLabel.append(filter, document.createTextNode(' · Export and approval apply to the visible type.'));
+    summary.append(filterLabel);
     preview.replaceChildren();
     approvalInputs.clear();
     const eligible = candidates();
     const eligibleKeys = new Set(eligible.map(uploadSegmentKey));
     for(const key of approvedKeys) if(!eligibleKeys.has(key)) approvedKeys.delete(key);
-    if(eligible.length) preview.append(approvalControl('Approve all eligible timestamps after video and IntroDB comparison', eligible));
+    if(eligible.length) preview.append(approvalControl('Approve all visible eligible timestamps after video and IntroDB comparison', eligible));
     const groups = new Set();
     for (const row of rows) {
       const item = row.item;
@@ -2605,9 +3010,15 @@ function showExportPreview(view) {
       const canonicalEpisode = row.canonical?.episode;
       if (!movie && canonicalSeason != null && canonicalEpisode != null) meta.textContent += ` · TVDB S${canonicalSeason}E${canonicalEpisode}`;
       if (row.reason) meta.textContent += `\n${row.reason}`;
+      if (item._timing) {
+        const evidence = item._timing;
+        const divisor = evidence.unit === 'milliseconds' ? 1000 : 1;
+        meta.textContent += `\nSource: ${evidence.provider} / ${evidence.source} · raw ${evidence.raw_start ?? 'unknown'} → ${evidence.raw_end ?? 'unknown'} ${evidence.unit}`;
+        if (evidence.correction_sec) meta.textContent += `\nStart correction: ${evidence.correction_sec} s · original ${clock(evidence.raw_start / divisor)}`;
+      }
       meta.style.cssText = 'margin-top:4px; white-space:pre-line; color:#ddd; font:11px/1.5 ui-monospace,Consolas,monospace;';
       const currentRanges = row.existingSegments
-        ? row.existingSegments
+        ? row.existingSegments.filter(matchesFilter)
         : (row.existingRanges || []).map(range => ({ segment_type: item.segment_type, start_sec: range.startSec, end_sec: range.endSec }));
       const comparison = document.createElement('div');
       comparison.style.cssText = 'display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:9px;';
@@ -2619,15 +3030,22 @@ function showExportPreview(view) {
       if(eligibleKeys.has(uploadSegmentKey(canonical)) && row.status !== 'In IntroDB' && row.status !== 'Unavailable') {
         entry.append(approvalControl('I checked this timestamp against the video and IntroDB and approve its upload', [canonical]));
       }
+      if (row.onChoose && !view.checking) {
+        const choose = document.createElement('button');
+        choose.textContent = 'Use this range after video review';
+        choose.style.cssText = cancel.style.cssText;
+        choose.addEventListener('click', () => { close(false); row.onChoose(); });
+        entry.append(choose);
+      }
       preview.append(entry);
     }
     confirm.hidden = typeof view.onConfirm !== 'function';
-    confirm.disabled = Boolean(view.checking || !(view.items || []).length || typeof view.onConfirm !== 'function' || (view.mode === 'submit' && !selected().length));
+    confirm.disabled = Boolean(view.checking || !exportSelection().length || typeof view.onConfirm !== 'function' || (view.mode === 'submit' && !selected().length));
     confirm.style.opacity = confirm.disabled ? '.45' : '1';
     confirm.style.cursor = confirm.disabled ? 'not-allowed' : 'pointer';
     confirm.textContent = view.checking
       ? 'Checking…'
-      : view.mode === 'submit' ? `Upload to IntroDB (${selected().length})` : `Download JSON (${view.fileCount})`;
+      : view.mode === 'submit' ? `Upload to IntroDB (${selected().length})` : `Download JSON (${exportSelection().length} timestamps)`;
     upload.hidden = typeof view.onUpload !== 'function';
     upload.disabled = Boolean(view.checking || !selected().length || !view.onUpload);
     upload.style.opacity = upload.disabled ? '.45' : '1';
@@ -2651,14 +3069,14 @@ function showExportPreview(view) {
     if (event.key === 'Escape') { event.preventDefault(); close(); }
     if (event.key === 'Tab') {
       event.preventDefault();
-      const focusables = [...dialog.querySelectorAll('input,button')].filter(button => !button.hidden && !button.disabled);
+      const focusables = [...dialog.querySelectorAll('input,button,select')].filter(button => !button.hidden && !button.disabled);
       const currentIndex = focusables.indexOf(document.activeElement);
       focusables[(currentIndex + (event.shiftKey ? -1 : 1) + focusables.length) % focusables.length]?.focus();
     }
   });
   cancel.addEventListener('click', close);
   overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  confirm.addEventListener('click', () => { if (!confirm.disabled) { const onConfirm = view.onConfirm; close(false); onConfirm(selected()); } });
+  confirm.addEventListener('click', () => { if (!confirm.disabled) { const onConfirm = view.onConfirm; close(false); onConfirm(selected(), exportSelection()); } });
   upload.addEventListener('click', () => { if (!upload.disabled) { const onUpload = view.onUpload; close(false); onUpload(selected()); } });
   actions.append(cancel, confirm, upload);
   dialog.append(heading, summary, preview, actions);
@@ -2826,6 +3244,115 @@ function injectBtn(providerName, getAnchor = getNextEpBtn) {
   }
 }
 
+/** Transient player bindings never enter session storage or exports. */
+function createManualCapture({ getContext, record, render, findVideo = findManualCaptureVideo }) {
+  let draft = null, video = null, source = '', contextKey = '', frame = null, frameRequest = null, previewStop = null;
+  const publish = message => render({ start: draft?.start ?? null, end: draft?.end ?? null, message });
+  const stopPreview = () => {
+    if (previewStop) {
+      previewStop.video.removeEventListener('timeupdate', previewStop.listener);
+      if (previewStop.video.currentSrc === previewStop.source) previewStop.video.pause();
+    }
+    previewStop = null;
+  };
+  const reset = (message = 'Choose the segment type, then pause at each boundary and mark it.') => {
+    stopPreview();
+    if (video) {
+      video.removeEventListener('emptied', changed);
+      video.removeEventListener('loadstart', changed);
+      if (frameRequest != null) video.cancelVideoFrameCallback?.(frameRequest);
+    }
+    draft = null; video = null; frame = null; frameRequest = null;
+    publish(message);
+  };
+  const changed = () => reset('Video changed. Confirm the playing title/episode and mark both boundaries again.');
+  const bind = current => {
+    video = current;
+    source = video.currentSrc;
+    video.addEventListener('emptied', changed);
+    video.addEventListener('loadstart', changed);
+    const observe = (_, metadata) => {
+      if (video !== current) return;
+      frame = { time: metadata.mediaTime, clock: current.currentTime };
+      frameRequest = current.requestVideoFrameCallback(observe);
+    };
+    if (typeof video.requestVideoFrameCallback === 'function') frameRequest = video.requestVideoFrameCallback(observe);
+  };
+  const current = () => {
+    const context = getContext();
+    const key = JSON.stringify(context);
+    const found = findVideo();
+    if (!found || !Number.isFinite(found.duration) || found.duration <= 0 || !Number.isFinite(found.currentTime) || found.seeking) {
+      throw new Error('Wait for one visible video to load and finish seeking. Multiple visible videos cannot be marked safely.');
+    }
+    if (draft && (video !== found || source !== found.currentSrc || contextKey !== key || draft.duration !== found.duration)) {
+      changed(); throw new Error('Video or episode changed. Mark the start again.');
+    }
+    if (!draft && video && (video !== found || source !== found.currentSrc || contextKey !== key)) reset();
+    if (!video) { bind(found); contextKey = key; }
+    return context;
+  };
+  const mark = which => {
+    const context = current();
+    if (which === 'end' && !draft) throw new Error('Mark the start first.');
+    stopPreview();
+    video.pause();
+    // A fresh displayed-frame time is useful; after a seek use the media clock.
+    const time = frame && Math.abs(frame.clock - video.currentTime) < 0.05 && Math.abs(frame.time - video.currentTime) < 0.2 ? frame.time : video.currentTime;
+    if (which === 'start') draft = { ...context, start: time, end: null, duration: video.duration };
+    else draft.end = time;
+    publish(which === 'start' ? 'Start marked. Play or seek to the end, then choose End here.' : 'End marked. Preview both boundaries, then save the reviewed segment.');
+  };
+  const preview = which => {
+    current();
+    const time = draft?.[which];
+    if (!Number.isFinite(time)) throw new Error(`Mark the ${which} first.`);
+    stopPreview();
+    const currentVideo = video, end = Math.min(video.duration, time + 2);
+    const pending = { video: currentVideo, source: currentVideo.currentSrc, listener: null };
+    pending.listener = () => { if (previewStop === pending && currentVideo.currentTime >= end) stopPreview(); };
+    previewStop = pending;
+    const failed = () => {
+      // An old play() rejection must not cancel a newer preview or show a stale error.
+      if (previewStop !== pending) return;
+      stopPreview();
+      throw new Error('Use the player’s Play button to preview this boundary.');
+    };
+    try {
+      currentVideo.pause();
+      currentVideo.currentTime = Math.max(0, time - 2);
+      currentVideo.addEventListener('timeupdate', pending.listener);
+      return Promise.resolve(currentVideo.play()).catch(failed);
+    } catch (_) { return failed(); }
+  };
+  const save = reviewed => {
+    current();
+    if (!reviewed) throw new Error('Confirm that you checked the title/episode and both boundaries.');
+    if (!draft) throw new Error('Mark both boundaries first.');
+    const item = createManualSegment(draft);
+    record(item);
+    reset(`Saved ${item.segment_type}: ${item.start_sec.toFixed(3)}–${item.end_sec.toFixed(3)} s. Open Show timestamps to review/export.`);
+    return item;
+  };
+  return { mark, preview, save, reset };
+}
+
+function findManualCaptureVideo() {
+  const root = document.fullscreenElement || document;
+  const candidates = root.matches?.('video') ? [root] : [...root.querySelectorAll('video')];
+  const visible = candidates.filter(video => {
+    const rect = video.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0 || rect.bottom <= 0 || rect.right <= 0
+      || rect.top >= window.innerHeight || rect.left >= window.innerWidth || video.readyState < 2) return false;
+    for (let element = video; element; element = element.parentElement) {
+      const style = getComputedStyle(element);
+      if (style.visibility === 'hidden' || style.visibility === 'collapse' || style.display === 'none' || Number(style.opacity) === 0) return false;
+    }
+    return true;
+  });
+  return visible.length === 1 ? visible[0] : null;
+}
+
 /**
  * Shared provider bootstrap and control flow.
  * The Netflix UI/controls are the single source of truth for every provider.
@@ -2837,6 +3364,7 @@ let activeProviderConfig = getProviderConfig('netflix');
 let activeProviderName = 'netflix';
 const introdbChecksInFlight = new Map();
 const acceptedUploadKeys = new Set();
+let manualCapture = null;
 
 
 function getItemShowId(item) {
@@ -2917,6 +3445,8 @@ async function filterMoviesWithKnownExtraScenes(items, existingByKey) {
   const excluded = new Set();
   for (const item of [...state.allItems, ...items]) {
     if (isMovieItem(item) && item.segment_type === 'post-credits') excluded.add(getItemCacheKey(item));
+    if (isMovieItem(item) && (state.knownMovieScenes || []).some(scene =>
+      (scene.showId && scene.showId === getItemShowId(item)) || (scene.imdbId && scene.imdbId === item.imdb_id))) excluded.add(getItemCacheKey(item));
   }
   for (const item of items) {
     if (!isMovieItem(item)) continue;
@@ -2995,6 +3525,15 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
     normalizedMediaType !== (state.mediaType || 'tv')
   );
   if (showChanged) {
+    manualCapture?.reset('Title changed. Confirm the playing title/episode and mark both boundaries again.');
+    const manualMedia = document.getElementById('nfe-manual-media');
+    if (manualMedia) manualMedia.value = normalizedMediaType;
+    const manualFields = document.getElementById('nfe-manual-episode-fields');
+    if (manualFields) manualFields.hidden = normalizedMediaType === 'movie';
+    if (normalizedMediaType === 'movie' && document.getElementById('nfe-manual-type')) document.getElementById('nfe-manual-type').value = 'outro';
+    for (const key of ['season', 'episode', 'title']) {
+      const input = document.getElementById(`nfe-manual-${key}`); if (input) input.value = '';
+    }
     state.showTitle = title;
     state.mediaType = normalizedMediaType;
     state.showId = normalizedShowId;
@@ -3100,6 +3639,31 @@ function recordExtractedSegments(items, providerName = activeProviderName) {
     setDbStatus(`${providerLabel} movie credits are temporarily disabled; TV segments remain active.`);
   }
   if (!items.length) return;
+  // An incomplete scene is still evidence of its presence, even though its
+  // timestamps cannot be accepted. Keep that evidence across capture/reload.
+  for (const item of items) {
+    if (!isMovieItem(item) || item.segment_type !== 'post-credits') continue;
+    const scene = { showId: getItemShowId(item), imdbId: item.imdb_id && item.imdb_id !== 'IMDB_PENDING' ? item.imdb_id : '' };
+    if (!scene.showId && !scene.imdbId) continue;
+    state.knownMovieScenes ||= [];
+    if (!state.knownMovieScenes.some(value => value.showId === scene.showId && value.imdbId === scene.imdbId)) {
+      state.knownMovieScenes.push(scene);
+      scheduleCaptureSave();
+    }
+  }
+  const invalid = items.filter(item => timestampRangeIssue(item));
+  if (invalid.length) {
+    toast(`${invalid.length} invalid timestamp(s) ignored. Check provider boundaries and runtime.`);
+    console.warn('[NFE] Rejected invalid provider timestamps:', invalid.map(item => ({ type: item?.segment_type, reason: timestampRangeIssue(item) })));
+  }
+  items = items.filter(item => !timestampRangeIssue(item)).map(item => {
+    const evidence = item._timing;
+    return { ...item, start_sec: Number(item.start_sec), end_sec: Number(item.end_sec), _timing: timestampEvidence({
+      provider: evidence?.provider || providerName, source: evidence?.source,
+      unit: evidence?.unit, rawStart: evidence ? evidence.raw_start : item.start_sec,
+      rawEnd: evidence ? evidence.raw_end : item.end_sec, correction: evidence?.correction_sec,
+    }) };
+  });
   const keys = new Set(state.allItems.map(capturedSegmentKey));
   items = items.filter(item => {
     const key = capturedSegmentKey(item);
@@ -3116,11 +3680,6 @@ function recordExtractedSegments(items, providerName = activeProviderName) {
   toast(`+${items.length} timestamps captured · total: ${state.allItems.length}`);
 }
 
-function isAlreadyInIntroDB(item) {
-  const key = getItemCacheKey(item);
-  return hasExistingSegment(state.dedupCacheV2[key], item);
-}
-
 function hasExistingSegment(existing, item) {
   if (acceptedUploadKeys.has(uploadSegmentKey(item))) return true;
   if (!existing) return false;
@@ -3133,7 +3692,45 @@ function hasExistingSegment(existing, item) {
 
 const overviewSource = Symbol('overviewSource');
 
-async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.slice()) {
+function captureSnapshot() {
+  return JSON.stringify([state.allItems.map(item => [capturedSegmentKey(item), item.imdb_id, item._timingReview || '', item._duration_sec]), state.knownMovieScenes || []]);
+}
+
+function captureStillCurrent(snapshot) {
+  if (snapshot === captureSnapshot()) return true;
+  toast('Captured timestamps changed. Reopen the timestamp review before exporting or uploading.');
+  return false;
+}
+
+function attachCandidateReview(rows, mappedItems, action) {
+  const decisions = assessTimestampCandidates(mappedItems);
+  const bySource = new Map(rows.filter(row => row.item[overviewSource] !== undefined).map(row => [row.item[overviewSource], row]));
+  const byCanonical = new Map(rows.map(row => [row.canonical, row]));
+  for (const item of mappedItems) {
+    const decision = decisions.get(item);
+    const row = byCanonical.get(item) || bySource.get(item[overviewSource]);
+    if (!row) continue;
+    if (!decision.allowed) { row.status = 'Unavailable'; row.reason = decision.reason; }
+    if (decision.conflict && row.item[overviewSource] !== undefined) {
+      row.onChoose = () => {
+        const original = state.allItems[row.item[overviewSource]];
+        if (!original || capturedSegmentKey(original) !== capturedSegmentKey(row.item)) {
+          toast('Capture changed. Reopen the review.'); return;
+        }
+        // Retain every alternative, but only one explicit choice for this candidate set.
+        for (const candidate of state.allItems) if (candidate._timingReview === decision.signature) delete candidate._timingReview;
+        original._timingReview = decision.signature;
+        scheduleCaptureSave();
+        state.submitInProgress = false;
+        updateSubmitBtn('Submit to IntroDB');
+        if (action === 'submit') submitToIntroDB(); else exportJSON();
+      };
+    }
+  }
+  return mappedItems.filter(item => decisions.get(item).allowed);
+}
+
+async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.map((item, index) => ({ ...item, [overviewSource]: index }))) {
   const pendingItems = capturedItems.filter(item => !item.imdb_id || item.imdb_id === 'IMDB_PENDING');
   if (pendingItems.length) {
     toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
@@ -3143,14 +3740,16 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
   const movieItems = validItems.filter(isMovieItem);
   const seriesGroups = new Map();
   for (const item of validItems.filter(item => !isMovieItem(item))) {
-    if (!seriesGroups.has(item.imdb_id)) seriesGroups.set(item.imdb_id, []);
-    seriesGroups.get(item.imdb_id).push(item);
+    const key = JSON.stringify([item.imdb_id, item._timing?.source === 'manual']);
+    if (!seriesGroups.has(key)) seriesGroups.set(key, []);
+    seriesGroups.get(key).push(item);
   }
 
   // Movies have no season/episode pair and deliberately bypass TVDB mapping.
   const items = movieItems.slice();
   let unreliableSkipped = 0;
   let specialSegmentsExcluded = 0;
+  const unavailableReasons = new Map();
   const reasonLabels = {
     genericTitle: 'generic title',
     missingTitle: 'missing title',
@@ -3166,15 +3765,23 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
   const describeReasons = reasons => Object.entries(reasons || {})
     .map(([reason, count]) => `${reasonLabels[reason] || reason}: ${count}`)
     .join(', ') || 'none';
-  for (const [imdbId, seriesItems] of seriesGroups) {
+  for (const seriesItems of seriesGroups.values()) {
+    const imdbId = seriesItems[0].imdb_id;
     const showId = getItemShowId(seriesItems[0]);
-    const catalog = showId
+    if (seriesItems[0]._timing?.source !== 'manual' && showId) {
+      await state.providerCatalogLoads?.get(showId)?.promise;
+    }
+    const catalog = seriesItems[0]._timing?.source === 'manual'
+      ? seriesItems.map(item => ({ season: item.season, episode: item.episode, title: item._episodeTitle }))
+      : showId
       ? state.providerEpisodesByShowId?.[showId] || []
       : (imdbId === state.imdbId ? state.providerEpisodes : []);
     const mapped = await mapSeriesItemsToTvdb(seriesItems, catalog);
     const stats = mapped.stats;
     if (!mapped.success) {
       unreliableSkipped += seriesItems.length;
+      const reason = `TVDB mapping blocked${stats ? ` (provider ${stats.providerRegular}, TVDB ${stats.tvdbRegular})` : ''}: ${mapped.reason}`;
+      for (const item of seriesItems) unavailableReasons.set(item, reason);
       const counts = stats ? ` Provider regular: ${stats.providerRegular}; TVDB regular: ${stats.tvdbRegular}; provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}.` : '';
       const titleCounts = stats ? ` Regular episodes matched: ${stats.regularEpisodesMatched ?? 0}; skipped: ${stats.regularEpisodesSkipped ?? stats.providerRegular}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}.` : '';
       console.warn(`[NFE-TVDB] Skipping series ${imdbId} from ${action}: ${mapped.reason}.${counts}${titleCounts}`);
@@ -3183,8 +3790,8 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
 
     specialSegmentsExcluded += stats?.capturedSpecialsExcluded || 0;
     unreliableSkipped += stats?.capturedRegularSegmentsSkipped || 0;
-    if (mapped.method === 'order') {
-      console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts match (${stats.providerRegular}); mapped by TVDB order. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
+    if (mapped.method === 'order' || mapped.method === 'released-order') {
+      console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts match (${stats.providerRegular}); mapped by TVDB order.${stats.tvdbFutureExcluded ? ` Future episodes excluded: ${stats.tvdbFutureExcluded}.` : ''}${stats.tvdbUndatedExcluded ? ` Undated episodes absent from provider excluded: ${stats.tvdbUndatedExcluded}.` : ''} Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
     } else if (mapped.method === 'title') {
       console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts differ (provider ${stats.providerRegular}, TVDB ${stats.tvdbRegular}); retained reliable exact normalized one-to-one title mappings. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
     } else if (mapped.method === 'absolute-title') {
@@ -3204,6 +3811,7 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
     pendingSkipped: pendingItems.length,
     unreliableSkipped,
     specialSegmentsExcluded,
+    unavailableReasons,
   };
 }
 
@@ -3228,7 +3836,10 @@ function normalizeMovieExportItem(item) {
 }
 
 function normalizeExportItem(item) {
-  return isMovieItem(item) ? normalizeMovieExportItem(item) : item;
+  return isMovieItem(item) ? normalizeMovieExportItem(item) : {
+    imdb_id: item.imdb_id, season: item.season, episode: item.episode,
+    segment_type: item.segment_type, start_sec: item.start_sec, end_sec: item.end_sec,
+  };
 }
 
 async function loadCanonicalExisting(episodeKeys) {
@@ -3262,6 +3873,7 @@ async function prepareJSONExport() {
     return;
   }
   const capturedItems = state.allItems.map((item, index) => ({ ...item, [overviewSource]: index }));
+  const snapshot = captureSnapshot();
   const view = {
     items: [], fileCount: 0, duplicateCount: 0, checking: true,
     rows: capturedItems.map(item => ({ item, status: 'Checking', reason: '' })),
@@ -3287,7 +3899,7 @@ async function prepareJSONExport() {
     for (const row of view.rows) {
       row.status = 'Unavailable';
       row.reason = !row.item.imdb_id || row.item.imdb_id === 'IMDB_PENDING'
-        ? 'Missing IMDb ID' : 'No reliable TVDB mapping / excluded special';
+        ? 'Missing IMDb ID' : mapped.unavailableReasons.get(row.item) || 'No reliable TVDB mapping / excluded special';
     }
     for (const item of mappedItems) {
       const row = view.rows[item[overviewSource]];
@@ -3301,19 +3913,25 @@ async function prepareJSONExport() {
         }
       }
     }
-    let items = filterShortOutputSegments(mappedItems);
-    const shortSegmentCount = mappedItems.length - items.length;
+    let items = attachCandidateReview(view.rows, filterShortOutputSegments(mappedItems), 'export');
+    const shortSegmentCount = mappedItems.length - filterShortOutputSegments(mappedItems).length;
     if (shortSegmentCount > 0) {
       toast(`${shortSegmentCount} invalid or unsupported segment(s) removed from export.`);
     }
     if (!items.length) {
+      if (view.rows.some(row => row.onChoose)) {
+        view.message = 'Review conflicting timestamps against the video, then choose one range per segment.';
+        return;
+      }
       if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-        toast(`All mapped segments have invalid durations or unsupported movie types; nothing was exported.`);
+        view.message = 'All mapped segments have invalid durations or unsupported movie types; nothing was exported.';
+        toast(view.message);
         return;
       }
       const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
       const noMappingMessage = 'No series has a reliable TVDB episode mapping; nothing was exported.';
-      toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
+      view.message = onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage;
+      toast(view.message);
       return;
     }
 
@@ -3373,7 +3991,7 @@ async function prepareJSONExport() {
       groups.get(key).push(item);
     }
 
-    const files = [];
+    let files = [];
     const maxItemsPerFile = 100;
     for (const [imdbId, groupItems] of groups) {
       const total = Math.ceil(groupItems.length / maxItemsPerFile);
@@ -3386,12 +4004,14 @@ async function prepareJSONExport() {
       }
     }
 
-    let downloaded = 0;
+    let downloaded = 0, downloadCount = exportItems.length;
     function downloadNext(index) {
       if (index >= files.length) {
-        const summary = `${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`;
+        const summary = `${downloaded} file(s) downloaded · ${downloadCount} entries`;
         document.getElementById('nfe-export-preview')?.remove();
-        resetCapturedData(`${summary}; captured data cleared.`);
+        if (downloadCount < exportItems.length || view.rows.some(row => row.status === 'Unavailable') || !captureStillCurrent(snapshot)) {
+          toast(`${summary}; captures retained because some timestamps still need review.`);
+        } else resetCapturedData(`${summary}; captured data cleared.`);
         return;
       }
       const file = files[index];
@@ -3414,9 +4034,23 @@ async function prepareJSONExport() {
       fileCount: files.length,
       duplicateCount,
       uploadItems,
-      onConfirm: exportItems.length ? () => downloadNext(0) : undefined,
+      onConfirm: exportItems.length ? (_, visible = exportItems) => {
+        if (!captureStillCurrent(snapshot)) return;
+        const chosen = new Set(exportItems.filter(item => visible.includes(item)));
+        if (!chosen.size) return;
+        const byTitle = new Map();
+        for (const item of chosen) { if (!byTitle.has(item.imdb_id)) byTitle.set(item.imdb_id, []); byTitle.get(item.imdb_id).push(item); }
+        files = [];
+        for (const [imdbId, entries] of byTitle) {
+          const total = Math.ceil(entries.length / maxItemsPerFile);
+          for (let index = 0; index < total; index++) files.push({ imdbId, part: total > 1 ? `_part${index+1}of${total}` : '', data: entries.slice(index*maxItemsPerFile,(index+1)*maxItemsPerFile) });
+        }
+        downloadCount = chosen.size;
+        downloadNext(0);
+      } : undefined,
       requiresApproval: uploadItems.length > 0,
       onUpload: uploadItems.length ? (selected = []) => {
+        if (!captureStillCurrent(snapshot)) return;
         if (!state.introdbApiKey) {
           revealApiSettings();
           toast('Please enter your IntroDB API key in API settings before uploading.');
@@ -3424,7 +4058,7 @@ async function prepareJSONExport() {
           return;
         }
         const approved = uploadItems.filter(item => selected.includes(item));
-        startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length });
+        startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length, snapshot });
       } : undefined,
     });
   } catch (error) {
@@ -3440,7 +4074,9 @@ async function prepareJSONExport() {
     }
     view.message = view.items.length
       ? 'Only verified NEW timestamps are included in the JSON download. Use Upload to IntroDB to submit the reviewed scraper ranges directly.'
-      : 'No eligible new timestamps. Exact duplicates cannot be uploaded again. ' + (view.message.includes('Checking') ? '' : view.message);
+      : (view.rows.some(row => row.status === 'In IntroDB')
+        ? 'No eligible new timestamps. Exact duplicates cannot be uploaded again. '
+        : 'Validation blocked export. Your captured timestamps are retained. ') + (view.message.includes('Checking') ? '' : view.message);
     refresh?.(view);
   }
 }
@@ -3450,7 +4086,7 @@ function updateSubmitBtn(label) {
   if (button) button.textContent = label;
 }
 
-function startIntrodbUpload(items, { skipped = 0 } = {}) {
+function startIntrodbUpload(items, { skipped = 0, snapshot = captureSnapshot() } = {}) {
   if (!items?.length) return;
   state.submitInProgress = true;
   state.submitResults = { ok: 0, fail: 0 };
@@ -3458,6 +4094,11 @@ function startIntrodbUpload(items, { skipped = 0 } = {}) {
   let sent = 0;
 
   function sendNext(index) {
+    if (!captureStillCurrent(snapshot)) {
+      state.submitInProgress = false;
+      updateSubmitBtn('Submit to IntroDB');
+      return;
+    }
     if (index >= items.length) {
       state.submitInProgress = false;
       const { ok, fail } = state.submitResults;
@@ -3476,6 +4117,7 @@ function startIntrodbUpload(items, { skipped = 0 } = {}) {
     Promise.resolve().then(async () => {
       const key = uploadSegmentKey(item);
       const existing = await loadExistingSegmentsForEpisode(getItemCacheKey(item), undefined, { useCache: false, writeCache: false });
+      if (!captureStillCurrent(snapshot)) throw new Error('Capture changed during the duplicate check. Review again.');
       if (acceptedUploadKeys.has(key) || hasExistingSegment(existing, item)) return { duplicate: true };
       const result = await submitSegment(item, state.introdbApiKey);
       if (result.success) acceptedUploadKeys.add(key);
@@ -3541,6 +4183,7 @@ async function prepareIntroDBSubmission() {
   }
 
   state.submitInProgress = true;
+  const snapshot = captureSnapshot();
   updateSubmitBtn(requiresTvdb ? 'Checking TVDB...' : 'Preparing submission...');
   const stopSubmission = () => {
     state.submitInProgress = false;
@@ -3550,12 +4193,20 @@ async function prepareIntroDBSubmission() {
   const mapped = await mapCapturedItemsWithTvdb('IntroDB submission');
   const capturedItems = mapped.capturedItems;
   const mappedItems = mapped.items;
-  const allMapped = filterShortOutputSegments(mappedItems);
-  const shortSegmentCount = mappedItems.length - allMapped.length;
+  const validMapped = filterShortOutputSegments(mappedItems);
+  const rows = validMapped.map(item => ({ item: capturedItems[item[overviewSource]] || item, canonical: item, status: 'NEW', reason: '' }));
+  const allMapped = attachCandidateReview(rows, validMapped, 'submit');
+  const shortSegmentCount = mappedItems.length - validMapped.length;
   if (shortSegmentCount > 0) {
     toast(`${shortSegmentCount} invalid or unsupported segment(s) skipped.`);
   }
   if (!allMapped.length) {
+    if (rows.some(row => row.onChoose)) {
+      showExportPreview({ mode: 'submit', items: [], rows, checking: false, duplicateCount: 0,
+        message: 'Review conflicting ranges against the video, then choose one range per segment.', onCancel: stopSubmission });
+      stopSubmission();
+      return;
+    }
     if (mappedItems.length && shortSegmentCount === mappedItems.length) {
       toast(`All mapped segments have invalid durations or unsupported movie types; nothing was submitted.`);
       setIntrodbStatus(`Nothing submitted: segments must be at least 5 seconds`);
@@ -3582,14 +4233,15 @@ async function prepareIntroDBSubmission() {
 
   const safeMapped = await filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
   const safeSet = new Set(safeMapped);
-  const rows = allMapped.map(item => ({ item, status: 'NEW', reason: '' }));
   for (const row of rows) {
-    const existing = canonicalExisting.get(getItemCacheKey(row.item));
-    annotateExistingComparison(row, row.item, existing);
-    if (!safeSet.has(row.item)) {
+    const item = row.canonical;
+    const existing = canonicalExisting.get(getItemCacheKey(item));
+    annotateExistingComparison(row, item, existing);
+    if (row.status === 'Unavailable') continue;
+    if (!safeSet.has(item)) {
       row.status = 'Unavailable';
       row.reason = 'Movie excluded by extra-scene checks';
-    } else if (hasExistingSegment(existing, row.item)) {
+    } else if (hasExistingSegment(existing, item)) {
       row.status = 'In IntroDB';
       row.reason = 'Exact range already exists in IntroDB';
     }
@@ -3632,13 +4284,15 @@ async function prepareIntroDBSubmission() {
     approvalLabel: 'I manually compared every Scraper timestamp with the current IntroDB timestamp(s) for this exact video and approve this upload.',
     onCancel: stopSubmission,
     onConfirm: (selected = []) => {
+      if (!captureStillCurrent(snapshot)) { stopSubmission(); return; }
       const approved = items.filter(item => selected.includes(item));
-      startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length });
+      startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length, snapshot });
     },
   });
 }
 
 function resetCapturedData(message = 'Data cleared') {
+  manualCapture?.reset();
   const introdbApiKey = state.introdbApiKey;
   const panelVisible = state.panelVisible;
   const { apiKey: tvdbApiKey, pin: tvdbPin } = loadTvdbSettings();
@@ -3665,7 +4319,32 @@ function revealApiSettings() {
 }
 
 function configurePanelCallbacks() {
+  const manualAction = action => () => {
+    try { Promise.resolve(action()).catch(error => toast(error.message)); }
+    catch (error) { toast(error.message); }
+  };
+  manualCapture = createManualCapture({
+    getContext: () => {
+      if (state.updateRequired || state.exportInProgress || state.submitInProgress) throw new Error('Wait for the current operation to finish before marking timestamps.');
+      const value = id => document.getElementById(`nfe-manual-${id}`)?.value || '';
+      const context = { provider: activeProviderName, showId: state.showId, imdbId: state.imdbId,
+        mediaType: value('media'), season: Number(value('season')), episode: Number(value('episode')),
+        episodeTitle: value('title').trim(), segmentType: value('type'), page: location.href };
+      if (state.showId && state.mediaType !== context.mediaType) throw new Error('The selected media type differs from the detected title. Open the correct playing title first.');
+      if (context.mediaType === 'movie' && !movieCaptureAllowedForProvider(activeProviderName)) throw new Error('Movie capture is temporarily disabled for this provider. TV episode capture remains available.');
+      validateManualIdentity(context);
+      return context;
+    },
+    record: item => recordExtractedSegments([item], activeProviderName),
+    render: updateManualCapture,
+  });
   window.nfePanelCallbacks = {
+    onManualStart: manualAction(() => manualCapture.mark('start')),
+    onManualEnd: manualAction(() => manualCapture.mark('end')),
+    onManualPreviewStart: manualAction(() => manualCapture.preview('start')),
+    onManualPreviewEnd: manualAction(() => manualCapture.preview('end')),
+    onManualSave: manualAction(() => manualCapture.save(document.getElementById('nfe-manual-reviewed')?.checked)),
+    onManualReset: () => manualCapture.reset(),
     onDiagnostics: () => {
       const movies = state.skyShowtimeMovieDiagnostics || [];
       if (!movies.length) { toast('Open a SkyShowtime movie first to capture its markers.'); return; }
@@ -3682,6 +4361,7 @@ function configurePanelCallbacks() {
     onSubmit: submitToIntroDB,
     onClear: clearData,
     onImdbSet: () => {
+      manualCapture.reset('IMDb identity changed. Mark both boundaries again.');
       const value = document.getElementById('nfe-imdb-input').value.trim();
       if (!value) return;
       state.imdbId = value;
@@ -3812,6 +4492,7 @@ function bootstrapProvider({
     const inPlayer = isPlayerPage();
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
+      manualCapture?.reset('Page changed. Confirm the playing title/episode and mark both boundaries again.');
       scheduleCaptureSave();
       if (!inPlayer) {
         document.getElementById('nfe-panel')?.remove();
@@ -3886,11 +4567,14 @@ function isNetflixSpecialEpisode(season, episode) {
 }
 
 function coerceNetflixSeconds(value) {
-  const number = Number(value);
-  if (Number.isFinite(number)) return number;
-  const parts = String(value || '').trim().split(':').map(Number);
-  if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
-  if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  const number = timestampNumber(value);
+  if (number !== null) return number;
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!/^(?:\d+:)?\d{1,2}:\d{2}(?:\.\d+)?$/.test(text)) return null;
+  const parts = text.split(':').map(Number);
+  if (parts.at(-1) >= 60 || (parts.length === 3 && parts[1] >= 60)) return null;
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   return null;
 }
 
@@ -3926,6 +4610,8 @@ function processNetflixMetadata(data) {
         providerSegmentType: 'creditsOffset',
         startSec: correctedCreditsOffset,
         endSec: runtime,
+        durationSec: runtime,
+        timing: { provider: 'netflix', source: 'credits-offset', unit: 'seconds', raw_start: creditsOffset, raw_end: runtime, correction_sec: -NETFLIX_MOVIE_CREDITS_LEAD_SEC },
       })
       : null;
 
@@ -3991,34 +4677,39 @@ function processNetflixMetadata(data) {
         episode: episode.seq,
         imdbId: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
         episodeTitle: episode.title || episode.name || '',
+        durationSec: coerceNetflixSeconds(episode.runtime),
       };
       const markers = episode.skipMarkers || {};
       const segments = [
         markers.recap?.end > 0 && {
           providerSegmentType: 'recap',
-          startSec: markers.recap.start / 1000,
-          endSec: markers.recap.end / 1000,
+          startSec: timestampNumber(markers.recap.start) === null ? null : Number(markers.recap.start) / 1000,
+          endSec: timestampNumber(markers.recap.end) === null ? null : Number(markers.recap.end) / 1000,
         },
         markers.credit?.end > 0 && {
           providerSegmentType: 'credit',
-          startSec: markers.credit.start / 1000,
-          endSec: markers.credit.end / 1000,
+          startSec: timestampNumber(markers.credit.start) === null ? null : Number(markers.credit.start) / 1000,
+          endSec: timestampNumber(markers.credit.end) === null ? null : Number(markers.credit.end) / 1000,
         },
         markers.intro?.end > 0 && {
           providerSegmentType: 'intro',
-          startSec: markers.intro.start / 1000,
-          endSec: markers.intro.end / 1000,
+          startSec: timestampNumber(markers.intro.start) === null ? null : Number(markers.intro.start) / 1000,
+          endSec: timestampNumber(markers.intro.end) === null ? null : Number(markers.intro.end) / 1000,
         },
         episode.creditsOffset && episode.runtime && {
           providerSegmentType: 'creditsOffset',
-          startSec: parseFloat(episode.creditsOffset),
-          endSec: parseFloat(episode.runtime),
+          startSec: coerceNetflixSeconds(episode.creditsOffset),
+          endSec: coerceNetflixSeconds(episode.runtime),
         },
       ].filter(Boolean);
 
       const episodeItems = [];
       for (const segment of segments) {
-        const item = createNormalizedSegment({ ...common, ...segment });
+        const marker = markers[segment.providerSegmentType];
+        const item = createNormalizedSegment({ ...common, ...segment, timing: {
+          provider: 'netflix', source: marker ? 'skip-marker' : 'credits-offset', unit: marker ? 'milliseconds' : 'seconds',
+          raw_start: marker ? marker.start : segment.startSec, raw_end: marker ? marker.end : segment.endSec,
+        } });
         // Metadata can arrive in stages: an intro must not hide a later outro.
         if (item && !capturedKeys.has(capturedSegmentKey(item))) {
           capturedKeys.add(capturedSegmentKey(item));
@@ -4101,6 +4792,15 @@ bootstrapProvider({
 
 /** Prime Video catalogue, playback-resource, and timestamp extraction. */
 
+
+/** A visible player window (for example E7–E9) is not a full season catalogue. */
+function isPrimeVideoSeasonCatalogComplete(episodes, expectedCount) {
+  const numbers = new Set(episodes.map(episode => Number(episode.episode)));
+  const last = Math.max(0, ...numbers);
+  return numbers.size > 0 && last <= 1000 &&
+    [...numbers].every(number => Number.isInteger(number) && number >= 1) &&
+    numbers.size === last && (!Number.isInteger(expectedCount) || numbers.size >= expectedCount);
+}
 
 const PRIME_VIDEO_METADATA_URL_PATTERN = /getvodplaybackresources/i;
 const PRIME_VIDEO_ID_PATTERN = /^(?:[A-Z0-9]{9,12}|amzn1\.dv\.gti\.[a-f0-9-]{20,})$/i;
@@ -4204,6 +4904,9 @@ function ensurePrimeVideoState() {
   if (!(state.primeVideoMovieRuntimeByTitleId instanceof Map)) state.primeVideoMovieRuntimeByTitleId = new Map();
   if (!(state.primeVideoMovieDurationPolls instanceof Map)) state.primeVideoMovieDurationPolls = new Map();
   if (!(state.primeVideoFetchedSeasonCatalogUrls instanceof Set)) state.primeVideoFetchedSeasonCatalogUrls = new Set();
+  if (!(state.primeVideoSeasonCatalogRequests instanceof Map)) state.primeVideoSeasonCatalogRequests = new Map();
+  if (!(state.primeVideoSeasonEpisodeCounts instanceof Map)) state.primeVideoSeasonEpisodeCounts = new Map();
+  if (!(state.primeVideoSeasonCatalogRetryAfter instanceof Map)) state.primeVideoSeasonCatalogRetryAfter = new Map();
   if (!(state.primeVideoPollingTitleIds instanceof Set)) state.primeVideoPollingTitleIds = new Set();
   if (!(state.primeVideoPendingOutroTitleIds instanceof Set)) state.primeVideoPendingOutroTitleIds = new Set();
   if (!(state.primeVideoSegmentBatches instanceof Map)) state.primeVideoSegmentBatches = new Map();
@@ -4547,10 +5250,14 @@ function readPrimeVideoPlayerSnapshot() {
   return { isPlayerActive, season, episode, title: document.title, episodeTitle };
 }
 
-function updatePrimeVideoTitle(rawTitle) {
+function cleanPrimeVideoSeriesTitle(rawTitle) {
   const cleaned = rawTitle.replace(/^Prime Video[:\-]\s*/i, '').trim();
   const seasonMatch = cleaned.match(/\s*(?:-|–)?\s*(?:S|SEASON|SEIZOEN|SAISON|STAFFEL|TEMPORADA|STAGIONE)\s*\d+\s*$/i);
-  const title = seasonMatch ? cleaned.slice(0, seasonMatch.index).trim() : cleaned;
+  return seasonMatch ? cleaned.slice(0, seasonMatch.index).trim() : cleaned;
+}
+
+function updatePrimeVideoTitle(rawTitle) {
+  const title = cleanPrimeVideoSeriesTitle(rawTitle);
   handleDetectedShow({ title, showId: title });
   return title;
 }
@@ -4731,13 +5438,19 @@ function rememberPrimeVideoEpisodeSelection(card, root = document) {
  * Cache them up front because the player overlay no longer reliably renders
  * the old atvwebplayersdk episode-info element.
  */
-function scanPrimeVideoEpisodeCatalog(root = document) {
+function scanPrimeVideoEpisodeCatalog(root = document, options = {}) {
   ensurePrimeVideoState();
   const season = readPrimeVideoSelectedSeason(root);
   const seriesTitle = readPrimeVideoSeriesTitle(root);
   if (season == null || !seriesTitle) return 0;
 
-  const showId = updatePrimeVideoTitle(seriesTitle);
+  const showId = cleanPrimeVideoSeriesTitle(seriesTitle);
+  if ((options.expectedShowId && options.expectedShowId !== showId) ||
+      (options.expectedSeason != null && options.expectedSeason !== season)) return 0;
+  if (options.detectShow !== false) updatePrimeVideoTitle(seriesTitle);
+  const countText = String(root.querySelector?.('#tab-content-episodes')?.textContent || '').trim();
+  const declaredCount = countText.match(/^(\d+)\s+(?:episodes?|afleveringen|folgen|episodios?|episodi)\b/i);
+  if (declaredCount) state.primeVideoSeasonEpisodeCounts.set(`${showId}|${season}`, Number(declaredCount[1]));
   const cards = root.querySelectorAll?.(PRIME_VIDEO_CARD_SELECTOR) || [];
   let seasons = state.primeVideoCatalogByShowId.get(showId);
   if (!seasons) {
@@ -4797,46 +5510,53 @@ async function preloadPrimeVideoSeasonCatalogs(root = document, options = {}) {
   ensurePrimeVideoState();
   const baseUrl = root.location?.href || (typeof location !== 'undefined' ? location.href : '');
   if (!baseUrl) return 0;
-  const currentDetailId = readPrimeVideoDetailId(baseUrl);
+  scanPrimeVideoEpisodeCatalog(root);
+  const showId = state.showId;
+  const requestCache = state.primeVideoSeasonCatalogRequests;
   const links = root.querySelectorAll?.('a[href*="atv_dp_season_select_s"]') || [];
   const fetchImpl = options.fetchImpl || ((...args) => fetch(...args));
   const parseHtml = options.parseHtml || (html => new DOMParser().parseFromString(html, 'text/html'));
-  let total = 0;
-
-  await Promise.all([...links].map(async link => {
+  const urls = new Map();
+  for (const link of links) {
     const href = link.getAttribute?.('href') || '';
-    if (!href) return;
-    let url;
+    if (!href) continue;
     try {
-      url = new URL(href, baseUrl);
-      if (url.origin !== new URL(baseUrl).origin) return;
-    } catch (_) {
-      return;
-    }
-
-    const urlKey = url.href;
-    if (state.primeVideoFetchedSeasonCatalogUrls.has(urlKey)) return;
-    state.primeVideoFetchedSeasonCatalogUrls.add(urlKey);
-    if (readPrimeVideoDetailId(urlKey) === currentDetailId) return;
-
+      const url = new URL(href, baseUrl);
+      const season = Number(url.searchParams.get('ref_')?.match(/^atv_dp_season_select_s(\d+)$/)?.[1]);
+      if (url.origin !== new URL(baseUrl).origin || !readPrimeVideoDetailId(url.href) || !Number.isInteger(season) || season < 1) continue;
+      urls.set(url.href, season);
+    } catch (_) {}
+  }
+  const results = await Promise.all([...urls].map(async ([urlKey, season]) => {
     try {
-      const response = await fetchImpl(urlKey, { credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
-      if (!response?.ok) throw new Error(`HTTP ${response?.status || 'error'}`);
-      const seasonDocument = parseHtml(await response.text());
-      const found = scanPrimeVideoEpisodeCatalog(seasonDocument);
-      total += found;
-      if (found) {
-        logPrimeVideo('Preloaded Prime Video season catalogue:', {
-          url: urlKey,
-          episodes: found,
-        });
-      }
+      // Await an automatic preload already in progress instead of proceeding
+      // with the player's truncated list. Include the currently selected season.
+      if (requestCache.has(urlKey)) return await requestCache.get(urlKey);
+      if (state.primeVideoFetchedSeasonCatalogUrls.has(urlKey)) return 0;
+      if (Date.now() < (state.primeVideoSeasonCatalogRetryAfter.get(urlKey) || 0)) return 0;
+      const pending = (async () => {
+        const response = await fetchImpl(urlKey, { credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
+        if (!response?.ok) throw new Error(`HTTP ${response?.status || 'error'}`);
+        const seasonDocument = parseHtml(await response.text());
+        if (state.showId !== showId || state.primeVideoSeasonCatalogRequests !== requestCache) return 0;
+        const found = scanPrimeVideoEpisodeCatalog(seasonDocument, { detectShow: false, expectedShowId: showId, expectedSeason: season });
+        if (!found) throw new Error('Prime returned no matching season catalogue.');
+        const snapshots = [...state.primeVideoCatalogByShowId.get(showId)?.get(season)?.values() || []];
+        if (isPrimeVideoSeasonCatalogComplete(snapshots, state.primeVideoSeasonEpisodeCounts.get(`${showId}|${season}`))) state.primeVideoFetchedSeasonCatalogUrls.add(urlKey);
+        else state.primeVideoSeasonCatalogRetryAfter.set(urlKey, Date.now() + 60000);
+        logPrimeVideo('Preloaded Prime Video season catalogue:', { season, episodes: found });
+        return found;
+      })();
+      requestCache.set(urlKey, pending);
+      try { return await pending; }
+      finally { requestCache.delete(urlKey); }
     } catch (error) {
-      state.primeVideoFetchedSeasonCatalogUrls.delete(urlKey);
-      console.warn('[PVE] Could not preload season catalogue:', urlKey, error);
+      state.primeVideoSeasonCatalogRetryAfter.set(urlKey, Date.now() + 60000);
+      console.warn('[PVE] Could not preload season catalogue:', error.message);
+      return 0;
     }
   }));
-  return total;
+  return results.reduce((total, count) => total + count, 0);
 }
 
 function findPrimeVideoEpisodeCollision(titleId, showId, season, episode) {
@@ -4987,7 +5707,7 @@ function flushPrimeVideoSegmentBatch(titleId) {
   const batch = state.primeVideoSegmentBatches.get(titleId);
   if (!batch) return;
   state.primeVideoSegmentBatches.delete(titleId);
-  const items = batch.items.filter(item => !state.allItems.some(existing => existing._eid === item._eid));
+  const items = batch.items.filter(item => !state.allItems.some(existing => existing._eid === item._eid && existing.start_sec === item.start_sec && existing.end_sec === item.end_sec));
   logPrimeVideo('Flushing Prime Video segment batch:', {
     titleId,
     showId: batch.showId,
@@ -5008,7 +5728,7 @@ function queuePrimeVideoSegments(titleId, showId, season, episode, episodeTitle,
     state.primeVideoSegmentBatches.set(titleId, batch);
   }
   for (const item of items) {
-    if (!batch.items.some(existing => existing._eid === item._eid)) batch.items.push(item);
+    if (!batch.items.some(existing => existing._eid === item._eid && existing.start_sec === item.start_sec && existing.end_sec === item.end_sec)) batch.items.push(item);
   }
   if (waitForOutro) batch.waitingForOutro = true;
   if (outroResolved) batch.waitingForOutro = false;
@@ -5026,14 +5746,14 @@ function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episod
   const isMovie = String(mediaType).toLowerCase() === 'movie';
   const partSuffix = creditPart ? `_${creditPart}` : '';
   const episodeId = isMovie ? `${titleId}_movie_${segmentType}${partSuffix}` : `${titleId}_${segmentType}${partSuffix}`;
-  const alreadyCaptured = item => item._eid === episodeId || (
+  const alreadyCaptured = item => item.start_sec === startTimeMs / 1000 && item.end_sec === endTimeMs / 1000 && (item._eid === episodeId || (
     item._showId === showId &&
     String(item.media_type || 'tv').toLowerCase() === String(mediaType).toLowerCase() &&
     item.season === season &&
     item.episode === episode &&
     item.segment_type === segmentType &&
     (item.credit_part || null) === (creditPart || null)
-  );
+  ));
   if ((!isMovie && state.allItems.some(alreadyCaptured)) || extractedItems.some(alreadyCaptured)) return false;
   extractedItems.push({
     _eid: episodeId,
@@ -5047,6 +5767,7 @@ function appendPrimeVideoSegment(extractedItems, titleId, showId, season, episod
     episode,
     start_sec: startTimeMs / 1000,
     end_sec: endTimeMs / 1000,
+    _timing: { provider: 'prime-video', source: 'playback-event', unit: 'milliseconds', raw_start: startTimeMs, raw_end: endTimeMs },
   });
   return true;
 }
@@ -5594,6 +6315,7 @@ const VIDEOLAND_LAYOUT_URL_MATCH = /\/layout(\?|$)/i;
 
 function ensureVideolandState() {
   if (!(state.clipMap instanceof Map)) state.clipMap = new Map();
+  if (!(state.providerCatalogLoads instanceof Map)) state.providerCatalogLoads = new Map();
   if (state.currentSeason == null) state.currentSeason = 1;
   if (state.currentEpisode == null) state.currentEpisode = 1;
 }
@@ -5623,12 +6345,15 @@ function extractVideolandRootMeta(json) {
     season: coerceVideolandNumber(video?.season ?? entity?.season ?? json?.season),
     episode: coerceVideolandNumber(video?.episode ?? entity?.episode ?? json?.episode),
     duration: coerceVideolandNumber(video?.duration ?? entity?.duration ?? json?.duration),
-    programId: parent?.id != null
+    programId: String(entity?.type || '').toLowerCase() === 'program' && entity?.id != null
+      ? String(entity.id)
+      : parent?.id != null
       ? String(parent.id)
       : (json?.programId ?? entity?.programId ?? entity?.seriesId) != null
         ? String(json?.programId ?? entity?.programId ?? entity?.seriesId)
         : null,
-    programTitle: parent?.name || json?.programTitle || json?.seriesTitle || null,
+    programTitle: parent?.name || json?.programTitle || json?.seriesTitle ||
+      (String(entity?.type || '').toLowerCase() === 'program' ? entity.name || entity.title : null) || null,
     episodeTitle: video?.name || video?.title || entity?.episodeTitle || entity?.episodeName || null,
     extraTitle: video?.extraTitle || entity?.extraTitle || null,
   };
@@ -5731,6 +6456,16 @@ function processVideolandLayout(json) {
   } catch (error) {
     console.error('[VLE] Failed to traverse layout JSON:', error);
     return;
+  }
+  if (rootMeta.programId && rootMeta.programTitle && rootMeta.mediaType !== 'movie') {
+    const catalog = extractVideolandEpisodeCatalog(json, rootMeta.programId);
+    if (catalog.length) {
+      const showId = updateVideolandTitle(rootMeta.programTitle, rootMeta.programId);
+      for (const entry of catalog) recordProviderEpisode(entry, showId);
+      // A series page can include chapter metadata in recommendation cards.
+      // Only episode playback metadata may supply timestamp candidates.
+      if (rootMeta.season == null || rootMeta.episode == null) return;
+    }
   }
   if (!videoItems.length) return;
 
@@ -5847,7 +6582,7 @@ function processVideolandLayout(json) {
     if (!segmentType || startSec == null || endSec == null) continue;
 
     const episodeId = `${clipId}_${segmentType}`;
-    if (state.allItems.some(item => item._eid === episodeId) || extractedItems.some(item => item._eid === episodeId)) continue;
+    if ([...state.allItems, ...extractedItems].some(item => item._eid === episodeId && item.start_sec === startSec && item.end_sec === endSec)) continue;
     extractedItems.push({
       _eid: episodeId,
       _episodeTitle: episodeTitle,
@@ -5860,6 +6595,7 @@ function processVideolandLayout(json) {
       episode,
       start_sec: startSec,
       end_sec: endSec,
+      _timing: { provider: 'videoland', source: 'chapter', unit: 'seconds', raw_start: startSec, raw_end: endSec },
     });
   }
   logCapturedTimestamps({
@@ -5875,6 +6611,60 @@ function processVideolandLayout(json) {
   recordExtractedSegments(extractedItems);
 }
 
+/** Catalogue requests keep authentication in memory and never capture other videos' chapters. */
+function preloadVideolandEpisodeCatalog(json, context, fetchImpl) {
+  ensureVideolandState();
+  const meta = extractVideolandRootMeta(json);
+  try {
+    const program = new URL(context.url).pathname.match(/\/program\/([^/]+)\/layout$/);
+    if (program) meta.programId = decodeURIComponent(program[1]);
+  } catch (_) {}
+  if (meta.mediaType === 'movie' || !meta.programId) return Promise.resolve();
+  const showId = String(meta.programId);
+  const loads = state.providerCatalogLoads;
+  const previous = loads.get(showId);
+  if (previous && (!previous.error || Date.now() < previous.retryAt)) return previous.promise;
+  const load = { promise: null, error: null, retryAt: 0 };
+  const headers = { ...(context.headers || {}) };
+  const locationKey = Object.keys(headers).find(key => key.toLowerCase() === 'x-location');
+  if (locationKey) {
+    try {
+      const page = new URL(headers[locationKey]);
+      if (page.protocol === 'https:' && /(^|\.)videoland\.com$/.test(page.hostname)) {
+        const parent = json?.seo?.parent || json?.parent;
+        page.pathname = parent?.seo ? `/${parent.seo}-p_${showId}` : '/';
+        page.search = ''; page.hash = '';
+        headers[locationKey] = page.href;
+      }
+    } catch (_) {}
+  }
+  load.promise = loadVideolandEpisodeCatalog({ layout: json, url: context.url, programId: showId,
+    request: async url => {
+      const response = await fetchImpl(url, { method: 'GET', headers, credentials: context.credentials || 'include', signal: AbortSignal.timeout(15000) });
+      if (!response.ok) {
+        const error = new Error(`Videoland catalogue request failed (HTTP ${response.status}).`);
+        error.status = response.status;
+        throw error;
+      }
+      return response.json();
+    },
+  }).then(episodes => {
+    // A clear/reload invalidates outstanding requests. A series switch does not
+    // attach the previous series' episodes to the newly active programme.
+    if (state.providerCatalogLoads !== loads) return;
+    for (const entry of episodes) recordProviderEpisode(entry, showId);
+    console.info('[VLE] Loaded programme episode catalogue:', { showId, episodes: episodes.length });
+  }).catch(error => {
+    load.error = error;
+    load.retryAt = Date.now() + 60000;
+    throw new Error(`Could not load the complete Videoland episode catalogue for ${meta.programTitle || 'programme'} (${showId}): ${error.message}`);
+  });
+  loads.set(showId, load);
+  // The mapping step also awaits this promise and reports failure before export.
+  load.promise.catch(error => console.warn('[VLE]', error.message));
+  return load.promise;
+}
+
 function setupVideolandInterception() {
   ensureVideolandState();
   const win = (typeof unsafeWindow !== 'undefined') ? unsafeWindow : window;
@@ -5883,8 +6673,13 @@ function setupVideolandInterception() {
     const url = typeof input === 'string' ? input : (input && input.url) || '';
     const responsePromise = originalFetch(input, init);
     if (VIDEOLAND_LAYOUT_URL_MATCH.test(url)) {
-      responsePromise.then(response => response.clone().json())
-        .then(processVideolandLayout)
+      responsePromise.then(async response => {
+        if (!response.ok) return;
+        const json = await response.clone().json();
+        processVideolandLayout(json);
+        const headers = Object.fromEntries(new Headers(init?.headers || input?.headers || {}).entries());
+        return preloadVideolandEpisodeCatalog(json, { url, headers, credentials: init?.credentials || input?.credentials || 'include' }, originalFetch);
+      })
         .catch(error => console.warn('[VLE] Failed to process fetch response:', error));
     }
     return responsePromise;
@@ -5894,16 +6689,25 @@ function setupVideolandInterception() {
   function VideolandInterceptedXHR() {
     const xhr = new OriginalXHR();
     let url = '';
+    const headers = {};
+    const originalSetRequestHeader = xhr.setRequestHeader.bind(xhr);
+    xhr.setRequestHeader = function (name, value) { headers[name] = value; return originalSetRequestHeader(name, value); };
     const originalOpen = xhr.open.bind(xhr);
     const originalSend = xhr.send.bind(xhr);
     xhr.open = function (method, requestUrl, ...rest) {
+      for (const key of Object.keys(headers)) delete headers[key];
       url = requestUrl;
       return originalOpen(method, requestUrl, ...rest);
     };
     xhr.send = function (...args) {
       if (url && VIDEOLAND_LAYOUT_URL_MATCH.test(url)) {
         xhr.addEventListener('load', () => {
-          try { processVideolandLayout(JSON.parse(xhr.responseText)); }
+          try {
+            if (xhr.status < 200 || xhr.status >= 300) return;
+            const json = JSON.parse(xhr.responseText);
+            processVideolandLayout(json);
+            preloadVideolandEpisodeCatalog(json, { url: String(url), headers: { ...headers }, credentials: xhr.withCredentials ? 'include' : 'same-origin' }, originalFetch);
+          }
           catch (error) { console.error('[VLE] Failed to process XHR response:', error); }
         });
       }
@@ -6296,8 +7100,9 @@ function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, star
     item.segment_type === providerSegmentType &&
     (item.credit_part || null) === (creditPart || null)
   );
-  if (extractedItems.some(isDuplicate)) return;
-  const previous = state.allItems.find(isDuplicate);
+  const sameRange = item => item.start_sec === roundSkyShowtimeSeconds(startMs / 1000) && item.end_sec === roundSkyShowtimeSeconds(endMs / 1000);
+  if (extractedItems.some(item => isDuplicate(item) && sameRange(item))) return;
+  const previous = state.allItems.find(item => isDuplicate(item) && (isMovie || sameRange(item)));
   if (previous) {
     if (!isMovie || (previous.start_sec === roundSkyShowtimeSeconds(startMs / 1000)
       && previous.end_sec === roundSkyShowtimeSeconds(endMs / 1000))) return;
@@ -6315,6 +7120,7 @@ function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, star
     episode: common.episode,
     start_sec: roundSkyShowtimeSeconds(startMs / 1000),
     end_sec: roundSkyShowtimeSeconds(endMs / 1000),
+    _timing: { provider: 'skyshowtime', source: 'catalogue-marker', unit: 'milliseconds', raw_start: startMs, raw_end: endMs },
   });
 }
 

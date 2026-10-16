@@ -5,10 +5,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
       - name: Reject stale desktop shared code
         run: node build/desktop-core.cjs --check
+      - name: Verify release metadata and notes
+        run: node build/check-release.cjs
+      - name: Require a new version for main updates
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: node build/check-release.cjs origin/main
       - name: Check both clients and generated userscript
         run: node --test

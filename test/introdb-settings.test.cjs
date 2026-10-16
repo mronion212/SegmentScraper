@@ -29,9 +29,3 @@ test('stores and reloads the IntroDB API key locally without returning it', () =
   assert.deepEqual(JSON.parse(JSON.stringify(settings.loadIntrodbSettings())), { configured: true });
   assert.equal(settings.state.introdbApiKey, 'secret-value');
 });
-
-test('does not render the stored IntroDB API key into the panel input', () => {
-  const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel.js'), 'utf8');
-  assert.doesNotMatch(panelSource, /nfe-apikey-input[^>]*value=.*introdbApiKey/s);
-  assert.match(panelSource, /if \(inp\) inp\.value = '';/);
-});

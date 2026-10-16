@@ -1,20 +1,28 @@
-name: Build SegmentScraper desktop release
+name: Publish SegmentScraper release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: false
+
 jobs:
   windows:
+    if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -22,11 +30,24 @@ jobs:
           node-version: 22
           cache: npm
 
+      - name: Verify release version
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" && -n "$BEFORE_SHA" && "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]]; then
+            node build/check-release.cjs "$BEFORE_SHA"
+          else
+            node build/check-release.cjs
+          fi
+          version=$(node -p "require('./package.json').version")
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+          if git show-ref --verify --quiet "refs/tags/v$version"; then
+            [[ "$(git rev-list -n 1 "v$version")" == "$GITHUB_SHA" ]] || { echo "Release version already belongs to another commit"; exit 1; }
+          fi
+
       - name: Install dependencies
         run: npm ci
-
-      - name: Verify release version
-        run: node -e "const v=require('./package.json').version;if(process.env.GITHUB_REF_NAME!=='v'+v)throw new Error('Release tag must match package.json version')"
 
       - name: Reject stale desktop shared code
         run: node build/desktop-core.cjs --check
@@ -45,13 +66,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          notes=()
-          if [[ -f "release-notes/${GITHUB_REF_NAME#v}.md" ]]; then
-            notes=(--notes-file "release-notes/${GITHUB_REF_NAME#v}.md")
+          notes="release-notes/${RELEASE_TAG#v}.md"
+          release_state=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft' 2>/dev/null || true)
+          if [[ "$release_state" == "false" ]]; then
+            echo "Release $RELEASE_TAG is already published."
+          elif [[ "$release_state" == "true" ]]; then
+            gh release upload "$RELEASE_TAG" SegmentScraper.user.js dist/*-Setup.exe dist/*-Portable.exe --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --title "SegmentScraper $RELEASE_TAG" --notes-file "$notes"
+          else
+            gh release create "$RELEASE_TAG" \
+              SegmentScraper.user.js \
+              dist/*-Setup.exe \
+              dist/*-Portable.exe \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "SegmentScraper $RELEASE_TAG" \
+              --notes-file "$notes"
           fi
-          gh release create "$GITHUB_REF_NAME" \
-            dist/*-Setup.exe \
-            dist/*-Portable.exe \
-            --title "SegmentScraper $GITHUB_REF_NAME — Desktop Alpha 0.1" \
-            "${notes[@]}" \
-            --generate-notes

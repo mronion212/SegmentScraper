@@ -353,9 +353,9 @@ test('keeps reliable title mappings when generic and unmatched provider titles a
 
 test('blocks count mismatches with missing, inexact, or ambiguous titles', async t => {
   const episodes = [
-    { id: 11, seasonNumber: 1, number: 1, name: 'A New Hope Part One' },
-    { id: 12, seasonNumber: 1, number: 2, name: 'Duplicate' },
-    { id: 13, seasonNumber: 1, number: 3, name: 'Duplicate' },
+    { id: 11, seasonNumber: 1, number: 1, name: 'A New Hope Part One', aired: '2020-01-01' },
+    { id: 12, seasonNumber: 1, number: 2, name: 'Duplicate', aired: '2020-01-02' },
+    { id: 13, seasonNumber: 1, number: 3, name: 'Duplicate', aired: '2020-01-03' },
   ];
 
   await t.test('missing title', async () => {
@@ -426,7 +426,7 @@ test('retries non-English episode names through the explicit English translation
   const tvdb = loadTvdb({
     episodes: [
       { id: 11, seasonNumber: 1, number: 1, name: 'La llegada' },
-      { id: 12, seasonNumber: 1, number: 2, name: 'TVDB Only' },
+      { id: 12, seasonNumber: 1, number: 2, name: 'TVDB Only', aired: '2020-01-02' },
     ],
     translations: {
       11: { name: 'The Arrival', language: 'eng' },

@@ -120,6 +120,8 @@ export function createNormalizedSegment({
   episodeTitle = '',
   mediaType = 'tv',
   creditPart = null,
+  timing = null,
+  durationSec = null,
 }) {
   const segmentType = normalizeSegmentType(providerSegmentType, providerName);
   if (!segmentType) return null;
@@ -127,6 +129,8 @@ export function createNormalizedSegment({
   return {
     _eid: episodeId,
     _episodeTitle: episodeTitle,
+    ...(timing ? { _timing: timing } : {}),
+    ...(durationSec != null ? { _duration_sec: durationSec } : {}),
     ...(showId ? { _showId: String(showId) } : {}),
     ...(String(mediaType).toLowerCase() === 'movie' ? { media_type: 'movie' } : {}),
     ...(creditPart ? { credit_part: creditPart } : {}),
@@ -137,14 +141,4 @@ export function createNormalizedSegment({
     start_sec: startSec,
     end_sec: endSec,
   };
-}
-
-/**
- * Get all known segment types for a provider
- * @param {string} providerName - The provider name
- * @returns {string[]} - Array of normalized segment types
- */
-export function getProviderSegmentTypes(providerName) {
-  const mappings = PROVIDER_MAPPINGS[providerName.toLowerCase()] || {};
-  return [...new Set(Object.values(mappings))];
 }

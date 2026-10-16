@@ -18,6 +18,7 @@ function loadExtractor(relativePath, exportName, globals = {}) {
   const catalogs = [];
   const logs = [];
   let source = [
+    fs.readFileSync(path.join(__dirname, '..', 'src/core/videoland.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', 'src/core/output-policy.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', 'src/normalization/segment-mapper.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'timestamp-logger.js'), 'utf8'),
@@ -83,6 +84,22 @@ function netflixPayload(id, title, episodeId) {
     },
   };
 }
+
+test('Netflix retains changed markers with raw milliseconds and movie correction evidence', () => {
+  const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata', { setDbStatus() {} });
+  const payload = netflixPayload(100, 'Alpha', 123);
+  netflix.process(payload);
+  payload.video.seasons[0].episodes[0].skipMarkers.intro.start = 2000;
+  netflix.process(payload);
+  netflix.process(payload);
+  assert.equal(netflix.state.allItems.length, 2);
+  assert.equal(netflix.state.allItems[1]._timing.raw_start, 2000);
+  netflix.process({ video: { id: 200, type: 'movie', title: 'Movie', creditsOffset: 5400, runtime: 5700 } });
+  const movie = netflix.state.allItems.at(-1);
+  assert.equal(movie.start_sec, 5394);
+  assert.equal(movie._timing.raw_start, 5400);
+  assert.equal(movie._timing.correction_sec, -6);
+});
 
 test('Netflix captures a late outro after an intro, including restored numeric IDs', () => {
   const netflix = loadExtractor('src/providers/netflix/extractor.js', 'processNetflixMetadata');
@@ -228,6 +245,52 @@ function videolandPayload(programId, programTitle, clipId, {
     },
   };
 }
+
+test('Videoland records season lists even when no episode has chapter metadata', () => {
+  const videoland = loadExtractor('src/providers/videoland/extractor.js', 'processVideolandLayout');
+  videoland.process({entity:{type:'program',id:'program-a',name:'Alpha'},
+    content:{itemContent:{video:{id:'recommendation',chapters:[{type:'ending_credits',tcStart:500,tcEnd:600}]}}},blocks:[{
+    analytics:{tealium:{from:'feature.videos_by_program',block_title:'Seizoen 1'}},
+    content:{items:Array.from({length:9},(_,i)=>({itemContent:{extraTitle:`${i+1}. Aflevering ${i+1}`,action:{target:{type:'layout',value_layout:{type:'video',id:`clip-${i+1}`,parent:{id:'program-a'}}}}}}))},
+  }]});
+  assert.equal(videoland.catalogs.length,9);
+  assert.equal(videoland.state.allItems.length,0);
+  assert.equal(videoland.state.showId,'program-a');
+});
+
+test('Videoland background catalogue loading joins in-flight requests and preserves series identity', async () => {
+  const videoland=loadExtractor('src/providers/videoland/extractor.js','preloadVideolandEpisodeCatalog',{URL,AbortSignal});
+  const payload=videolandPayload('program-a','Alpha','clip-a');
+  const context={url:'https://layout.videoland.bedrock.tech/front/v1/rtlnl/m6group_web/main/token-web-31/video/clip-a/layout',headers:{Authorization:'memory-only','X-Location':'https://v2.videoland.com/alpha-c_a'}};
+  let finish,requests=0;
+  const fetchImpl=async(url,init)=>{
+    requests++;
+    assert.match(url,/\/program\/program-a\/layout/);
+    assert.equal(init.headers.Authorization,'memory-only');
+    assert.equal(init.headers['X-Location'],'https://v2.videoland.com/');
+    await new Promise(resolve=>{finish=resolve;});
+    return {ok:true,json:async()=>({entity:{id:'program-a'},blocks:[{analytics:{tealium:{block_title:'Seizoen 1'}},content:{items:[{itemContent:{extraTitle:'1. First',action:{target:{type:'layout',value_layout:{type:'video',id:'clip-a',parent:{id:'program-a'}}}}}}]}}]})};
+  };
+  const pending=videoland.process(payload,context,fetchImpl);
+  assert.equal(videoland.process(payload,context,fetchImpl),pending);
+  videoland.state.showId='program-b';
+  finish();await pending;
+  assert.equal(requests,1);
+  assert.equal(videoland.state.showId,'program-b');
+  assert.deepEqual(plain(videoland.catalogs),[{showId:'program-a',episodes:[{providerId:'clip-a',season:1,episode:1,title:'First'}]}]);
+  assert.equal(videoland.state.allItems.length,0);
+});
+
+test('Videoland retains changed chapter boundaries and deduplicates repeats', () => {
+  const videoland = loadExtractor('src/providers/videoland/extractor.js', 'processVideolandLayout');
+  const payload = videolandPayload('program-a', 'Alpha', 'clip-a');
+  videoland.process(payload);
+  payload.content.itemContent.video.chapters[0].tcEnd = 13;
+  videoland.process(payload);
+  videoland.process(payload);
+  assert.equal(videoland.state.allItems.length, 2);
+  assert.equal(videoland.state.allItems[1]._timing.raw_end, 13);
+});
 
 test('Videoland tags timestamps and incremental catalogs with their own program id', () => {
   const videoland = loadExtractor('src/providers/videoland/extractor.js', 'processVideolandLayout');

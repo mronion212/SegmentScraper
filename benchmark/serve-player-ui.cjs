@@ -10,9 +10,9 @@ http.createServer((request, response) => {
     response.end('<!doctype html><html lang="en"><title>Compact player UI check</title><body style="background:#141820;color:white;font-family:system-ui"><h1>360 × 480 player viewport</h1><iframe title="Compact player" src="/?panel=1" style="width:360px;height:480px;border:1px solid white"></iframe></body></html>');
     return;
   }
-  const relative = pathname === '/' ? 'benchmark/player-ui.html' : pathname.slice(1);
+  const relative = pathname === '/' ? 'benchmark/player-ui.html' : pathname === '/manual' ? 'benchmark/manual-capture.html' : pathname.slice(1);
   const target = path.resolve(root, relative);
-  if (!target.startsWith(root + path.sep) || !(relative === 'benchmark/player-ui.html' || relative === 'benchmark/provider-control-fixtures.js' || relative.startsWith('src/'))) {
+  if (!target.startsWith(root + path.sep) || !(relative === 'benchmark/player-ui.html' || relative === 'benchmark/manual-capture.html' || relative === 'benchmark/provider-control-fixtures.js' || relative.startsWith('src/'))) {
     response.writeHead(404).end(); return;
   }
   fs.readFile(target, (error, content) => {

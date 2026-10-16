@@ -373,8 +373,9 @@ function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, star
     item.segment_type === providerSegmentType &&
     (item.credit_part || null) === (creditPart || null)
   );
-  if (extractedItems.some(isDuplicate)) return;
-  const previous = state.allItems.find(isDuplicate);
+  const sameRange = item => item.start_sec === roundSkyShowtimeSeconds(startMs / 1000) && item.end_sec === roundSkyShowtimeSeconds(endMs / 1000);
+  if (extractedItems.some(item => isDuplicate(item) && sameRange(item))) return;
+  const previous = state.allItems.find(item => isDuplicate(item) && (isMovie || sameRange(item)));
   if (previous) {
     if (!isMovie || (previous.start_sec === roundSkyShowtimeSeconds(startMs / 1000)
       && previous.end_sec === roundSkyShowtimeSeconds(endMs / 1000))) return;
@@ -392,6 +393,7 @@ function addSkyShowtimeSegment(extractedItems, common, providerSegmentType, star
     episode: common.episode,
     start_sec: roundSkyShowtimeSeconds(startMs / 1000),
     end_sec: roundSkyShowtimeSeconds(endMs / 1000),
+    _timing: { provider: 'skyshowtime', source: 'catalogue-marker', unit: 'milliseconds', raw_start: startMs, raw_end: endMs },
   });
 }
 

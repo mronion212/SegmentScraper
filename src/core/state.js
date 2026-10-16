@@ -24,20 +24,9 @@ export function createMediaCacheKey(imdbId, mediaType = 'tv', season, episode) {
     : createEpisodeCacheKey(imdbId, season, episode);
 }
 
-/**
- * Create a cache key for a segment (includes segment type)
- * @param {string} imdbId - IMDb ID
- * @param {string|number} season - Season number
- * @param {string|number} episode - Episode number
- * @param {string} segmentType - Segment type (intro, recap, outro)
- * @returns {string} - Cache key in format 'imdbId|season|episode|segment_type'
- */
-export function createSegmentCacheKey(imdbId, season, episode, segmentType) {
-  return `${String(imdbId)}|${String(season)}|${String(episode)}|${segmentType}`;
-}
-
 export const createState = (providerName) => ({
   allItems: [],
+  knownMovieScenes: [],
   imdbId: '',
   dbSearchDone: false,
   dbStatusMsg: `Waiting for ${providerName} metadata...`,

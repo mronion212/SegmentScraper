@@ -1,7 +1,7 @@
 /** Netflix-specific metadata interception and segment extraction. */
 
 import { state } from '../../core/state.js';
-import { capturedSegmentKey } from '../../core/output-policy.js';
+import { capturedSegmentKey, timestampNumber } from '../../core/output-policy.js';
 import { createNormalizedSegment } from '../../normalization/segment-mapper.js';
 import { setProviderEpisodeCatalog } from '../../core/tvdb.js';
 import { handleDetectedShow, recordExtractedSegments, setDbStatus } from '../bootstrap.js';
@@ -31,11 +31,14 @@ function isNetflixSpecialEpisode(season, episode) {
 }
 
 function coerceNetflixSeconds(value) {
-  const number = Number(value);
-  if (Number.isFinite(number)) return number;
-  const parts = String(value || '').trim().split(':').map(Number);
-  if (parts.length === 2 && parts.every(Number.isFinite)) return parts[0] * 60 + parts[1];
-  if (parts.length === 3 && parts.every(Number.isFinite)) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  const number = timestampNumber(value);
+  if (number !== null) return number;
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!/^(?:\d+:)?\d{1,2}:\d{2}(?:\.\d+)?$/.test(text)) return null;
+  const parts = text.split(':').map(Number);
+  if (parts.at(-1) >= 60 || (parts.length === 3 && parts[1] >= 60)) return null;
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   return null;
 }
 
@@ -71,6 +74,8 @@ export function processNetflixMetadata(data) {
         providerSegmentType: 'creditsOffset',
         startSec: correctedCreditsOffset,
         endSec: runtime,
+        durationSec: runtime,
+        timing: { provider: 'netflix', source: 'credits-offset', unit: 'seconds', raw_start: creditsOffset, raw_end: runtime, correction_sec: -NETFLIX_MOVIE_CREDITS_LEAD_SEC },
       })
       : null;
 
@@ -136,34 +141,39 @@ export function processNetflixMetadata(data) {
         episode: episode.seq,
         imdbId: state.imdbIdsByShowId?.[showId] || 'IMDB_PENDING',
         episodeTitle: episode.title || episode.name || '',
+        durationSec: coerceNetflixSeconds(episode.runtime),
       };
       const markers = episode.skipMarkers || {};
       const segments = [
         markers.recap?.end > 0 && {
           providerSegmentType: 'recap',
-          startSec: markers.recap.start / 1000,
-          endSec: markers.recap.end / 1000,
+          startSec: timestampNumber(markers.recap.start) === null ? null : Number(markers.recap.start) / 1000,
+          endSec: timestampNumber(markers.recap.end) === null ? null : Number(markers.recap.end) / 1000,
         },
         markers.credit?.end > 0 && {
           providerSegmentType: 'credit',
-          startSec: markers.credit.start / 1000,
-          endSec: markers.credit.end / 1000,
+          startSec: timestampNumber(markers.credit.start) === null ? null : Number(markers.credit.start) / 1000,
+          endSec: timestampNumber(markers.credit.end) === null ? null : Number(markers.credit.end) / 1000,
         },
         markers.intro?.end > 0 && {
           providerSegmentType: 'intro',
-          startSec: markers.intro.start / 1000,
-          endSec: markers.intro.end / 1000,
+          startSec: timestampNumber(markers.intro.start) === null ? null : Number(markers.intro.start) / 1000,
+          endSec: timestampNumber(markers.intro.end) === null ? null : Number(markers.intro.end) / 1000,
         },
         episode.creditsOffset && episode.runtime && {
           providerSegmentType: 'creditsOffset',
-          startSec: parseFloat(episode.creditsOffset),
-          endSec: parseFloat(episode.runtime),
+          startSec: coerceNetflixSeconds(episode.creditsOffset),
+          endSec: coerceNetflixSeconds(episode.runtime),
         },
       ].filter(Boolean);
 
       const episodeItems = [];
       for (const segment of segments) {
-        const item = createNormalizedSegment({ ...common, ...segment });
+        const marker = markers[segment.providerSegmentType];
+        const item = createNormalizedSegment({ ...common, ...segment, timing: {
+          provider: 'netflix', source: marker ? 'skip-marker' : 'credits-offset', unit: marker ? 'milliseconds' : 'seconds',
+          raw_start: marker ? marker.start : segment.startSec, raw_end: marker ? marker.end : segment.endSec,
+        } });
         // Metadata can arrive in stages: an intro must not hide a later outro.
         if (item && !capturedKeys.has(capturedSegmentKey(item))) {
           capturedKeys.add(capturedSegmentKey(item));

@@ -37,10 +37,12 @@
 <label>Provider <select id="provider"><option>netflix</option><option>prime-video</option><option>videoland</option><option>skyshowtime</option><option>crunchyroll</option></select></label>
 <button id="rerender">Rerender controls</button><button id="remove">Remove controls</button><button id="hide">Toggle controls visibility</button>
 <button id="fullscreen">Toggle fullscreen</button><button id="preview">Preview sample JSON</button>
+<button id="conflict-preview">Preview conflicting timestamps</button>
 <pre id="results"></pre>
 <div id="player"><video style="position:absolute;width:100%;height:100%"></video><div id="timeline" role="slider" aria-label="Playback position" aria-valuenow="30"></div><div id="controls"></div></div>
 <script type="module">
 import { state } from '/src/core/state.js';
+import { assessTimestampCandidates } from '/src/core/output-policy.js';
 import { providerControlFixtures } from '/benchmark/provider-control-fixtures.js';
 import { injectBtn, getNextEpBtn } from '/src/ui/button.js';
 import { setProviderName, closePanel, openPanel, showExportPreview } from '/src/ui/panel.js';
@@ -52,6 +54,21 @@ const sample = { imdb_id:'tt1234567', media_type:'movie', segment_type:'outro', 
 state.allItems = [sample]; state.showIds.add('sample'); state.showTitle = 'Example Movie'; state.mediaType = 'movie'; state.imdbId = sample.imdb_id;
 window.nfePanelCallbacks = { onClose:closePanel, onExport:preview, onSubmit:() => {}, onClear:() => {} };
 function preview() { showExportPreview({ items:[sample], fileCount:1, duplicateCount:0, onConfirm:() => {} }); }
+document.getElementById('conflict-preview').onclick = () => {
+  const observations = [5400, 5402].map(start => ({ ...sample, start_sec:start,
+    _timing:{provider:'netflix',source:'credits-offset',unit:'seconds',raw_start:start+6,raw_end:5600,correction_sec:-6} }));
+  const render = () => {
+    const decisions = assessTimestampCandidates(observations);
+    const items = observations.filter(item => decisions.get(item).allowed);
+    showExportPreview({ items, uploadItems:items, checking:false, fileCount:items.length?1:0, duplicateCount:0,
+      message:'Local fixture. Review a range to resolve the conflict; no download or upload is performed.',
+      rows:observations.map(item => ({ item, status:decisions.get(item).allowed?'NEW':'Unavailable', reason:decisions.get(item).reason,
+        existingSegments:[], onChoose:() => { for(const candidate of observations)delete candidate._timingReview; item._timingReview=decisions.get(item).signature;render(); } })),
+      onConfirm:items.length?()=>{}:undefined,
+    });
+  };
+  render();
+};
 function anchorFor(name) {
   const button = document.createElement('button');
   button.textContent = 'Fullscreen';

@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
+const currentVersion = require('../package.json').version;
 
 class FakeElement {
   constructor(id = '') {
@@ -31,7 +32,7 @@ class FakeElement {
   }
 }
 
-function loadPanel() {
+function loadPanel(providerName = 'netflix', stateOverrides = {}) {
   const ids = [
     'nfe-close',
     'nfe-export',
@@ -45,6 +46,7 @@ function loadPanel() {
     'nfe-tvdb-set',
     'nfe-tvdb-apikey-input',
     'nfe-tvdb-pin-input',
+    'nfe-manual-start', 'nfe-manual-end', 'nfe-manual-save', 'nfe-manual-reset', 'nfe-tmdb-set', 'nfe-tmdb-input',
   ];
   const controls = Object.fromEntries(ids.map(id => [id, new FakeElement(id)]));
   const elements = new Map();
@@ -63,6 +65,7 @@ function loadPanel() {
     imdbId: '',
     introdbApiKey: '',
     tvdbApiKey: '',
+    ...stateOverrides,
   };
   const window = { nfePanelCallbacks: {} };
   const config = {
@@ -90,19 +93,55 @@ function loadPanel() {
   let source = fs.readFileSync(path.join(__dirname, '..', 'src', 'ui', 'panel.js'), 'utf8')
     .replace(/^import .*$/gm, '')
     .replace(/^export /gm, '');
-  source += '\nglobalThis.panelExports = { createPanel };';
+  source += '\nglobalThis.panelExports = { createPanel, setProviderName };';
   const context = vm.createContext({
     console: { log: (...args) => logs.push(args), error() {} },
     document,
     window,
     state,
+    SEGMENTSCRAPER_VERSION: currentVersion,
     PANEL_COLORS,
     getProviderConfig: () => config,
   });
   vm.runInContext(source, context, { filename: 'panel.js' });
+  context.panelExports.setProviderName(providerName);
   context.panelExports.createPanel();
   return { controls, elements, logs, window };
 }
+
+test('a stored IntroDB API key is not rendered into the panel', () => {
+  const html = loadPanel('netflix', {introdbApiKey:'stored-secret-key'}).elements.get('nfe-panel').innerHTML;
+  assert.doesNotMatch(html,/stored-secret-key/);
+  const input = html.match(/<input id="nfe-apikey-input"[^>]*>/)[0];
+  assert.match(input,/type="password"/);
+  assert.doesNotMatch(input,/\bvalue\s*=/);
+});
+
+test('provider panels do not expose removed Prime bulk collection controls', () => {
+  for (const provider of ['netflix','prime-video','videoland','skyshowtime']) {
+    assert.doesNotMatch(loadPanel(provider).elements.get('nfe-panel').innerHTML, /nfe-prime-batch|nfe-prime-diagnostics|Fetch season timestamps|Download season diagnostics/);
+  }
+});
+
+test('manual capture is collapsed and available in every provider panel', () => {
+  for (const provider of ['netflix', 'prime-video', 'videoland', 'skyshowtime']) {
+    const html = loadPanel(provider).elements.get('nfe-panel').innerHTML;
+    assert.ok(html.includes(`Running version: v${currentVersion}`));
+    assert.match(html, /<details id="nfe-manual"><summary>Mark timestamps from video<\/summary>/);
+  }
+});
+
+test('all API credentials are inside settings and marking buttons dispatch actions', () => {
+  const panel=loadPanel(),html=panel.elements.get('nfe-panel').innerHTML;
+  const settings=html.slice(html.indexOf('<details id="nfe-settings"'));
+  assert.ok(settings.indexOf('nfe-tmdb-input')<settings.indexOf('</details>'));
+  assert.ok(settings.indexOf('nfe-tvdb-apikey-input')<settings.indexOf('</details>'));
+  assert.ok(settings.indexOf('nfe-apikey-input')<settings.indexOf('</details>'));
+  const calls=[];
+  panel.window.nfePanelCallbacks={onManualStart:()=>calls.push('start'),onManualEnd:()=>calls.push('end'),onManualSave:()=>calls.push('save'),onTmdbSet:()=>calls.push('tmdb')};
+  for(const id of ['nfe-manual-start','nfe-manual-end','nfe-manual-save','nfe-tmdb-set'])panel.controls[id].click();
+  assert.deepEqual(calls,['start','end','save','tmdb']);
+});
 
 test('panel buttons dispatch their configured callbacks at click time', () => {
   const panel = loadPanel();

@@ -4,12 +4,13 @@
  */
 
 import { state, createState, createMediaCacheKey } from '../core/state.js';
-import { outputSegmentAllowed, capturedSegmentKey, movieCaptureAllowedForProvider, providerCaptureAllowed, sameIntrodbRange, uploadSegmentKey } from '../core/output-policy.js';
+import { outputSegmentAllowed, capturedSegmentKey, movieCaptureAllowedForProvider, providerCaptureAllowed, sameIntrodbRange, uploadSegmentKey, timestampRangeIssue, timestampEvidence, assessTimestampCandidates, validateManualIdentity } from '../core/output-policy.js';
+import { createManualCapture } from './manual-capture.js';
 import { restoreCaptureSession, scheduleCaptureSave, saveCaptureSession, clearCaptureSession } from '../core/capture-session.js';
 import { checkForRequiredUpdate } from '../core/update-check.js';
 import { searchImdbByTitle, lookupImdbTitle, loadExistingSegments, loadExistingSegmentsForEpisode, submitSegment } from '../core/network.js';
 import { injectBtn, getNextEpBtn, removePlayerButton } from '../ui/button.js';
-import { setProviderName, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput, showExportPreview, showRequiredUpdate } from '../ui/panel.js';
+import { setProviderName, closePanel, updateCounters, updatePanelTitle, toast, updateImdbInput, showExportPreview, showRequiredUpdate, updateManualCapture } from '../ui/panel.js';
 import { getProviderConfig } from '../config/provider-config.js';
 import { loadIntrodbSettings, saveIntrodbSettings } from '../core/introdb-settings.js';
 import { checkTmdbExtraScenes, saveTmdbToken } from '../core/tmdb.js';
@@ -20,6 +21,7 @@ let activeProviderConfig = getProviderConfig('netflix');
 let activeProviderName = 'netflix';
 const introdbChecksInFlight = new Map();
 const acceptedUploadKeys = new Set();
+let manualCapture = null;
 
 
 function getItemShowId(item) {
@@ -100,6 +102,8 @@ async function filterMoviesWithKnownExtraScenes(items, existingByKey) {
   const excluded = new Set();
   for (const item of [...state.allItems, ...items]) {
     if (isMovieItem(item) && item.segment_type === 'post-credits') excluded.add(getItemCacheKey(item));
+    if (isMovieItem(item) && (state.knownMovieScenes || []).some(scene =>
+      (scene.showId && scene.showId === getItemShowId(item)) || (scene.imdbId && scene.imdbId === item.imdb_id))) excluded.add(getItemCacheKey(item));
   }
   for (const item of items) {
     if (!isMovieItem(item)) continue;
@@ -178,6 +182,15 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     normalizedMediaType !== (state.mediaType || 'tv')
   );
   if (showChanged) {
+    manualCapture?.reset('Title changed. Confirm the playing title/episode and mark both boundaries again.');
+    const manualMedia = document.getElementById('nfe-manual-media');
+    if (manualMedia) manualMedia.value = normalizedMediaType;
+    const manualFields = document.getElementById('nfe-manual-episode-fields');
+    if (manualFields) manualFields.hidden = normalizedMediaType === 'movie';
+    if (normalizedMediaType === 'movie' && document.getElementById('nfe-manual-type')) document.getElementById('nfe-manual-type').value = 'outro';
+    for (const key of ['season', 'episode', 'title']) {
+      const input = document.getElementById(`nfe-manual-${key}`); if (input) input.value = '';
+    }
     state.showTitle = title;
     state.mediaType = normalizedMediaType;
     state.showId = normalizedShowId;
@@ -283,6 +296,31 @@ export function recordExtractedSegments(items, providerName = activeProviderName
     setDbStatus(`${providerLabel} movie credits are temporarily disabled; TV segments remain active.`);
   }
   if (!items.length) return;
+  // An incomplete scene is still evidence of its presence, even though its
+  // timestamps cannot be accepted. Keep that evidence across capture/reload.
+  for (const item of items) {
+    if (!isMovieItem(item) || item.segment_type !== 'post-credits') continue;
+    const scene = { showId: getItemShowId(item), imdbId: item.imdb_id && item.imdb_id !== 'IMDB_PENDING' ? item.imdb_id : '' };
+    if (!scene.showId && !scene.imdbId) continue;
+    state.knownMovieScenes ||= [];
+    if (!state.knownMovieScenes.some(value => value.showId === scene.showId && value.imdbId === scene.imdbId)) {
+      state.knownMovieScenes.push(scene);
+      scheduleCaptureSave();
+    }
+  }
+  const invalid = items.filter(item => timestampRangeIssue(item));
+  if (invalid.length) {
+    toast(`${invalid.length} invalid timestamp(s) ignored. Check provider boundaries and runtime.`);
+    console.warn('[NFE] Rejected invalid provider timestamps:', invalid.map(item => ({ type: item?.segment_type, reason: timestampRangeIssue(item) })));
+  }
+  items = items.filter(item => !timestampRangeIssue(item)).map(item => {
+    const evidence = item._timing;
+    return { ...item, start_sec: Number(item.start_sec), end_sec: Number(item.end_sec), _timing: timestampEvidence({
+      provider: evidence?.provider || providerName, source: evidence?.source,
+      unit: evidence?.unit, rawStart: evidence ? evidence.raw_start : item.start_sec,
+      rawEnd: evidence ? evidence.raw_end : item.end_sec, correction: evidence?.correction_sec,
+    }) };
+  });
   const keys = new Set(state.allItems.map(capturedSegmentKey));
   items = items.filter(item => {
     const key = capturedSegmentKey(item);
@@ -299,11 +337,6 @@ export function recordExtractedSegments(items, providerName = activeProviderName
   toast(`+${items.length} timestamps captured · total: ${state.allItems.length}`);
 }
 
-export function isAlreadyInIntroDB(item) {
-  const key = getItemCacheKey(item);
-  return hasExistingSegment(state.dedupCacheV2[key], item);
-}
-
 function hasExistingSegment(existing, item) {
   if (acceptedUploadKeys.has(uploadSegmentKey(item))) return true;
   if (!existing) return false;
@@ -316,7 +349,45 @@ function hasExistingSegment(existing, item) {
 
 const overviewSource = Symbol('overviewSource');
 
-async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.slice()) {
+function captureSnapshot() {
+  return JSON.stringify([state.allItems.map(item => [capturedSegmentKey(item), item.imdb_id, item._timingReview || '', item._duration_sec]), state.knownMovieScenes || []]);
+}
+
+function captureStillCurrent(snapshot) {
+  if (snapshot === captureSnapshot()) return true;
+  toast('Captured timestamps changed. Reopen the timestamp review before exporting or uploading.');
+  return false;
+}
+
+function attachCandidateReview(rows, mappedItems, action) {
+  const decisions = assessTimestampCandidates(mappedItems);
+  const bySource = new Map(rows.filter(row => row.item[overviewSource] !== undefined).map(row => [row.item[overviewSource], row]));
+  const byCanonical = new Map(rows.map(row => [row.canonical, row]));
+  for (const item of mappedItems) {
+    const decision = decisions.get(item);
+    const row = byCanonical.get(item) || bySource.get(item[overviewSource]);
+    if (!row) continue;
+    if (!decision.allowed) { row.status = 'Unavailable'; row.reason = decision.reason; }
+    if (decision.conflict && row.item[overviewSource] !== undefined) {
+      row.onChoose = () => {
+        const original = state.allItems[row.item[overviewSource]];
+        if (!original || capturedSegmentKey(original) !== capturedSegmentKey(row.item)) {
+          toast('Capture changed. Reopen the review.'); return;
+        }
+        // Retain every alternative, but only one explicit choice for this candidate set.
+        for (const candidate of state.allItems) if (candidate._timingReview === decision.signature) delete candidate._timingReview;
+        original._timingReview = decision.signature;
+        scheduleCaptureSave();
+        state.submitInProgress = false;
+        updateSubmitBtn('Submit to IntroDB');
+        if (action === 'submit') submitToIntroDB(); else exportJSON();
+      };
+    }
+  }
+  return mappedItems.filter(item => decisions.get(item).allowed);
+}
+
+async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.map((item, index) => ({ ...item, [overviewSource]: index }))) {
   const pendingItems = capturedItems.filter(item => !item.imdb_id || item.imdb_id === 'IMDB_PENDING');
   if (pendingItems.length) {
     toast(`${pendingItems.length} timestamp(s) without an IMDb ID will be skipped from ${action}.`);
@@ -326,14 +397,16 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
   const movieItems = validItems.filter(isMovieItem);
   const seriesGroups = new Map();
   for (const item of validItems.filter(item => !isMovieItem(item))) {
-    if (!seriesGroups.has(item.imdb_id)) seriesGroups.set(item.imdb_id, []);
-    seriesGroups.get(item.imdb_id).push(item);
+    const key = JSON.stringify([item.imdb_id, item._timing?.source === 'manual']);
+    if (!seriesGroups.has(key)) seriesGroups.set(key, []);
+    seriesGroups.get(key).push(item);
   }
 
   // Movies have no season/episode pair and deliberately bypass TVDB mapping.
   const items = movieItems.slice();
   let unreliableSkipped = 0;
   let specialSegmentsExcluded = 0;
+  const unavailableReasons = new Map();
   const reasonLabels = {
     genericTitle: 'generic title',
     missingTitle: 'missing title',
@@ -349,15 +422,23 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
   const describeReasons = reasons => Object.entries(reasons || {})
     .map(([reason, count]) => `${reasonLabels[reason] || reason}: ${count}`)
     .join(', ') || 'none';
-  for (const [imdbId, seriesItems] of seriesGroups) {
+  for (const seriesItems of seriesGroups.values()) {
+    const imdbId = seriesItems[0].imdb_id;
     const showId = getItemShowId(seriesItems[0]);
-    const catalog = showId
+    if (seriesItems[0]._timing?.source !== 'manual' && showId) {
+      await state.providerCatalogLoads?.get(showId)?.promise;
+    }
+    const catalog = seriesItems[0]._timing?.source === 'manual'
+      ? seriesItems.map(item => ({ season: item.season, episode: item.episode, title: item._episodeTitle }))
+      : showId
       ? state.providerEpisodesByShowId?.[showId] || []
       : (imdbId === state.imdbId ? state.providerEpisodes : []);
     const mapped = await mapSeriesItemsToTvdb(seriesItems, catalog);
     const stats = mapped.stats;
     if (!mapped.success) {
       unreliableSkipped += seriesItems.length;
+      const reason = `TVDB mapping blocked${stats ? ` (provider ${stats.providerRegular}, TVDB ${stats.tvdbRegular})` : ''}: ${mapped.reason}`;
+      for (const item of seriesItems) unavailableReasons.set(item, reason);
       const counts = stats ? ` Provider regular: ${stats.providerRegular}; TVDB regular: ${stats.tvdbRegular}; provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}.` : '';
       const titleCounts = stats ? ` Regular episodes matched: ${stats.regularEpisodesMatched ?? 0}; skipped: ${stats.regularEpisodesSkipped ?? stats.providerRegular}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}.` : '';
       console.warn(`[NFE-TVDB] Skipping series ${imdbId} from ${action}: ${mapped.reason}.${counts}${titleCounts}`);
@@ -366,8 +447,8 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
 
     specialSegmentsExcluded += stats?.capturedSpecialsExcluded || 0;
     unreliableSkipped += stats?.capturedRegularSegmentsSkipped || 0;
-    if (mapped.method === 'order') {
-      console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts match (${stats.providerRegular}); mapped by TVDB order. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
+    if (mapped.method === 'order' || mapped.method === 'released-order') {
+      console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts match (${stats.providerRegular}); mapped by TVDB order.${stats.tvdbFutureExcluded ? ` Future episodes excluded: ${stats.tvdbFutureExcluded}.` : ''}${stats.tvdbUndatedExcluded ? ` Undated episodes absent from provider excluded: ${stats.tvdbUndatedExcluded}.` : ''} Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
     } else if (mapped.method === 'title') {
       console.info(`[NFE-TVDB] ${action} series ${imdbId}: regular counts differ (provider ${stats.providerRegular}, TVDB ${stats.tvdbRegular}); retained reliable exact normalized one-to-one title mappings. Regular episodes matched: ${stats.regularEpisodesMatched}; skipped: ${stats.regularEpisodesSkipped}; reasons: ${describeReasons(stats.regularEpisodeSkipReasons)}. Provider specials excluded: ${stats.providerSpecialsExcluded}; TVDB Season 0 excluded: ${stats.tvdbSpecialsExcluded}; captured regular segments omitted: ${stats.capturedRegularSegmentsSkipped}; captured special segments omitted: ${stats.capturedSpecialsExcluded}.`);
     } else if (mapped.method === 'absolute-title') {
@@ -387,6 +468,7 @@ async function mapCapturedItemsWithTvdb(action, capturedItems = state.allItems.s
     pendingSkipped: pendingItems.length,
     unreliableSkipped,
     specialSegmentsExcluded,
+    unavailableReasons,
   };
 }
 
@@ -411,7 +493,10 @@ function normalizeMovieExportItem(item) {
 }
 
 function normalizeExportItem(item) {
-  return isMovieItem(item) ? normalizeMovieExportItem(item) : item;
+  return isMovieItem(item) ? normalizeMovieExportItem(item) : {
+    imdb_id: item.imdb_id, season: item.season, episode: item.episode,
+    segment_type: item.segment_type, start_sec: item.start_sec, end_sec: item.end_sec,
+  };
 }
 
 async function loadCanonicalExisting(episodeKeys) {
@@ -445,6 +530,7 @@ async function prepareJSONExport() {
     return;
   }
   const capturedItems = state.allItems.map((item, index) => ({ ...item, [overviewSource]: index }));
+  const snapshot = captureSnapshot();
   const view = {
     items: [], fileCount: 0, duplicateCount: 0, checking: true,
     rows: capturedItems.map(item => ({ item, status: 'Checking', reason: '' })),
@@ -470,7 +556,7 @@ async function prepareJSONExport() {
     for (const row of view.rows) {
       row.status = 'Unavailable';
       row.reason = !row.item.imdb_id || row.item.imdb_id === 'IMDB_PENDING'
-        ? 'Missing IMDb ID' : 'No reliable TVDB mapping / excluded special';
+        ? 'Missing IMDb ID' : mapped.unavailableReasons.get(row.item) || 'No reliable TVDB mapping / excluded special';
     }
     for (const item of mappedItems) {
       const row = view.rows[item[overviewSource]];
@@ -484,19 +570,25 @@ async function prepareJSONExport() {
         }
       }
     }
-    let items = filterShortOutputSegments(mappedItems);
-    const shortSegmentCount = mappedItems.length - items.length;
+    let items = attachCandidateReview(view.rows, filterShortOutputSegments(mappedItems), 'export');
+    const shortSegmentCount = mappedItems.length - filterShortOutputSegments(mappedItems).length;
     if (shortSegmentCount > 0) {
       toast(`${shortSegmentCount} invalid or unsupported segment(s) removed from export.`);
     }
     if (!items.length) {
+      if (view.rows.some(row => row.onChoose)) {
+        view.message = 'Review conflicting timestamps against the video, then choose one range per segment.';
+        return;
+      }
       if (mappedItems.length && shortSegmentCount === mappedItems.length) {
-        toast(`All mapped segments have invalid durations or unsupported movie types; nothing was exported.`);
+        view.message = 'All mapped segments have invalid durations or unsupported movie types; nothing was exported.';
+        toast(view.message);
         return;
       }
       const onlySpecials = mapped.specialSegmentsExcluded > 0 && mapped.unreliableSkipped === 0 && mapped.pendingSkipped === 0;
       const noMappingMessage = 'No series has a reliable TVDB episode mapping; nothing was exported.';
-      toast(onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage);
+      view.message = onlySpecials ? 'Only provider specials were captured; nothing was exported.' : noMappingMessage;
+      toast(view.message);
       return;
     }
 
@@ -556,7 +648,7 @@ async function prepareJSONExport() {
       groups.get(key).push(item);
     }
 
-    const files = [];
+    let files = [];
     const maxItemsPerFile = 100;
     for (const [imdbId, groupItems] of groups) {
       const total = Math.ceil(groupItems.length / maxItemsPerFile);
@@ -569,12 +661,14 @@ async function prepareJSONExport() {
       }
     }
 
-    let downloaded = 0;
+    let downloaded = 0, downloadCount = exportItems.length;
     function downloadNext(index) {
       if (index >= files.length) {
-        const summary = `${downloaded} file(s) downloaded across ${groups.size} series · ${exportItems.length} entries`;
+        const summary = `${downloaded} file(s) downloaded · ${downloadCount} entries`;
         document.getElementById('nfe-export-preview')?.remove();
-        resetCapturedData(`${summary}; captured data cleared.`);
+        if (downloadCount < exportItems.length || view.rows.some(row => row.status === 'Unavailable') || !captureStillCurrent(snapshot)) {
+          toast(`${summary}; captures retained because some timestamps still need review.`);
+        } else resetCapturedData(`${summary}; captured data cleared.`);
         return;
       }
       const file = files[index];
@@ -597,9 +691,23 @@ async function prepareJSONExport() {
       fileCount: files.length,
       duplicateCount,
       uploadItems,
-      onConfirm: exportItems.length ? () => downloadNext(0) : undefined,
+      onConfirm: exportItems.length ? (_, visible = exportItems) => {
+        if (!captureStillCurrent(snapshot)) return;
+        const chosen = new Set(exportItems.filter(item => visible.includes(item)));
+        if (!chosen.size) return;
+        const byTitle = new Map();
+        for (const item of chosen) { if (!byTitle.has(item.imdb_id)) byTitle.set(item.imdb_id, []); byTitle.get(item.imdb_id).push(item); }
+        files = [];
+        for (const [imdbId, entries] of byTitle) {
+          const total = Math.ceil(entries.length / maxItemsPerFile);
+          for (let index = 0; index < total; index++) files.push({ imdbId, part: total > 1 ? `_part${index+1}of${total}` : '', data: entries.slice(index*maxItemsPerFile,(index+1)*maxItemsPerFile) });
+        }
+        downloadCount = chosen.size;
+        downloadNext(0);
+      } : undefined,
       requiresApproval: uploadItems.length > 0,
       onUpload: uploadItems.length ? (selected = []) => {
+        if (!captureStillCurrent(snapshot)) return;
         if (!state.introdbApiKey) {
           revealApiSettings();
           toast('Please enter your IntroDB API key in API settings before uploading.');
@@ -607,7 +715,7 @@ async function prepareJSONExport() {
           return;
         }
         const approved = uploadItems.filter(item => selected.includes(item));
-        startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length });
+        startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length, snapshot });
       } : undefined,
     });
   } catch (error) {
@@ -623,7 +731,9 @@ async function prepareJSONExport() {
     }
     view.message = view.items.length
       ? 'Only verified NEW timestamps are included in the JSON download. Use Upload to IntroDB to submit the reviewed scraper ranges directly.'
-      : 'No eligible new timestamps. Exact duplicates cannot be uploaded again. ' + (view.message.includes('Checking') ? '' : view.message);
+      : (view.rows.some(row => row.status === 'In IntroDB')
+        ? 'No eligible new timestamps. Exact duplicates cannot be uploaded again. '
+        : 'Validation blocked export. Your captured timestamps are retained. ') + (view.message.includes('Checking') ? '' : view.message);
     refresh?.(view);
   }
 }
@@ -633,7 +743,7 @@ function updateSubmitBtn(label) {
   if (button) button.textContent = label;
 }
 
-function startIntrodbUpload(items, { skipped = 0 } = {}) {
+function startIntrodbUpload(items, { skipped = 0, snapshot = captureSnapshot() } = {}) {
   if (!items?.length) return;
   state.submitInProgress = true;
   state.submitResults = { ok: 0, fail: 0 };
@@ -641,6 +751,11 @@ function startIntrodbUpload(items, { skipped = 0 } = {}) {
   let sent = 0;
 
   function sendNext(index) {
+    if (!captureStillCurrent(snapshot)) {
+      state.submitInProgress = false;
+      updateSubmitBtn('Submit to IntroDB');
+      return;
+    }
     if (index >= items.length) {
       state.submitInProgress = false;
       const { ok, fail } = state.submitResults;
@@ -659,6 +774,7 @@ function startIntrodbUpload(items, { skipped = 0 } = {}) {
     Promise.resolve().then(async () => {
       const key = uploadSegmentKey(item);
       const existing = await loadExistingSegmentsForEpisode(getItemCacheKey(item), undefined, { useCache: false, writeCache: false });
+      if (!captureStillCurrent(snapshot)) throw new Error('Capture changed during the duplicate check. Review again.');
       if (acceptedUploadKeys.has(key) || hasExistingSegment(existing, item)) return { duplicate: true };
       const result = await submitSegment(item, state.introdbApiKey);
       if (result.success) acceptedUploadKeys.add(key);
@@ -724,6 +840,7 @@ async function prepareIntroDBSubmission() {
   }
 
   state.submitInProgress = true;
+  const snapshot = captureSnapshot();
   updateSubmitBtn(requiresTvdb ? 'Checking TVDB...' : 'Preparing submission...');
   const stopSubmission = () => {
     state.submitInProgress = false;
@@ -733,12 +850,20 @@ async function prepareIntroDBSubmission() {
   const mapped = await mapCapturedItemsWithTvdb('IntroDB submission');
   const capturedItems = mapped.capturedItems;
   const mappedItems = mapped.items;
-  const allMapped = filterShortOutputSegments(mappedItems);
-  const shortSegmentCount = mappedItems.length - allMapped.length;
+  const validMapped = filterShortOutputSegments(mappedItems);
+  const rows = validMapped.map(item => ({ item: capturedItems[item[overviewSource]] || item, canonical: item, status: 'NEW', reason: '' }));
+  const allMapped = attachCandidateReview(rows, validMapped, 'submit');
+  const shortSegmentCount = mappedItems.length - validMapped.length;
   if (shortSegmentCount > 0) {
     toast(`${shortSegmentCount} invalid or unsupported segment(s) skipped.`);
   }
   if (!allMapped.length) {
+    if (rows.some(row => row.onChoose)) {
+      showExportPreview({ mode: 'submit', items: [], rows, checking: false, duplicateCount: 0,
+        message: 'Review conflicting ranges against the video, then choose one range per segment.', onCancel: stopSubmission });
+      stopSubmission();
+      return;
+    }
     if (mappedItems.length && shortSegmentCount === mappedItems.length) {
       toast(`All mapped segments have invalid durations or unsupported movie types; nothing was submitted.`);
       setIntrodbStatus(`Nothing submitted: segments must be at least 5 seconds`);
@@ -765,14 +890,15 @@ async function prepareIntroDBSubmission() {
 
   const safeMapped = await filterMoviesWithKnownExtraScenes(allMapped, canonicalExisting);
   const safeSet = new Set(safeMapped);
-  const rows = allMapped.map(item => ({ item, status: 'NEW', reason: '' }));
   for (const row of rows) {
-    const existing = canonicalExisting.get(getItemCacheKey(row.item));
-    annotateExistingComparison(row, row.item, existing);
-    if (!safeSet.has(row.item)) {
+    const item = row.canonical;
+    const existing = canonicalExisting.get(getItemCacheKey(item));
+    annotateExistingComparison(row, item, existing);
+    if (row.status === 'Unavailable') continue;
+    if (!safeSet.has(item)) {
       row.status = 'Unavailable';
       row.reason = 'Movie excluded by extra-scene checks';
-    } else if (hasExistingSegment(existing, row.item)) {
+    } else if (hasExistingSegment(existing, item)) {
       row.status = 'In IntroDB';
       row.reason = 'Exact range already exists in IntroDB';
     }
@@ -815,13 +941,15 @@ async function prepareIntroDBSubmission() {
     approvalLabel: 'I manually compared every Scraper timestamp with the current IntroDB timestamp(s) for this exact video and approve this upload.',
     onCancel: stopSubmission,
     onConfirm: (selected = []) => {
+      if (!captureStillCurrent(snapshot)) { stopSubmission(); return; }
       const approved = items.filter(item => selected.includes(item));
-      startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length });
+      startIntrodbUpload(approved, { skipped: capturedItems.length - approved.length, snapshot });
     },
   });
 }
 
 function resetCapturedData(message = 'Data cleared') {
+  manualCapture?.reset();
   const introdbApiKey = state.introdbApiKey;
   const panelVisible = state.panelVisible;
   const { apiKey: tvdbApiKey, pin: tvdbPin } = loadTvdbSettings();
@@ -848,7 +976,32 @@ function revealApiSettings() {
 }
 
 function configurePanelCallbacks() {
+  const manualAction = action => () => {
+    try { Promise.resolve(action()).catch(error => toast(error.message)); }
+    catch (error) { toast(error.message); }
+  };
+  manualCapture = createManualCapture({
+    getContext: () => {
+      if (state.updateRequired || state.exportInProgress || state.submitInProgress) throw new Error('Wait for the current operation to finish before marking timestamps.');
+      const value = id => document.getElementById(`nfe-manual-${id}`)?.value || '';
+      const context = { provider: activeProviderName, showId: state.showId, imdbId: state.imdbId,
+        mediaType: value('media'), season: Number(value('season')), episode: Number(value('episode')),
+        episodeTitle: value('title').trim(), segmentType: value('type'), page: location.href };
+      if (state.showId && state.mediaType !== context.mediaType) throw new Error('The selected media type differs from the detected title. Open the correct playing title first.');
+      if (context.mediaType === 'movie' && !movieCaptureAllowedForProvider(activeProviderName)) throw new Error('Movie capture is temporarily disabled for this provider. TV episode capture remains available.');
+      validateManualIdentity(context);
+      return context;
+    },
+    record: item => recordExtractedSegments([item], activeProviderName),
+    render: updateManualCapture,
+  });
   window.nfePanelCallbacks = {
+    onManualStart: manualAction(() => manualCapture.mark('start')),
+    onManualEnd: manualAction(() => manualCapture.mark('end')),
+    onManualPreviewStart: manualAction(() => manualCapture.preview('start')),
+    onManualPreviewEnd: manualAction(() => manualCapture.preview('end')),
+    onManualSave: manualAction(() => manualCapture.save(document.getElementById('nfe-manual-reviewed')?.checked)),
+    onManualReset: () => manualCapture.reset(),
     onDiagnostics: () => {
       const movies = state.skyShowtimeMovieDiagnostics || [];
       if (!movies.length) { toast('Open a SkyShowtime movie first to capture its markers.'); return; }
@@ -865,6 +1018,7 @@ function configurePanelCallbacks() {
     onSubmit: submitToIntroDB,
     onClear: clearData,
     onImdbSet: () => {
+      manualCapture.reset('IMDb identity changed. Mark both boundaries again.');
       const value = document.getElementById('nfe-imdb-input').value.trim();
       if (!value) return;
       state.imdbId = value;
@@ -995,6 +1149,7 @@ export function bootstrapProvider({
     const inPlayer = isPlayerPage();
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
+      manualCapture?.reset('Page changed. Confirm the playing title/episode and mark both boundaries again.');
       scheduleCaptureSave();
       if (!inPlayer) {
         document.getElementById('nfe-panel')?.remove();
