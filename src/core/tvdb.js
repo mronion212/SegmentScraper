@@ -762,6 +762,12 @@ async function resolveTvdbSeriesId(imdbId) {
 export async function mapSeriesItemsToTvdb(items, providerCatalog) {
   if (!items.length) return { success: true, items: [], method: 'none' };
   const imdbId = items[0].imdb_id;
+  if (!/^tt\d{7,8}$/.test(imdbId || '')) {
+    return { success: false, reason: 'Confirm the correct IMDb version before TVDB mapping.' };
+  }
+  if (items.some(item => item.imdb_id !== imdbId)) {
+    return { success: false, reason: 'TVDB mapping requires segments from one confirmed IMDb title.' };
+  }
   const catalog = normalizeProviderEpisodes(providerCatalog);
   const providerSpecialKeys = new Set(catalog
     .filter(episode => episode.isSpecial)

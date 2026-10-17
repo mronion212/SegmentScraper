@@ -209,6 +209,7 @@ export function createPanel() {
     </div>
 
     <div id="nfe-imdb-feedback" role="status" style="font-size:11px;color:${colors.textSecondary};margin-bottom:8px;line-height:1.4"></div>
+    <div id="nfe-imdb-candidates" style="display:grid;gap:5px;max-height:180px;overflow:auto;margin-bottom:8px"></div>
     <div style="display:flex;gap:6px;margin-bottom:8px">
       <div style="flex:1;background:${colors.panelBg};border-radius:8px;padding:8px;text-align:center">
         <div id="nfe-cnt-ts"    style="font-size:20px;font-weight:700;color:#fff;line-height:1">0</div>

@@ -157,6 +157,27 @@ export function setDbStatus(msg) {
   if (el) el.textContent = `${state.mediaType === 'movie' ? 'Movie' : 'TV'} · IMDb ID: ${state.imdbId || 'Not set'}`;
 }
 
+function showImdbCandidates(candidates = []) {
+  const container = document.getElementById('nfe-imdb-candidates');
+  if (!container) return;
+  container.replaceChildren();
+  const showId = state.showId, title = state.showTitle, mediaType = state.mediaType;
+  for (const candidate of candidates) {
+    if (!/^tt\d{7,8}$/.test(candidate.imdbId || '')) continue;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = `${candidate.title} (${candidate.year || '?'}) · ${candidate.imdbId}`;
+    button.style.cssText = 'background:#242424;color:#fff;border:1px solid #444;border-radius:6px;padding:8px;text-align:left;cursor:pointer';
+    button.addEventListener('click', () => {
+      if (state.showId !== showId || state.showTitle !== title || state.mediaType !== mediaType) return;
+      const input = document.getElementById('nfe-imdb-input');
+      if (input) input.value = candidate.imdbId;
+      window.nfePanelCallbacks?.onImdbSet?.();
+    });
+    container.appendChild(button);
+  }
+}
+
 export function setIntrodbStatus(msg) {
   const el = document.getElementById('nfe-introdb-status');
   if (!el) return;
@@ -198,6 +219,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     state.showYear = year ? String(year) : '';
     state.dbSearchDone = false;
     state.imdbId = '';
+    showImdbCandidates();
     state.dedupCacheV2 = {};
     state.providerEpisodes = [];
     updateImdbInput();
@@ -264,6 +286,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
     } else {
       if (!isCurrentShow()) return;
       setDbStatus(`IMDb lookup failed: ${result.error}`);
+      showImdbCandidates(result.candidates);
     }
   }).catch(error => {
     console.error('[NFE] IMDb search error:', error);
@@ -1021,6 +1044,7 @@ function configurePanelCallbacks() {
       manualCapture.reset('IMDb identity changed. Mark both boundaries again.');
       const value = document.getElementById('nfe-imdb-input').value.trim();
       if (!value) return;
+      showImdbCandidates();
       state.imdbId = value;
       applyImdbIdToShow(value, state.showId, { overwrite: true });
       state.dedupCacheV2 = {};
@@ -1041,9 +1065,13 @@ function configurePanelCallbacks() {
       state.dbSearchDone = false;
       state.dedupCacheV2 = {};
       const searchShowId = state.showId;
+      const searchTitle = state.showTitle;
+      const searchMediaType = state.mediaType;
+      showImdbCandidates();
       searchImdbByTitle(query, state.showYear, { mediaType: state.mediaType || 'tv' }).then(result => {
+        if (state.showId !== searchShowId || state.showTitle !== searchTitle || state.mediaType !== searchMediaType) return;
         if (result.success) {
-          applyImdbIdToShow(result.imdbId, searchShowId);
+          applyImdbIdToShow(result.imdbId, searchShowId, { overwrite: true });
           if (searchShowId && state.showId !== searchShowId) return;
           state.imdbId = result.imdbId;
           updateImdbInput();
@@ -1052,6 +1080,7 @@ function configurePanelCallbacks() {
           loadCurrentIntrodbSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
         } else {
           setDbStatus(`IMDb lookup failed: ${result.error}`);
+          showImdbCandidates(result.candidates);
         }
       }).catch(error => {
         console.error('[NFE] Manual IMDb search error:', error);

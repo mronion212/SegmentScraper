@@ -65,3 +65,36 @@ test('desktop lookup uses the shared fallback while leaving final identity selec
   assert.deepEqual(await service.lookup('Gooische Vrouwen De Serie','tv'),[{id:series.id,title:series.l,year:2005,type:'tvSeries'}]);
   assert.equal(requests.length,2);
 });
+
+const regionalSeries = [
+  {id:'tt32816352',l:'Bestemming X Nederland',y:2024,qid:'tvSeries'},
+  {id:'tt26931980',l:'Bestemming X',y:2023,qid:'tvSeries'},
+];
+
+test('both clients require confirmation for regional versions even when one title is exact',async()=>{
+  for(const kind of ['userscript','desktop'])for(const results of [regionalSeries,[...regionalSeries].reverse()]){
+    const {core,requests}=client(kind,options=>options.onload({status:200,responseText:JSON.stringify({d:results})}));
+    const result=await core.searchImdbByTitle('Bestemming X');
+    assert.equal(result.success,false);
+    assert.equal(result.ambiguous,true);
+    assert.equal(result.imdbId,undefined);
+    assert.deepEqual(plain(result.candidates),results.map(r=>({imdbId:r.id,title:r.l,year:r.y})));
+    assert.equal(requests.length,1);
+    assert.equal((await core.searchImdbByTitle('Bestemming X',2024)).imdbId,'tt32816352');
+    assert.equal((await core.searchImdbByTitle('Bestemming X',2026)).success,false);
+  }
+});
+
+test('shared lookup requires confirmation for same-year namesakes and ambiguous title fallbacks',async()=>{
+  for(const kind of ['userscript','desktop']){
+    const {core}=client(kind,options=>options.onload({status:200,responseText:JSON.stringify({d:regionalSeries.map(r=>({...r,y:2024}))})}));
+    assert.equal((await core.searchImdbByTitle('Bestemming X',2024)).ambiguous,true);
+    const fallback=client(kind,(options,count)=>options.onload({status:200,responseText:JSON.stringify({d:count===1?[]:[series,{...series,id:'tt1234567'}]})}));
+    assert.equal((await fallback.core.searchImdbByTitle('Gooische Vrouwen De Serie')).ambiguous,true);
+  }
+});
+
+test('desktop displays both regional choices for explicit selection',async()=>{
+  const service=createUploadService({fetcher:async()=>Response.json({d:regionalSeries})});
+  assert.deepEqual(await service.lookup('Bestemming X','tv'),regionalSeries.map(r=>({id:r.id,title:r.l,year:r.y,type:r.qid})));
+});

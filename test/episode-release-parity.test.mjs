@@ -45,6 +45,21 @@ async function compare(episodes, count, itemExtras = {}) {
   return results[0];
 }
 
+test('both clients resolve TVDB through the corrected IMDb ID without reusing the previous series identity', async()=>{
+  const catalog=[{season:1,episode:1,title:'Episode 1'}];
+  for(const core of clients([episode(1,'2020-01-01')])){
+    for(const imdb_id of ['tt26931980','tt32816352']){
+      assert.equal((await core.mapSeriesItemsToTvdb([segment(1,{imdb_id})],catalog)).success,true);
+    }
+    assert.deepEqual(core.requests.filter(url=>url.includes('/search/remoteid/')).map(url=>url.split('/').at(-1)),['tt26931980','tt32816352']);
+    const requests=core.requests.length;
+    for(const items of [[segment(1,{imdb_id:'IMDB_PENDING'})],[segment(1,{imdb_id:'tt32816352'}),segment(1,{imdb_id:'tt26931980'})]]){
+      assert.equal((await core.mapSeriesItemsToTvdb(items,catalog)).success,false);
+    }
+    assert.equal(core.requests.length,requests);
+  }
+});
+
 test('a full Videoland catalogue uses the same unaired TVDB policy in both clients',async()=>{
   for(const extraDate of [undefined,'2999-01-01']){
     const rows=Array.from({length:9},(_,i)=>episode(i+1,'2020-01-01'));

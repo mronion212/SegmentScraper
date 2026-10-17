@@ -27,9 +27,15 @@ function loadShowHandler(searches) {
   let source = fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'bootstrap.js'), 'utf8')
     .replace(/^import .*$/gm, '')
     .replace(/^export /gm, '');
-  source += '\nglobalThis.bootstrapExports = { handleDetectedShow };';
+  source += '\nglobalThis.bootstrapExports = { handleDetectedShow, applyImdbIdToShow };';
 
   const noop = () => {};
+  const candidates = { children: [], replaceChildren() { this.children = []; }, appendChild(child) { this.children.push(child); } };
+  const input = { value: '' };
+  const window = { nfePanelCallbacks: { onImdbSet() {
+    state.imdbId = input.value;
+    context.bootstrapExports.applyImdbIdToShow(input.value, state.showId, { overwrite: true });
+  } } };
   const searchCalls = [];
   const context = vm.createContext({
     state,
@@ -49,13 +55,17 @@ function loadShowHandler(searches) {
     setTimeout,
     clearTimeout,
     location: { pathname: '' },
-    window: {},
-    document: { getElementById: () => null, addEventListener: noop, querySelector: () => null },
+    window,
+    document: {
+      getElementById: id => id === 'nfe-imdb-candidates' ? candidates : id === 'nfe-imdb-input' ? input : null,
+      createElement: () => ({ style: {}, addEventListener(event, listener) { this[event] = listener; } }),
+      addEventListener: noop, querySelector: () => null,
+    },
     getProviderConfig: () => ({ name: 'SkyShowtime' }),
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/core/output-policy.js'), 'utf8').replace(/^export /gm, ''), context);
   vm.runInContext(source, context, { filename: 'bootstrap.js' });
-  return { state, searchCalls, handleDetectedShow: context.bootstrapExports.handleDetectedShow };
+  return { state, candidates, searchCalls, handleDetectedShow: context.bootstrapExports.handleDetectedShow };
 }
 
 test('concurrent IMDb lookups only update items belonging to their SkyShowtime series', async () => {
@@ -98,4 +108,29 @@ test('movie IMDb lookup uses movie mode and updates the captured movie item', as
   assert.equal(bootstrap.state.imdbId, 'tt333');
   assert.equal(bootstrap.state.allItems[0].imdb_id, 'tt333');
   assert.equal(bootstrap.state.imdbIdsByShowId['movie-id'], 'tt333');
+});
+
+test('ambiguous series stay pending until a version is chosen, and old choices cannot affect another show', async () => {
+  const searches = { 'Bestemming X': deferred(), Other: deferred() };
+  const app = loadShowHandler(searches);
+  app.handleDetectedShow({ title: 'Bestemming X', showId: 'videoland-x' });
+  app.state.allItems.push({ _showId: 'videoland-x', imdb_id: 'IMDB_PENDING' });
+  searches['Bestemming X'].resolve({ success: false, ambiguous: true, error: 'Choose a version', candidates: [
+    { imdbId: 'tt32816352', title: 'Bestemming X Nederland', year: 2024 },
+    { imdbId: 'tt26931980', title: 'Bestemming X', year: 2023 },
+  ] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.state.imdbId, '');
+  assert.equal(app.state.allItems[0].imdb_id, 'IMDB_PENDING');
+  assert.equal(app.candidates.children.length, 2);
+  const dutch = app.candidates.children[0];
+  assert.match(dutch.textContent, /Bestemming X Nederland.*2024.*tt32816352/);
+  dutch.click();
+  assert.equal(app.state.imdbId, 'tt32816352');
+  assert.equal(app.state.allItems[0].imdb_id, 'tt32816352');
+  assert.equal(app.state.imdbIdsByShowId['videoland-x'], 'tt32816352');
+  app.handleDetectedShow({ title: 'Other', showId: 'other' });
+  assert.equal(app.candidates.children.length, 0);
+  dutch.click();
+  assert.equal(app.state.imdbId, '');
 });

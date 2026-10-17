@@ -347,21 +347,15 @@ function filterImdbTitleResults(results, mediaType = 'tv', exactTitle = '') {
 }
 
 function chooseImdbTitleResult(results, title, year) {
-  const normalizedTitle = String(title || '').trim().toLowerCase();
   const normalizedYear = year == null ? '' : String(year);
-  let best = results[0];
+  // A provider title can omit a regional suffix (e.g. Bestemming X Nederland).
+  // An exact title alone is therefore not evidence that a remake is the right one.
   if (normalizedYear) {
-    const byYearAndTitle = results.find(result =>
-      String(result?.y || '') === normalizedYear && String(result?.l || '').trim().toLowerCase() === normalizedTitle
-    );
-    const byYear = results.find(result => String(result?.y || '') === normalizedYear);
-    if (byYearAndTitle) best = byYearAndTitle;
-    else if (byYear) best = byYear;
-  } else {
-    const exact = results.find(result => String(result?.l || '').trim().toLowerCase() === normalizedTitle);
-    if (exact) best = exact;
+    const byYear = results.filter(result => String(result?.y || '') === normalizedYear);
+    if (byYear.length === 1) return byYear[0];
+    return null;
   }
-  return best;
+  return results.length === 1 ? results[0] : null;
 }
 
 function resolveImdbSearchResponse(data, title, year, mediaType, exactTitle = false) {
@@ -371,6 +365,12 @@ function resolveImdbSearchResponse(data, title, year, mediaType, exactTitle = fa
   if (!results.length) return { success: false, error: 'Not found on IMDb' };
 
   const best = chooseImdbTitleResult(results, title, year);
+  if (!best) return {
+    success: false,
+    ambiguous: true,
+    error: 'Confirm the correct version below; the title or year is not sufficient to choose automatically.',
+    candidates: results.map(result => ({ imdbId: result.id, title: result.l, year: result.y })),
+  };
   const imdbId = best?.id;
   if (!imdbId || !String(imdbId).startsWith('tt')) {
     return { success: false, error: 'Could not obtain a valid IMDb ID' };
@@ -1440,6 +1440,12 @@ async function resolveTvdbSeriesId(imdbId) {
 async function mapSeriesItemsToTvdb(items, providerCatalog) {
   if (!items.length) return { success: true, items: [], method: 'none' };
   const imdbId = items[0].imdb_id;
+  if (!/^tt\d{7,8}$/.test(imdbId || '')) {
+    return { success: false, reason: 'Confirm the correct IMDb version before TVDB mapping.' };
+  }
+  if (items.some(item => item.imdb_id !== imdbId)) {
+    return { success: false, reason: 'TVDB mapping requires segments from one confirmed IMDb title.' };
+  }
   const catalog = normalizeProviderEpisodes(providerCatalog);
   const providerSpecialKeys = new Set(catalog
     .filter(episode => episode.isSpecial)
