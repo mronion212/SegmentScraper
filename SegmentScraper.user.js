@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         SegmentScraper - Multi-Provider Timestamps Extractor
-// @version      1.12.8
+// @version      1.12.9
 // @namespace    https://github.com/mronion212/SegmentScraper
 // @description  Extracts intro/recap/outro timestamps from streaming services. Auto IMDb lookup. Submits to IntroDB with deduplication.
 // @author       mronion212
@@ -35,7 +35,7 @@
 (function() {
   'use strict';
   const _GM_xmlhttpRequest = typeof GM_xmlhttpRequest !== 'undefined' ? GM_xmlhttpRequest : null;
-  const SEGMENTSCRAPER_VERSION = "1.12.8";
+  const SEGMENTSCRAPER_VERSION = "1.12.9";
   const SEGMENTSCRAPER_UPDATE_URL = "https://raw.githubusercontent.com/mronion212/SegmentScraper/main/SegmentScraper.user.js";
 
 
@@ -69,6 +69,7 @@ const createState = (providerName) => ({
   allItems: [],
   knownMovieScenes: [],
   imdbId: '',
+  imdbCandidates: [],
   dbSearchDone: false,
   dbStatusMsg: `Waiting for ${providerName} metadata...`,
   showTitle: '',
@@ -2690,6 +2691,7 @@ function createPanel() {
   setupPanelEventListeners();
   const feedback = document.getElementById('nfe-imdb-feedback');
   if (feedback) feedback.textContent = state.dbStatusMsg || '';
+  window.nfePanelCallbacks?.onPanelReady?.();
 
   panel.addEventListener('click', e => e.stopPropagation());
   panel.addEventListener('mousedown', e => e.stopPropagation());
@@ -3508,6 +3510,9 @@ function setDbStatus(msg) {
 }
 
 function showImdbCandidates(candidates = []) {
+  // Lookup can finish before the user opens the panel. Retain its choices so
+  // creating (or recreating) the panel does not require another search.
+  state.imdbCandidates = candidates;
   const container = document.getElementById('nfe-imdb-candidates');
   if (!container) return;
   container.replaceChildren();
@@ -3635,7 +3640,7 @@ function handleDetectedShow({ title, showId = null, year = '', imdbOverride = nu
       loadCurrentIntrodbSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
     } else {
       if (!isCurrentShow()) return;
-      setDbStatus(`IMDb lookup failed: ${result.error}`);
+      setDbStatus(result.ambiguous ? 'Multiple IMDb matches. Choose the version you are watching:' : `IMDb lookup failed: ${result.error}`);
       showImdbCandidates(result.candidates);
     }
   }).catch(error => {
@@ -4334,6 +4339,7 @@ function resetCapturedData(message = 'Data cleared') {
   setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
   setIntrodbStatus('');
   updateImdbInput();
+  showImdbCandidates();
   toast(message);
 }
 
@@ -4369,6 +4375,7 @@ function configurePanelCallbacks() {
     render: updateManualCapture,
   });
   window.nfePanelCallbacks = {
+    onPanelReady: () => showImdbCandidates(state.imdbCandidates),
     onManualStart: manualAction(() => manualCapture.mark('start')),
     onManualEnd: manualAction(() => manualCapture.mark('end')),
     onManualPreviewStart: manualAction(() => manualCapture.preview('start')),
@@ -4429,7 +4436,7 @@ function configurePanelCallbacks() {
           updateCounters();
           loadCurrentIntrodbSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
         } else {
-          setDbStatus(`IMDb lookup failed: ${result.error}`);
+          setDbStatus(result.ambiguous ? 'Multiple IMDb matches. Choose the version you are watching:' : `IMDb lookup failed: ${result.error}`);
           showImdbCandidates(result.candidates);
         }
       }).catch(error => {

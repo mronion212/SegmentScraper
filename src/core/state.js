@@ -28,6 +28,7 @@ export const createState = (providerName) => ({
   allItems: [],
   knownMovieScenes: [],
   imdbId: '',
+  imdbCandidates: [],
   dbSearchDone: false,
   dbStatusMsg: `Waiting for ${providerName} metadata...`,
   showTitle: '',

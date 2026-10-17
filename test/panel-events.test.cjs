@@ -32,7 +32,7 @@ class FakeElement {
   }
 }
 
-function loadPanel(providerName = 'netflix', stateOverrides = {}) {
+function loadPanel(providerName = 'netflix', stateOverrides = {}, callbacks = {}) {
   const ids = [
     'nfe-close',
     'nfe-export',
@@ -67,7 +67,7 @@ function loadPanel(providerName = 'netflix', stateOverrides = {}) {
     tvdbApiKey: '',
     ...stateOverrides,
   };
-  const window = { nfePanelCallbacks: {} };
+  const window = { nfePanelCallbacks: callbacks };
   const config = {
     name: 'Test Provider',
     colors: {
@@ -115,6 +115,12 @@ test('a stored IntroDB API key is not rendered into the panel', () => {
   const input = html.match(/<input id="nfe-apikey-input"[^>]*>/)[0];
   assert.match(input,/type="password"/);
   assert.doesNotMatch(input,/\bvalue\s*=/);
+});
+
+test('creating a panel restores completed IMDb choices after its controls are mounted', () => {
+  let ready = 0;
+  loadPanel('videoland', {}, { onPanelReady() { ready++; } });
+  assert.equal(ready, 1);
 });
 
 test('provider panels do not expose removed Prime bulk collection controls', () => {

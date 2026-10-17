@@ -343,6 +343,7 @@ export function createPanel() {
   setupPanelEventListeners();
   const feedback = document.getElementById('nfe-imdb-feedback');
   if (feedback) feedback.textContent = state.dbStatusMsg || '';
+  window.nfePanelCallbacks?.onPanelReady?.();
 
   panel.addEventListener('click', e => e.stopPropagation());
   panel.addEventListener('mousedown', e => e.stopPropagation());

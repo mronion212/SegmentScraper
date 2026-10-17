@@ -10,7 +10,8 @@ function deferred() {
   return { promise, resolve };
 }
 
-function loadShowHandler(searches) {
+function loadShowHandler(searches, { panelInitiallyPresent = true } = {}) {
+  let panelPresent = panelInitiallyPresent;
   const state = {
     allItems: [],
     imdbId: '',
@@ -27,7 +28,7 @@ function loadShowHandler(searches) {
   let source = fs.readFileSync(path.join(__dirname, '..', 'src', 'providers', 'bootstrap.js'), 'utf8')
     .replace(/^import .*$/gm, '')
     .replace(/^export /gm, '');
-  source += '\nglobalThis.bootstrapExports = { handleDetectedShow, applyImdbIdToShow };';
+  source += '\nglobalThis.bootstrapExports = { handleDetectedShow, applyImdbIdToShow, showImdbCandidates };';
 
   const noop = () => {};
   const candidates = { children: [], replaceChildren() { this.children = []; }, appendChild(child) { this.children.push(child); } };
@@ -57,7 +58,7 @@ function loadShowHandler(searches) {
     location: { pathname: '' },
     window,
     document: {
-      getElementById: id => id === 'nfe-imdb-candidates' ? candidates : id === 'nfe-imdb-input' ? input : null,
+      getElementById: id => !panelPresent ? null : id === 'nfe-imdb-candidates' ? candidates : id === 'nfe-imdb-input' ? input : null,
       createElement: () => ({ style: {}, addEventListener(event, listener) { this[event] = listener; } }),
       addEventListener: noop, querySelector: () => null,
     },
@@ -65,7 +66,10 @@ function loadShowHandler(searches) {
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../src/core/output-policy.js'), 'utf8').replace(/^export /gm, ''), context);
   vm.runInContext(source, context, { filename: 'bootstrap.js' });
-  return { state, candidates, searchCalls, handleDetectedShow: context.bootstrapExports.handleDetectedShow };
+  return { state, candidates, searchCalls, handleDetectedShow: context.bootstrapExports.handleDetectedShow,
+    openPanel() { panelPresent = true; context.bootstrapExports.showImdbCandidates(state.imdbCandidates); },
+    removePanel() { panelPresent = false; candidates.replaceChildren(); },
+  };
 }
 
 test('concurrent IMDb lookups only update items belonging to their SkyShowtime series', async () => {
@@ -133,4 +137,29 @@ test('ambiguous series stay pending until a version is chosen, and old choices c
   assert.equal(app.candidates.children.length, 0);
   dutch.click();
   assert.equal(app.state.imdbId, '');
+});
+
+test('automatic lookup retains choices before panel creation and restores them without another search', async () => {
+  const searches = { 'Bestemming X': deferred(), Other: deferred() };
+  const app = loadShowHandler(searches, { panelInitiallyPresent: false });
+  app.handleDetectedShow({ title: 'Bestemming X', showId: 'videoland-x' });
+  searches['Bestemming X'].resolve({ success: false, ambiguous: true, candidates: [
+    { imdbId: 'tt32816352', title: 'Bestemming X Nederland', year: 2024 },
+    { imdbId: 'tt26931980', title: 'Bestemming X', year: 2023 },
+  ] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.state.imdbCandidates.length, 2);
+  assert.equal(app.candidates.children.length, 0);
+  assert.doesNotMatch(app.state.dbStatusMsg, /failed|below/i);
+  assert.match(app.state.dbStatusMsg, /Choose the version/);
+  app.openPanel();
+  assert.equal(app.candidates.children.length, 2);
+  app.removePanel();
+  app.openPanel();
+  assert.equal(app.candidates.children.length, 2);
+  assert.equal(app.searchCalls.length, 1);
+  app.removePanel();
+  app.handleDetectedShow({ title: 'Other', showId: 'other' });
+  app.openPanel();
+  assert.equal(app.candidates.children.length, 0);
 });

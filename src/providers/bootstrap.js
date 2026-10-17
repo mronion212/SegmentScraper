@@ -158,6 +158,9 @@ export function setDbStatus(msg) {
 }
 
 function showImdbCandidates(candidates = []) {
+  // Lookup can finish before the user opens the panel. Retain its choices so
+  // creating (or recreating) the panel does not require another search.
+  state.imdbCandidates = candidates;
   const container = document.getElementById('nfe-imdb-candidates');
   if (!container) return;
   container.replaceChildren();
@@ -285,7 +288,7 @@ export function handleDetectedShow({ title, showId = null, year = '', imdbOverri
       loadCurrentIntrodbSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
     } else {
       if (!isCurrentShow()) return;
-      setDbStatus(`IMDb lookup failed: ${result.error}`);
+      setDbStatus(result.ambiguous ? 'Multiple IMDb matches. Choose the version you are watching:' : `IMDb lookup failed: ${result.error}`);
       showImdbCandidates(result.candidates);
     }
   }).catch(error => {
@@ -984,6 +987,7 @@ function resetCapturedData(message = 'Data cleared') {
   setDbStatus(`Waiting for ${activeProviderConfig.name} metadata...`);
   setIntrodbStatus('');
   updateImdbInput();
+  showImdbCandidates();
   toast(message);
 }
 
@@ -1019,6 +1023,7 @@ function configurePanelCallbacks() {
     render: updateManualCapture,
   });
   window.nfePanelCallbacks = {
+    onPanelReady: () => showImdbCandidates(state.imdbCandidates),
     onManualStart: manualAction(() => manualCapture.mark('start')),
     onManualEnd: manualAction(() => manualCapture.mark('end')),
     onManualPreviewStart: manualAction(() => manualCapture.preview('start')),
@@ -1079,7 +1084,7 @@ function configurePanelCallbacks() {
           updateCounters();
           loadCurrentIntrodbSegments(result.imdbId).catch(error => setIntrodbStatus(error.message));
         } else {
-          setDbStatus(`IMDb lookup failed: ${result.error}`);
+          setDbStatus(result.ambiguous ? 'Multiple IMDb matches. Choose the version you are watching:' : `IMDb lookup failed: ${result.error}`);
           showImdbCandidates(result.candidates);
         }
       }).catch(error => {
